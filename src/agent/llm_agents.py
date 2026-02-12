@@ -3,8 +3,17 @@ import re
 from groq import AsyncGroq
 import asyncio
 from .config import MODEL_NAME, ACTION_MODEL_NAME, FILTER_MODEL_NAME, ORACLE_MODEL, MAX_BATCH_SIZE
-from .element_utils import format_element_summary
+from .element_utils import format_element_summary, format_elements_by_proximity
 from .logging_utils import log, log_verbose
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> tags and their content from model output."""
+    if not text:
+        return text
+    # Handle both closed tags and unclosed tags (truncated output)
+    return re.sub(r'<think>.*?</think>|<think>.*', '', text, flags=re.DOTALL).strip()
+
 
 def _extract_summary(text: str) -> str:
     """Parse GOAL, DATA, and PROGRESS sections from overview LLM response.
@@ -40,7 +49,7 @@ async def filter_page_content(client: AsyncGroq, all_text: list[str]) -> list[st
             max_completion_tokens=500,
             temperature=0,
         )
-        result = response.choices[0].message.content.strip()
+        result = _strip_think_tags(response.choices[0].message.content)
         return [line.strip() for line in result.splitlines() if line.strip()]
 
     try:
@@ -122,7 +131,7 @@ Page text:
             max_completion_tokens=1500,
             temperature=0,
         )
-        result = response.choices[0].message.content.strip()
+        result = _strip_think_tags(response.choices[0].message.content)
 
         usage = response.usage
         if usage:
@@ -157,11 +166,10 @@ async def extract_learning(client: AsyncGroq, challenge_summary: str) -> str:
                 {"role": "system", "content": "Given this interaction summary, extract a general strategy lesson about navigating web pages. NEVER include specific codes, values, URLs, or data from this interaction — only reusable strategies. One sentence max."},
                 {"role": "user", "content": challenge_summary},
             ],
-            max_completion_tokens=200,
-            reasoning_effort="none",
+            max_completion_tokens=600,
             temperature=0,
         )
-        result = response.choices[0].message.content.strip()
+        result = _strip_think_tags(response.choices[0].message.content)
         log(f"  Learning extracted: {result}")
         return result
     except Exception as e:
@@ -254,7 +262,8 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
                            state_changed: bool = True, unchanged_count: int = 0,
                            challenge_summary: str = "",
                            agent_learnings: list[str] = None,
-                           prev_elements: list = None) -> tuple[str, str]:
+                           prev_elements: list = None,
+                           last_action_pos: tuple = None) -> tuple[str, str]:
     """Overview agent - analyzes full page with memory of previous actions.
 
     Args:
@@ -292,7 +301,7 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
         log(f"  Filtered text: {len(all_text)} -> {len(filtered_text)} items")
     structured_text = "\n".join(filtered_text)
 
-    el_summary = format_element_summary(elements)
+    el_summary = format_elements_by_proximity(elements, last_action_pos)
 
     # Deduplicate: remove data_attrs already present in element dataValue fields
     el_data_values = set()
@@ -346,10 +355,9 @@ Page content:
             model=MODEL_NAME,
             messages=memory,
             max_completion_tokens=800,
-            reasoning_effort="none",
             temperature=0,
         )
-        result = response.choices[0].message.content.strip()
+        result = _strip_think_tags(response.choices[0].message.content)
 
         # Log token usage
         usage = response.usage
@@ -430,12 +438,10 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_resul
     if usage:
         log(f"  Action LLM ({len(messages)} msgs, {usage.prompt_tokens} prompt + {usage.completion_tokens} completion tokens):")
 
-    content = response.choices[0].message.content
+    content = _strip_think_tags(response.choices[0].message.content)
     if not content:
         log("  Action LLM: (empty response)")
         return [{"a": "error", "error": "Empty response"}]
-
-    content = content.strip()
     # Log raw action LLM output
     log(f"  Action LLM: {content}")
     messages.append({"role": "assistant", "content": content})

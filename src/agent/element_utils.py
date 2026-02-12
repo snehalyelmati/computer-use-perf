@@ -118,11 +118,16 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                     abbr = 'scroll';
                 }
 
+                const rect = el.getBoundingClientRect();
                 return {
                     tag: abbr, text: text, type: type, role: role,
                     state: state, disabled: disabled, href: href,
                     value: value, checked: checked, selected: selected,
-                    name: name, dataValue: dataValue
+                    name: name, dataValue: dataValue,
+                    bbox: {
+                        x: Math.round(rect.x + rect.width / 2),
+                        y: Math.round(rect.y + rect.height / 2)
+                    }
                 };
             }''')
 
@@ -174,9 +179,9 @@ def format_element_summary(elements: list, max_elements: int = None) -> str:
 
         text = el["text"] if el["text"] else el["type"] or "?"
 
-        # Show current value for inputs (helps LLM know what's already filled)
+        # Show current value for inputs and radio/checkbox (helps LLM know state and identify correct options)
         value_info = ""
-        if el.get('value') and el['tag'] == 'inp':
+        if el.get('value') and (el['tag'] == 'inp' or el.get('role') in ('radio', 'checkbox')):
             value_info = f" value=\"{el['value']}\""
 
         # Show data-value/data-code if present (might contain answer)
@@ -199,6 +204,47 @@ def format_element_summary(elements: list, max_elements: int = None) -> str:
         el_strs.append(f"... and {len(elements) - max_elements} more elements")
 
     return "\n".join(el_strs)
+
+
+def format_elements_by_proximity(elements: list, last_pos: tuple = None,
+                                  proximity_threshold: int = 200) -> str:
+    """Format elements separated into Nearby and Other sections.
+
+    Args:
+        elements: List of element metadata dicts with bbox
+        last_pos: (x, y) center of last interacted element, or None
+        proximity_threshold: Max distance in pixels to be considered "nearby"
+    """
+    if not last_pos or not elements:
+        return format_element_summary(elements)
+
+    def distance(el):
+        bbox = el.get('bbox')
+        if not bbox:
+            return float('inf')
+        return ((bbox['x'] - last_pos[0])**2 + (bbox['y'] - last_pos[1])**2) ** 0.5
+
+    nearby = []
+    other = []
+    for el in elements:
+        if distance(el) <= proximity_threshold:
+            nearby.append(el)
+        else:
+            other.append(el)
+
+    # Sort nearby by distance (closest first)
+    nearby.sort(key=distance)
+
+    parts = []
+    if nearby:
+        parts.append("=== NEARBY ELEMENTS (from last action) ===")
+        parts.append(format_element_summary(nearby))
+    if other:
+        parts.append("\n=== OTHER ELEMENTS ===")
+        parts.append(format_element_summary(other))
+
+    return "\n".join(parts)
+
 
 def format_context(overview: str, elements: list) -> str:
     """Format the analysis and elements for the action LLM.

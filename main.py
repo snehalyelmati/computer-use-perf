@@ -65,6 +65,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         agent_learnings = []  # Persistent learnings across entire run
         prev_elements = []  # Previous step's elements for diff
         pending_learning_task = None
+        last_action_pos = None  # (x, y) of last interacted element for proximity
 
         for step in range(500):
             current_url = page.url
@@ -90,6 +91,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                     consecutive_failures = 0
                     recent_action_sigs.clear()
                     prev_elements = []
+                    last_action_pos = None  # Reset proximity - new challenge starts fresh
 
                 log(f"\n[Challenge {challenge}] {current_url}")
                 prev_url = current_url
@@ -151,7 +153,8 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             overview, challenge_summary = await analyze_overview(
                 client, content, elements, overview_messages,
                 last_results, state_changed, unchanged_count,
-                challenge_summary, agent_learnings, prev_elements
+                challenge_summary, agent_learnings, prev_elements,
+                last_action_pos
             )
             prev_elements = elements
 
@@ -182,8 +185,8 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             if len(recent_action_sigs) > REPETITION_WINDOW:
                 recent_action_sigs.pop(0)
 
-            # Detect repetition: if only 1-3 unique signatures in last REPETITION_WINDOW steps
-            if len(recent_action_sigs) >= REPETITION_WINDOW and len(set(recent_action_sigs)) <= 3:
+            # Detect repetition: if only 1 unique signature in last REPETITION_WINDOW steps (exact repeat)
+            if len(recent_action_sigs) >= REPETITION_WINDOW and len(set(recent_action_sigs)) == 1:
                 log(f"  Repetition detected: {len(set(recent_action_sigs))} unique actions in last {REPETITION_WINDOW} steps — running diagnosis")
                 challenge_summary = await diagnose_failure(
                     client, challenge_summary, content, elements,
@@ -200,6 +203,13 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
 
             # ACT - execute batch with verification
             results = await execute_batch(page, actions, handles)
+
+            # Track position of LAST action with an element index (handles batching)
+            for action in reversed(actions):
+                idx = action.get('n')
+                if idx is not None and 0 <= idx < len(elements) and elements[idx].get('bbox'):
+                    last_action_pos = (elements[idx]['bbox']['x'], elements[idx]['bbox']['y'])
+                    break
 
             # Log each executed action result
             for action, result in results:

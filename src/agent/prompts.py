@@ -12,7 +12,6 @@ Available actions:
 {"a":"watch","v":"Capture"} - watch for element with text and click it when it appears
 {"a":"scroll","v":"500"} - scroll down 500px (negative = up)
 {"a":"scroll","n":5,"v":"500"} - scroll element [5] down 500px
-{"a":"decode","v":"SGVsbG8="} - decode an encoded value (auto-detects base64, hex, rot13, url-encoding, reverse, binary)
 {"a":"wait","v":"3"} - wait for N seconds (max 10)
 
 Examples:
@@ -58,9 +57,10 @@ PROGRESS: One line — use the page's own counters as source of truth. Note what
 NEXT: List ALL steps that can be batched with current indices (up to 8). Maximize batching (e.g., type + submit together). Reference elements by [N]. Only suggest type if the exact value is in DATA. If value not discovered, explore only.
 
 Rules:
-- You direct the action agent, not perform tasks yourself. Use decode action for encoded values — NEVER decode in your head.
+- NEARBY ELEMENTS section contains elements close to your last action — check these FIRST for next steps (submit buttons, related inputs).
+- You direct the action agent, not perform tasks yourself.
 - NEVER guess or fabricate values. Only use data literally seen on the page, in hidden content, data attributes, or action results.
-- Actions: click, type, hover, drag, key, draw, watch, scroll, decode, wait. No others.
+- Actions: click, type, hover, drag, key, draw, watch, scroll, wait. No others.
 - UNCHANGED state = previous action had NO effect. Try completely different approach.
 - If clicking multiple elements without progress, STOP — re-examine ALL elements. The right action is likely one you're overlooking, not the next button in sequence.
 - Element annotations: [checked]=selected, [disabled]=not clickable, value="X"=current input.
