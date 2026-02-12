@@ -154,11 +154,11 @@ async def extract_learning(client: AsyncGroq, challenge_summary: str) -> str:
         response = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {"role": "system", "content": "Given this interaction summary, what's a general lesson about navigating web pages effectively? Be concise."},
+                {"role": "system", "content": "Given this interaction summary, extract a general strategy lesson about navigating web pages. NEVER include specific codes, values, URLs, or data from this interaction — only reusable strategies. One sentence max."},
                 {"role": "user", "content": challenge_summary},
             ],
             max_completion_tokens=200,
-
+            reasoning_effort="none",
             temperature=0,
         )
         result = response.choices[0].message.content.strip()
@@ -184,11 +184,77 @@ def _format_results(last_results: list[tuple[dict, str]]) -> str:
     return "Previous actions:\n" + "\n".join(lines)
 
 
+def _compute_element_diff(prev_elements: list, elements: list) -> str:
+    """Compute diff between previous and current elements, highlighting state changes, new/removed elements."""
+    if not prev_elements:
+        return ""
+
+    def _el_key(el):
+        return f"{el['tag']}:{el.get('text', '')[:30]}"
+
+    prev_by_key = {}
+    for i, el in enumerate(prev_elements):
+        key = _el_key(el)
+        prev_by_key[key] = (i, el)
+
+    curr_by_key = {}
+    for i, el in enumerate(elements):
+        key = _el_key(el)
+        curr_by_key[key] = (i, el)
+
+    state_changes = []
+    new_elements = []
+    removed_elements = []
+
+    # Detect state changes and new elements
+    for key, (idx, el) in curr_by_key.items():
+        if key in prev_by_key:
+            prev_idx, prev_el = prev_by_key[key]
+            prev_state = prev_el.get('state', '')
+            curr_state = el.get('state', '')
+            if prev_state != curr_state:
+                tag = el.get('role') or el['tag']
+                text = el.get('text', '')[:20]
+                changes = []
+                if 'disabled' in prev_state and 'disabled' not in curr_state:
+                    changes.append("now enabled (was disabled)")
+                elif 'disabled' not in prev_state and 'disabled' in curr_state:
+                    changes.append("now disabled")
+                if 'checked' not in prev_state and 'checked' in curr_state:
+                    changes.append("now checked")
+                elif 'checked' in prev_state and 'checked' not in curr_state:
+                    changes.append("now unchecked")
+                if not changes:
+                    changes.append(f"state: '{prev_state}' -> '{curr_state}'")
+                state_changes.append(f"[{idx}] {tag} \"{text}\" {', '.join(changes)}")
+        else:
+            tag = el.get('role') or el['tag']
+            text = el.get('text', '')[:20]
+            new_elements.append(f"[{idx}] {tag} \"{text}\"")
+
+    # Detect removed elements
+    for key, (idx, el) in prev_by_key.items():
+        if key not in curr_by_key:
+            tag = el.get('role') or el['tag']
+            text = el.get('text', '')[:20]
+            removed_elements.append(f"{tag} \"{text}\"")
+
+    parts = []
+    if state_changes:
+        parts.append("*** State changes: " + " | ".join(state_changes[:10]) + " ***")
+    if new_elements:
+        parts.append("*** New elements: " + ", ".join(new_elements[:10]) + " ***")
+    if removed_elements:
+        parts.append("*** Removed elements: " + ", ".join(removed_elements[:10]) + " ***")
+    return "\n".join(parts)
+
+
 async def analyze_overview(client: AsyncGroq, content: dict, elements: list, memory: list,
                            last_results: list[tuple[dict, str]] = None,
                            state_changed: bool = True, unchanged_count: int = 0,
                            challenge_summary: str = "",
-                           agent_learnings: list[str] = None) -> tuple[str, str]:
+                           agent_learnings: list[str] = None,
+                           prev_elements: list = None) -> tuple[str, str]:
     """Overview agent - analyzes full page with memory of previous actions.
 
     Args:
@@ -200,6 +266,7 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
         state_changed: Whether page state changed since last step
         unchanged_count: Number of consecutive unchanged states
         challenge_summary: Persistent summary from previous steps (survives truncation)
+        prev_elements: Elements from previous step for diff computation
 
     Returns:
         tuple: (overview_text, updated_challenge_summary)
@@ -223,12 +290,17 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
     filtered_text = await filter_page_content(client, all_text)
     if len(filtered_text) != len(all_text):
         log(f"  Filtered text: {len(all_text)} -> {len(filtered_text)} items")
-    forms = content.get('forms', [])
     structured_text = "\n".join(filtered_text)
-    if forms:
-        structured_text += f"\nForms: {', '.join(forms)}"
 
     el_summary = format_element_summary(elements)
+
+    # Deduplicate: remove data_attrs already present in element dataValue fields
+    el_data_values = set()
+    for el in elements:
+        if el.get('dataValue'):
+            for attr in el['dataValue'].split('; '):
+                el_data_values.add(attr.strip())
+    data_attrs = [a for a in data_attrs if a not in el_data_values]
 
     page_content = f"""URL: {content['url']}
 Title: {content['title']}
@@ -251,6 +323,10 @@ Page content:
     results_summary = _format_results(last_results or [])
     if results_summary:
         combined_content = results_summary + "\n\n"
+    # Add element state diff
+    diff_summary = _compute_element_diff(prev_elements or [], elements)
+    if diff_summary:
+        combined_content += diff_summary + "\n\n"
     combined_content += f"Current page state:\n{page_content}\n\nWhat should we do next?"
 
     memory.append({
@@ -270,7 +346,7 @@ Page content:
             model=MODEL_NAME,
             messages=memory,
             max_completion_tokens=800,
-
+            reasoning_effort="none",
             temperature=0,
         )
         result = response.choices[0].message.content.strip()

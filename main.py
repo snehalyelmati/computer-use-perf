@@ -63,6 +63,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         consecutive_failures = 0  # Track consecutive steps with failures
         recent_action_sigs = []  # Track action signatures for repetition detection
         agent_learnings = []  # Persistent learnings across entire run
+        prev_elements = []  # Previous step's elements for diff
         pending_learning_task = None
 
         for step in range(500):
@@ -88,6 +89,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                     challenge_summary = ""
                     consecutive_failures = 0
                     recent_action_sigs.clear()
+                    prev_elements = []
 
                 log(f"\n[Challenge {challenge}] {current_url}")
                 prev_url = current_url
@@ -149,8 +151,9 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             overview, challenge_summary = await analyze_overview(
                 client, content, elements, overview_messages,
                 last_results, state_changed, unchanged_count,
-                challenge_summary, agent_learnings
+                challenge_summary, agent_learnings, prev_elements
             )
+            prev_elements = elements
 
             # Log full overview (multi-line)
             log(f"  Overview LLM:")

@@ -16,6 +16,10 @@ def extract_prioritized_data_attrs(soup) -> list:
         for key, val in el.attrs.items():
             if not val or not isinstance(val, str) or len(val) > 200:
                 continue
+            # Skip generic boolean/state noise
+            if val.lower() in ('true', 'false', '0', '1', 'on', 'off', 'yes', 'no',
+                                'checked', 'unchecked', 'open', 'closed', 'enabled', 'disabled'):
+                continue
             if key.startswith('data-') or key in ('aria-label', 'title', 'alt'):
                 attr_str = f"{key}={val}"
                 if attr_str in seen:
@@ -89,25 +93,12 @@ async def extract_structured_content(page: Page) -> dict:
                 seen_text.add(text)
                 all_text.append(text)
 
-    # Extract form elements with context
-    forms = []
-    for inp in soup.find_all(['input', 'textarea']):
-        input_type = inp.get('type', 'text')
-        placeholder = inp.get('placeholder', '')
-        label = ''
-        if inp.get('id'):
-            label_el = soup.find('label', {'for': inp.get('id')})
-            if label_el:
-                label = label_el.get_text(strip=True)
-        forms.append(f"{input_type}: {label or placeholder or 'input'}")
-
     # Get full text for analysis
     full_text = soup.get_text(separator='\n', strip=True)
 
     return {
         "title": title_text,
         "all_text": all_text,
-        "forms": forms,
         "full_text": full_text,
         "hidden_content": hidden_content,
         "data_attrs": data_attrs,

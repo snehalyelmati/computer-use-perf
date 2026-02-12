@@ -17,11 +17,14 @@ async def extract_elements(page: Page) -> tuple[list, list]:
     selector_handles = await page.query_selector_all(selector)
 
     # Second pass: find all elements with cursor:pointer computed style
+    # Skip containers that wrap interactive children — the child is already captured
     cursor_handles = await page.evaluate_handle('''() => {
         const all = document.querySelectorAll('*');
         const results = [];
         for (const el of all) {
             if (window.getComputedStyle(el).cursor === 'pointer') {
+                const interactiveChild = el.querySelector('button, input, textarea, select, a[href], [role="button"], [role="link"], [role="checkbox"], [role="radio"]');
+                if (interactiveChild) continue;
                 results.push(el);
             }
         }
@@ -122,6 +125,14 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                     name: name, dataValue: dataValue
                 };
             }''')
+
+            # Skip elements with no useful content for the LLM
+            has_content = (metadata['text'] or metadata['value'] or metadata['name'] or
+                           metadata['dataValue'] or metadata['href'])
+            is_core_interactive = metadata['tag'] in ('inp', 'txt', 'sel', 'canvas', 'scroll')
+            has_semantic_role = metadata['role'] in ('button', 'radio', 'checkbox', 'tab', 'switch', 'menuitem', 'option', 'link', 'slider')
+            if not has_content and not is_core_interactive and not has_semantic_role:
+                continue
 
             # Assign sequential index that matches position in visible_handles
             metadata['index'] = len(elements)
