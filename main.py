@@ -49,14 +49,12 @@ Output ONLY one JSON object."""
 # Overview agent prompt - general purpose, no assumptions
 OVERVIEW_PROMPT = """Analyze this page and determine what to do next.
 
-{content}
-
 Output:
 1. GOAL: What is the main task on this page?
-2. DATA: What information is needed to complete the goal? Extract exact values from the page content.
-3. NEXT: What is the ONE action to take now? Only these actions are possible: click a button, type in an input, or scroll.
+2. DATA: Extract any codes, values, or data from the page content that might be needed.
+3. NEXT: What is the ONE action to take now? Reference elements by their index number [N].
 
-Keep it brief. Focus on the primary task, not secondary elements."""
+If state is UNCHANGED, your previous action had no effect - try something different."""
 
 
 async def extract_structured_content(page: Page) -> dict:
@@ -142,18 +140,37 @@ async def extract_structured_content(page: Page) -> dict:
     }
 
 
-async def analyze_overview(client: AsyncGroq, content: dict, memory: list) -> str:
+async def analyze_overview(client: AsyncGroq, content: dict, elements: list, memory: list,
+                           last_action: dict = None, last_result: str = None,
+                           state_changed: bool = True, unchanged_count: int = 0) -> str:
     """Overview agent - analyzes full page with memory of previous actions.
 
     Args:
         client: Groq client
         content: Structured page content from extract_structured_content()
+        elements: List of interactive elements with indices
         memory: List of previous messages for context (modified in place)
+        last_action: Previous action dict
+        last_result: Result string from previous action
+        state_changed: Whether page state changed since last step
+        unchanged_count: Number of consecutive unchanged states
     """
 
     # Build content string (limited for faster LLM calls)
     hidden = content.get('hidden_content', [])
     data_attrs = content.get('data_attrs', [])
+
+    # Format top interactive elements for overview
+    el_summary = []
+    for el in elements[:30]:  # Top 30 elements
+        tag = el.get('role') or el['tag']
+        text = el['text'][:30] if el['text'] else el.get('type', '?')
+        # Include href for links to help identify real navigation
+        href = el.get('href', '')
+        if href and href != '#':
+            el_summary.append(f"[{el['index']}] {tag}: {text} -> {href[:40]}")
+        else:
+            el_summary.append(f"[{el['index']}] {tag}: {text}")
 
     page_content = f"""
 URL: {content['url']}
@@ -161,17 +178,34 @@ Title: {content['title']}
 Headings: {', '.join(content['headings'])}
 Forms: {', '.join(content['forms'])}
 
+Interactive elements:
+{chr(10).join(el_summary)}
+
 Hidden content (may contain codes): {', '.join(hidden) if hidden else 'none found'}
 Data attributes: {', '.join(data_attrs) if data_attrs else 'none found'}
 
 Page content:
-{content['full_text'][:12000]}
+{content['full_text'][:10000]}
 """
 
-    # Add current page state to memory
+    # Add warning if state unchanged - make it prominent
+    if not state_changed:
+        page_content += f"\n\n*** WARNING: State unchanged for {unchanged_count} iterations! Your previous action had NO effect. You MUST try a DIFFERENT action (if you scrolled, try clicking a button instead). ***"
+
+    # Combine previous action with current page state into single user message
+    combined_content = ""
+    if last_action and last_result:
+        action_summary = f"{last_action.get('a', '?')}"
+        if 'n' in last_action:
+            action_summary += f"[{last_action['n']}]"
+        if 'v' in last_action:
+            action_summary += f" \"{last_action['v'][:20]}\""
+        combined_content = f"Previous action: {action_summary} -> {last_result}\n\n"
+    combined_content += f"Current page state:\n{page_content}\n\nWhat should we do next?"
+
     memory.append({
         "role": "user",
-        "content": f"Current page state:\n{page_content}\n\nWhat should we do next?"
+        "content": combined_content
     })
 
     # Limit memory to prevent context overflow
@@ -221,6 +255,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 const role = el.getAttribute('role') || '';
                 const state = el.getAttribute('data-state') || '';
                 const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+                const href = el.getAttribute('href') || '';
 
                 let abbr = tag;
                 if (tag === 'button') abbr = 'btn';
@@ -229,7 +264,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 else if (tag === 'select') abbr = 'sel';
                 else if (tag === 'a') abbr = 'link';
 
-                return { tag: abbr, text: text, type: type, role: role, state: state, disabled: disabled };
+                return { tag: abbr, text: text, type: type, role: role, state: state, disabled: disabled, href: href };
             }''')
 
             # Assign sequential index that matches position in visible_handles
@@ -273,7 +308,12 @@ def format_context(overview: str, elements: list) -> str:
             state += " [disabled]"
 
         text = el["text"][:25] if el["text"] else el["type"] or "?"
-        el_strs.append(f"[{el['index']}] {tag} \"{text}\"{state}")
+        # Include href for links
+        href = el.get('href', '')
+        if href and href != '#':
+            el_strs.append(f"[{el['index']}] {tag} \"{text}\" -> {href[:30]}{state}")
+        else:
+            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{state}")
 
     parts.append("\n".join(el_strs))
 
@@ -440,7 +480,7 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
         prev_url = ""
         # Challenge-level memory for both LLMs
         action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT.format(content="")}]
+        overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT}]
         challenge_start = time.time()
         last_action = None
         last_result = None
@@ -458,7 +498,7 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
                     challenge_start = time.time()
                     # Clear both LLM memories on new challenge
                     action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-                    overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT.format(content="")}]
+                    overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT}]
                     state_hashes.clear()
                     last_action = None
                     last_result = None
@@ -490,13 +530,6 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
                 log(f"{'!'*50}")
                 break
 
-            # Add previous action to overview memory
-            if last_action and last_result:
-                overview_messages.append({
-                    "role": "user",
-                    "content": f"Previous action: {last_action} -> {last_result}"
-                })
-
             # Get fresh overview with memory
             content = await extract_structured_content(page)
 
@@ -520,7 +553,10 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
             if limits_hit:
                 log(f"  ⚠ Limits hit: {limits_hit}")
 
-            overview = await analyze_overview(client, content, overview_messages)
+            overview = await analyze_overview(
+                client, content, elements, overview_messages,
+                last_action, last_result, state_changed, unchanged_count
+            )
 
             # Log full overview (multi-line)
             log(f"  Overview LLM:")
