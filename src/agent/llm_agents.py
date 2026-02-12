@@ -47,26 +47,19 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
 
     # Build structured content (replaces noisy full_text dump)
     hidden = content.get('hidden_content', [])
-    data_attrs = content.get('data_attrs', [])[:10]
+    data_attrs = content.get('data_attrs', [])
 
-    # Use structured paragraphs and forms instead of raw full_text
-    paragraphs = content.get('paragraphs', [])
+    # Use deduped all_text (covers all HTML tags)
+    all_text = content.get('all_text', [])
     forms = content.get('forms', [])
-    structured_text = ""
-    if paragraphs:
-        structured_text = "\n".join(paragraphs[:10])
+    structured_text = "\n".join(all_text)
     if forms:
         structured_text += f"\nForms: {', '.join(forms)}"
-    # Fallback to truncated full_text only when structured content is empty
-    if not structured_text.strip():
-        structured_text = content['full_text'][:3000]
 
-    # Use shared format_element_summary with rich annotations, cap at 50
-    el_summary = format_element_summary(elements, max_elements=50)
+    el_summary = format_element_summary(elements)
 
     page_content = f"""URL: {content['url']}
 Title: {content['title']}
-Headings: {', '.join(content['headings'])}
 
 Interactive elements:
 {el_summary}
@@ -88,7 +81,7 @@ Page content:
         if 'n' in last_action:
             action_summary += f"[{last_action['n']}]"
         if 'v' in last_action:
-            action_summary += f" \"{last_action['v'][:20]}\""
+            action_summary += f" \"{last_action['v']}\""
         combined_content = f"Previous action: {action_summary} -> {last_result}\n\n"
     combined_content += f"Current page state:\n{page_content}\n\nWhat should we do next?"
 
@@ -105,7 +98,7 @@ Page content:
         response = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=memory,
-            max_completion_tokens=1000,
+            max_completion_tokens=1500,
             reasoning_effort="none",
             temperature=0,
         )
@@ -135,7 +128,7 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_actio
         if 'n' in last_action:
             action_summary += f"[{last_action['n']}]"
         if 'v' in last_action:
-            action_summary += f" \"{last_action['v'][:20]}\""
+            action_summary += f" \"{last_action['v']}\""
         messages.append({
             "role": "user",
             "content": f"Previous action: {action_summary} -> {last_result}"
@@ -166,7 +159,7 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_actio
 
     content = content.strip()
     # Log raw action LLM output
-    log(f"  Action LLM: {content[:200]}")
+    log(f"  Action LLM: {content}")
     messages.append({"role": "assistant", "content": content})
 
     # Parse JSON - handle multiple formats
@@ -198,5 +191,5 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_actio
                 return json.loads(match.group())
             except:
                 pass
-        log(f"  ERROR: Failed to parse LLM response: {content[:50]}")
+        log(f"  ERROR: Failed to parse LLM response: {content}")
         return {"a": "error", "error": f"Parse error"}

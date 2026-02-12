@@ -14,18 +14,13 @@ def extract_prioritized_data_attrs(soup) -> list:
         if not el.attrs:
             continue
         for key, val in el.attrs.items():
-            if not val or not isinstance(val, str) or len(val) > 50:
+            if not val or not isinstance(val, str) or len(val) > 200:
                 continue
             if key.startswith('data-') or key in ('aria-label', 'title', 'alt'):
                 attr_str = f"{key}={val}"
                 if attr_str in seen:
                     continue
                 seen.add(attr_str)
-                # Skip common noise values (but keep a few for context)
-                if val.lower() in ('unchecked', 'checked', 'true', 'false', 'open', 'closed'):
-                    # Keep at most one of each noise type for context
-                    if sum(1 for _, a in attrs if val.lower() in a.lower()) >= 1:
-                        continue
                 # Prioritize code-like values (alphanumeric 4-10 chars)
                 priority = 100 if re.match(r'^[A-Z0-9]{4,10}$', val) else 0
                 # Boost priority for likely code/answer attributes
@@ -33,9 +28,9 @@ def extract_prioritized_data_attrs(soup) -> list:
                     priority += 50
                 attrs.append((priority, attr_str))
 
-    # Sort by priority (highest first) and return top 30
+    # Sort by priority (highest first), return all (dedup via `seen` is sufficient)
     attrs.sort(key=lambda x: -x[0])
-    return [a for _, a in attrs[:30]]
+    return [a for _, a in attrs]
 
 async def extract_structured_content(page: Page) -> dict:
     """Extract structured content from page using BeautifulSoup."""
@@ -48,14 +43,23 @@ async def extract_structured_content(page: Page) -> dict:
 
     # Extract hidden content that might contain codes/answers
     hidden_content = []
+    seen_hidden_text = set()
+
+    def _add_hidden(prefix, text):
+        if text and text not in seen_hidden_text:
+            seen_hidden_text.add(text)
+            hidden_content.append(f"[{prefix}] {text}")
+
     for el in soup.find_all(attrs={'hidden': True}):
-        text = el.get_text(strip=True)
-        if text:
-            hidden_content.append(f"[hidden] {text}")
-    for el in soup.find_all(class_=re.compile(r'hidden|invisible|sr-only', re.I)):
-        text = el.get_text(strip=True)
-        if text and text not in str(hidden_content):
-            hidden_content.append(f"[hidden] {text}")
+        _add_hidden('hidden', el.get_text(strip=True))
+    for el in soup.find_all(attrs={'aria-hidden': 'true'}):
+        _add_hidden('aria-hidden', el.get_text(strip=True))
+    for el in soup.find_all(class_=re.compile(
+            r'hidden|invisible|sr-only|visually-hidden|d-none|is-hidden|hide|display-none|off-screen', re.I)):
+        _add_hidden('hidden-class', el.get_text(strip=True))
+    for el in soup.find_all(style=re.compile(
+            r'display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0', re.I)):
+        _add_hidden('style-hidden', el.get_text(strip=True))
 
     # Extract prioritized data attributes (deduplicated, codes first)
     data_attrs = extract_prioritized_data_attrs(soup)
@@ -73,13 +77,17 @@ async def extract_structured_content(page: Page) -> dict:
     title = soup.find('h1')
     title_text = title.get_text(strip=True) if title else ""
 
-    headings = [h.get_text(strip=True) for h in soup.find_all(['h2', 'h3', 'h4'])]
-
-    paragraphs = []
-    for p in soup.find_all('p'):
-        text = p.get_text(strip=True)
-        if text and len(text) >= 2:
-            paragraphs.append(text)
+    # Extract ALL unique text content from every element (deduped)
+    seen_text = set()
+    all_text = []
+    for el in soup.find_all(True):
+        # Get direct text only (not children's text) to avoid duplication
+        direct = el.find(string=True, recursive=False)
+        if direct:
+            text = direct.strip()
+            if len(text) >= 2 and text not in seen_text:
+                seen_text.add(text)
+                all_text.append(text)
 
     # Extract form elements with context
     forms = []
@@ -96,20 +104,12 @@ async def extract_structured_content(page: Page) -> dict:
     # Get full text for analysis
     full_text = soup.get_text(separator='\n', strip=True)
 
-    # Track if limits were hit
-    limits_hit = []
-    if len(hidden_content) > 15:
-        limits_hit.append(f"hidden_content: {len(hidden_content)} -> 15")
-    # data_attrs now uses extract_prioritized_data_attrs with 30 limit and dedup
-
     return {
         "title": title_text,
-        "headings": headings[:5],
-        "paragraphs": paragraphs[:10],
+        "all_text": all_text,
         "forms": forms,
         "full_text": full_text,
-        "hidden_content": hidden_content[:15],
-        "data_attrs": data_attrs,  # Already limited to 30 by extract_prioritized_data_attrs
-        "limits_hit": limits_hit,
+        "hidden_content": hidden_content,
+        "data_attrs": data_attrs,
         "url": page.url
     }

@@ -13,7 +13,35 @@ async def extract_elements(page: Page) -> tuple[list, list]:
         '[role="tab"]', '[role="switch"]', '[role="menuitem"]',
         '[role="option"]', '[role="link"]', '[role="slider"]'
     ])
-    handles = await page.query_selector_all(selector)
+    selector_handles = await page.query_selector_all(selector)
+
+    # Second pass: find all elements with cursor:pointer computed style
+    cursor_handles = await page.evaluate_handle('''() => {
+        const all = document.querySelectorAll('*');
+        const results = [];
+        for (const el of all) {
+            if (window.getComputedStyle(el).cursor === 'pointer') {
+                results.push(el);
+            }
+        }
+        return results;
+    }''')
+    cursor_count = await cursor_handles.evaluate('els => els.length')
+    cursor_list = []
+    for i in range(cursor_count):
+        handle = await cursor_handles.evaluate_handle(f'els => els[{i}]')
+        cursor_list.append(handle.as_element())
+
+    # Dedup: combine both lists, skip duplicates
+    seen = set()
+    handles = []
+    for handle in selector_handles + cursor_list:
+        if handle is None:
+            continue
+        uid = await handle.evaluate('el => el.uniqueId || (el.uniqueId = Math.random().toString(36))')
+        if uid not in seen:
+            seen.add(uid)
+            handles.append(handle)
 
     elements = []
     visible_handles = []
@@ -30,7 +58,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
 
                 // Fix: Proper text extraction with whitespace handling
                 const innerText = (el.innerText || '').trim();
-                const text = (innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.title || '').trim().slice(0, 40);
+                const text = (innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.title || '').trim();
 
                 const role = el.getAttribute('role') || '';
                 const state = el.getAttribute('data-state') || '';
@@ -42,7 +70,14 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 const checked = el.checked || el.getAttribute('aria-checked') === 'true';
                 const selected = el.getAttribute('aria-selected') === 'true';
                 const name = el.name || el.id || '';
-                const dataValue = el.getAttribute('data-value') || el.getAttribute('data-code') || el.getAttribute('data-answer') || '';
+                // Capture ALL data-* attributes dynamically
+                const dataAttrs = [];
+                for (const attr of el.attributes) {
+                    if (attr.name.startsWith('data-') && attr.name !== 'data-state' && attr.value) {
+                        dataAttrs.push(attr.name + '=' + attr.value);
+                    }
+                }
+                const dataValue = dataAttrs.join('; ');
 
                 let abbr = tag;
                 if (tag === 'button') abbr = 'btn';
@@ -99,26 +134,26 @@ def format_element_summary(elements: list, max_elements: int = None) -> str:
         if el.get('selected'):
             state += " [selected]"
 
-        text = el["text"][:25] if el["text"] else el["type"] or "?"
+        text = el["text"] if el["text"] else el["type"] or "?"
 
         # Show current value for inputs (helps LLM know what's already filled)
         value_info = ""
         if el.get('value') and el['tag'] == 'inp':
-            value_info = f" value=\"{el['value'][:15]}\""
+            value_info = f" value=\"{el['value']}\""
 
         # Show data-value/data-code if present (might contain answer)
         if el.get('dataValue'):
-            value_info += f" data=\"{el['dataValue'][:15]}\""
+            value_info += f" data=\"{el['dataValue']}\""
 
         # Show name/id for form field identification
         name_info = ""
         if el.get('name'):
-            name_info = f" ({el['name'][:15]})"
+            name_info = f" ({el['name']})"
 
         # Include href for links
         href = el.get('href', '')
         if href and href != '#':
-            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info} -> {href[:30]}{state}")
+            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info} -> {href}{state}")
         else:
             el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info}{value_info}{state}")
 

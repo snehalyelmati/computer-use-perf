@@ -121,14 +121,10 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             # Log DOM extraction results
             hidden = content.get('hidden_content', [])
             data_attrs = content.get('data_attrs', [])
-            limits_hit = content.get('limits_hit', [])
-
             if hidden:
                 log(f"  Hidden: {hidden}")
             if data_attrs:
-                log(f"  Data attrs: {data_attrs[:5]}{'...' if len(data_attrs) > 5 else ''}")
-            if limits_hit:
-                log(f"  ⚠ Limits hit: {limits_hit}")
+                log(f"  Data attrs: {data_attrs}")
 
             overview, challenge_summary = await analyze_overview(
                 client, content, elements, overview_messages,
@@ -138,9 +134,9 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
 
             # Log full overview (multi-line)
             log(f"  Overview LLM:")
-            for line in overview.split('\n')[:10]:  # First 10 lines
+            for line in overview.split('\n'):
                 if line.strip():
-                    log(f"    {line.strip()[:100]}")
+                    log(f"    {line.strip()}")
 
             context_str = format_context(overview, elements)
 
@@ -162,7 +158,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 el = elements[action_idx]
                 tag = el.get('role') or el['tag']
                 state = f" [{el['state']}]" if el.get('state') else ""
-                log(f"  Target: [{action_idx}] {tag} \"{el['text'][:40]}\"{state}")
+                log(f"  Target: [{action_idx}] {tag} \"{el['text']}\"{state}")
 
             # ACT
             result = await execute(page, action, handles)
@@ -172,7 +168,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             action_val = action.get("v", "")
             step_time = time.time() - step_start
             if action_val:
-                log(f"  Result: {action_type}[{action_idx}] \"{action_val[:30]}\" -> {result} ({step_time:.1f}s)")
+                log(f"  Result: {action_type}[{action_idx}] \"{action_val}\" -> {result} ({step_time:.1f}s)")
             else:
                 log(f"  Result: {action_type}[{action_idx}] -> {result} ({step_time:.1f}s)")
 
