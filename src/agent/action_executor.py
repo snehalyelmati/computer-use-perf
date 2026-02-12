@@ -133,7 +133,7 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                 amount = int(value)
             except (ValueError, TypeError):
                 amount = 500
-            if index and index < len(handles):
+            if "n" in action and index < len(handles):
                 await handles[index].evaluate(f"el => el.scrollBy(0, {amount})")
                 return f"scrolled [{index}] {amount}px"
             await page.evaluate(f"window.scrollBy(0, {amount})")

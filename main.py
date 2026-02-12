@@ -10,7 +10,7 @@ from groq import AsyncGroq
 from playwright.async_api import async_playwright
 
 from src.agent.action_executor import execute_batch
-from src.agent.config import DEFAULT_BASE_URL, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD
+from src.agent.config import DEFAULT_BASE_URL, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD, FAILURE_RESET_THRESHOLD, REPETITION_WINDOW
 from src.agent.content_extraction import extract_structured_content
 from src.agent.element_utils import extract_elements, format_context
 from src.agent.llm_agents import analyze_overview, llm_decide, extract_learning
@@ -60,6 +60,8 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         last_results = []  # List of (action, result) tuples from previous step
         challenge_summary = ""  # Persistent summary that survives memory truncation
         state_hashes = []  # Track last STUCK_THRESHOLD state hashes
+        consecutive_failures = 0  # Track consecutive steps with failures
+        recent_action_sigs = []  # Track action signatures for repetition detection
         agent_learnings = []  # Persistent learnings across entire run
         pending_learning_task = None
 
@@ -84,6 +86,8 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                     state_hashes.clear()
                     last_results = []
                     challenge_summary = ""
+                    consecutive_failures = 0
+                    recent_action_sigs.clear()
 
                 log(f"\n[Challenge {challenge}] {current_url}")
                 prev_url = current_url
@@ -163,6 +167,22 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 log(f"  ⚠ LLM error, retrying...")
                 continue
 
+            # Compute action signature for repetition detection (structure, not values)
+            sig = "|".join(f"{a.get('a','?')}:{a.get('n','')}" for a in actions)
+            recent_action_sigs.append(sig)
+            if len(recent_action_sigs) > REPETITION_WINDOW:
+                recent_action_sigs.pop(0)
+
+            # Detect repetition: if only 1-3 unique signatures in last REPETITION_WINDOW steps
+            if len(recent_action_sigs) >= REPETITION_WINDOW and len(set(recent_action_sigs)) <= 3:
+                log(f"  Repetition detected: {len(set(recent_action_sigs))} unique actions in last {REPETITION_WINDOW} steps — clearing LLM memory")
+                overview_messages[:] = [{"role": "system", "content": OVERVIEW_PROMPT}]
+                action_messages[:] = [{"role": "system", "content": SYSTEM_PROMPT}]
+                challenge_summary = ""
+                consecutive_failures = 0
+                recent_action_sigs.clear()
+                continue  # Skip executing repeated action, start fresh
+
             # Log batch size and targets
             if len(actions) > 1:
                 log(f"  Batch: {len(actions)} actions")
@@ -197,6 +217,24 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 log(f"  Batch cut short: {len(results)}/{len(actions)} executed ({step_time:.1f}s)")
             else:
                 log(f"  Step time: {step_time:.1f}s ({len(results)} action{'s' if len(results) > 1 else ''})")
+
+            # Track consecutive failures for context reset
+            has_failure = any(
+                "verify failed" in r or "error" in r or "not found" in r or "unknown" in r
+                for _, r in results
+            )
+            if has_failure:
+                consecutive_failures += 1
+            else:
+                consecutive_failures = 0
+
+            if consecutive_failures >= FAILURE_RESET_THRESHOLD:
+                log(f"  Context reset: {consecutive_failures} consecutive failures — clearing LLM memory for fresh read")
+                overview_messages[:] = [{"role": "system", "content": OVERVIEW_PROMPT}]
+                action_messages[:] = [{"role": "system", "content": SYSTEM_PROMPT}]
+                challenge_summary = ""
+                consecutive_failures = 0
+                recent_action_sigs.clear()
 
             # Store all executed results for next iteration's context
             if not results:

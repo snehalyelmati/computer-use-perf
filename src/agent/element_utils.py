@@ -33,10 +33,28 @@ async def extract_elements(page: Page) -> tuple[list, list]:
         handle = await cursor_handles.evaluate_handle(f'els => els[{i}]')
         cursor_list.append(handle.as_element())
 
-    # Dedup: combine both lists, skip duplicates
+    # Third pass: find scrollable containers (overflow: auto/scroll with hidden content)
+    scroll_handles = await page.evaluate_handle('''() => {
+        const results = [];
+        for (const el of document.querySelectorAll('*')) {
+            const style = window.getComputedStyle(el);
+            const ov = style.overflowY || style.overflow;
+            if ((ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight + 10) {
+                results.push(el);
+            }
+        }
+        return results;
+    }''')
+    scroll_count = await scroll_handles.evaluate('els => els.length')
+    scroll_list = []
+    for i in range(scroll_count):
+        handle = await scroll_handles.evaluate_handle(f'els => els[{i}]')
+        scroll_list.append(handle.as_element())
+
+    # Dedup: combine all lists, skip duplicates
     seen = set()
     handles = []
-    for handle in selector_handles + cursor_list:
+    for handle in selector_handles + cursor_list + scroll_list:
         if handle is None:
             continue
         uid = await handle.evaluate('el => el.uniqueId || (el.uniqueId = Math.random().toString(36))')
@@ -89,6 +107,13 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 else if (tag === 'canvas') abbr = 'canvas';
                 else if (role === 'tab') abbr = 'tab';
                 else if (role === 'switch') abbr = 'switch';
+
+                // Detect scrollable container
+                const ov = window.getComputedStyle(el).overflowY || window.getComputedStyle(el).overflow;
+                const isScrollable = (ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight + 10;
+                if (isScrollable && !['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A'].includes(el.tagName)) {
+                    abbr = 'scroll';
+                }
 
                 return {
                     tag: abbr, text: text, type: type, role: role,
