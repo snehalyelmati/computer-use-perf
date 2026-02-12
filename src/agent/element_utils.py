@@ -7,7 +7,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
         tuple: (metadata_list, element_handles) where indices match between both
     """
     selector = ', '.join([
-        'button', 'input', 'textarea', 'select', 'a[href]',
+        'button', 'input', 'textarea', 'select', 'a[href]', 'canvas',
         '[onclick]', '[contenteditable]', '[tabindex]:not([tabindex="-1"])',
         '[role="button"]', '[role="radio"]', '[role="checkbox"]',
         '[role="tab"]', '[role="switch"]', '[role="menuitem"]',
@@ -86,6 +86,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 else if (tag === 'textarea') abbr = 'txt';
                 else if (tag === 'select') abbr = 'sel';
                 else if (tag === 'a') abbr = 'link';
+                else if (tag === 'canvas') abbr = 'canvas';
                 else if (role === 'tab') abbr = 'tab';
                 else if (role === 'switch') abbr = 'switch';
 

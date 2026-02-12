@@ -1,4 +1,5 @@
 import asyncio
+import random
 import re
 from playwright.async_api import Page
 
@@ -79,6 +80,28 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                     await handles[index].dispatch_event("mouseover")
                 await asyncio.sleep(0.5)  # Allow hover effects to appear
                 return f"hovered [{index}]"
+            return f"[{index}] not found (only {len(handles)} elements)"
+
+        elif action_type == "draw":
+            if index < len(handles):
+                box = await handles[index].bounding_box()
+                if box is None:
+                    return f"canvas [{index}] has no bounding box"
+                margin = 10
+                x1 = random.uniform(box["x"] + margin, box["x"] + box["width"] - margin)
+                y1 = random.uniform(box["y"] + margin, box["y"] + box["height"] - margin)
+                x2 = random.uniform(box["x"] + margin, box["x"] + box["width"] - margin)
+                y2 = random.uniform(box["y"] + margin, box["y"] + box["height"] - margin)
+                await page.mouse.move(x1, y1)
+                await page.mouse.down()
+                # Intermediate points for a more natural stroke
+                steps = 5
+                for i in range(1, steps + 1):
+                    t = i / steps
+                    await page.mouse.move(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
+                await page.mouse.up()
+                await asyncio.sleep(0.3)
+                return f"drew stroke on canvas [{index}]"
             return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "key":
