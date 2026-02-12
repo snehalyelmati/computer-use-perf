@@ -13,7 +13,7 @@ from src.agent.action_executor import execute_batch
 from src.agent.config import DEFAULT_BASE_URL, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD
 from src.agent.content_extraction import extract_structured_content
 from src.agent.element_utils import extract_elements, format_context
-from src.agent.llm_agents import analyze_overview, llm_decide
+from src.agent.llm_agents import analyze_overview, llm_decide, extract_learning
 from src.agent.logging_utils import log, log_verbose
 from src.agent.prompts import OVERVIEW_PROMPT, SYSTEM_PROMPT
 from src.agent.state_utils import compute_state_hash
@@ -61,6 +61,8 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         last_result = None
         challenge_summary = ""  # Persistent summary that survives memory truncation
         state_hashes = []  # Track last STUCK_THRESHOLD state hashes
+        agent_learnings = []  # Persistent learnings across entire run
+        pending_learning_task = None
 
         for step in range(500):
             current_url = page.url
@@ -72,6 +74,11 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                     log(f"✓ Challenge {challenge} complete ({elapsed:.1f}s)")
                     challenge += 1
                     challenge_start = time.time()
+                    # Fire async learning extraction before clearing memory
+                    if challenge_summary:
+                        pending_learning_task = asyncio.create_task(
+                            extract_learning(client, challenge_summary)
+                        )
                     # Clear both LLM memories on new challenge
                     action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                     overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT}]
@@ -128,10 +135,19 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             if data_attrs:
                 log(f"  Data attrs: {data_attrs}")
 
+            # Collect any completed learning
+            if pending_learning_task and pending_learning_task.done():
+                learning = pending_learning_task.result()
+                if learning:
+                    agent_learnings.append(learning)
+                    if len(agent_learnings) > 10:
+                        agent_learnings.pop(0)
+                pending_learning_task = None
+
             overview, challenge_summary = await analyze_overview(
                 client, content, elements, overview_messages,
                 last_action, last_result, state_changed, unchanged_count,
-                challenge_summary
+                challenge_summary, agent_learnings
             )
 
             # Log full overview (multi-line)
@@ -185,6 +201,10 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 log(f"  Step time: {step_time:.1f}s ({len(results)} action{'s' if len(results) > 1 else ''})")
 
             # Store last executed action for next iteration's memory
+            if not results:
+                log("  No valid actions — waiting 3s")
+                await asyncio.sleep(3)
+                continue
             last_action, last_result = results[-1]
 
             await asyncio.sleep(0.05)  # Reduced delay

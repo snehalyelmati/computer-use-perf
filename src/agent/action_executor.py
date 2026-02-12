@@ -126,14 +126,18 @@ async def _verify_action(page: Page, action: dict, handles: list, result: str) -
         elif action_type == "drag":
             target_text = str(value or "")
             if target_text:
-                # If the slot is still an empty leaf with the same text, drag failed
-                still_empty = await page.evaluate('''(text) => {
-                    const all = document.querySelectorAll('*');
-                    for (const el of all) {
-                        if (el.children.length === 0 && el.textContent.trim() === text) return true;
-                    }
-                    return false;
-                }''', target_text)
+                # Poll a few times — DOM may not update instantly after drag events
+                for _ in range(3):
+                    still_empty = await page.evaluate('''(text) => {
+                        const all = document.querySelectorAll('*');
+                        for (const el of all) {
+                            if (el.children.length === 0 && el.textContent.trim() === text) return true;
+                        }
+                        return false;
+                    }''', target_text)
+                    if not still_empty:
+                        break
+                    await asyncio.sleep(0.3)
                 if still_empty:
                     return f"verify failed: '{target_text}' still empty after drag"
     except Exception:

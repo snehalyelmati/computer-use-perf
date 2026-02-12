@@ -54,10 +54,34 @@ async def filter_page_content(client: AsyncGroq, all_text: list[str]) -> list[st
         log(f"  Filter error (returning unfiltered): {e}")
         return all_text
 
+async def extract_learning(client: AsyncGroq, challenge_summary: str) -> str:
+    """Extract a general learning from a completed interaction, async."""
+    if not challenge_summary:
+        return ""
+    try:
+        response = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "Given this interaction summary, what's a general lesson about navigating web pages effectively? Be concise."},
+                {"role": "user", "content": challenge_summary},
+            ],
+            max_completion_tokens=200,
+            reasoning_effort="none",
+            temperature=0,
+        )
+        result = response.choices[0].message.content.strip()
+        log(f"  Learning extracted: {result}")
+        return result
+    except Exception as e:
+        log(f"  Learning extraction error: {e}")
+        return ""
+
+
 async def analyze_overview(client: AsyncGroq, content: dict, elements: list, memory: list,
                            last_action: dict = None, last_result: str = None,
                            state_changed: bool = True, unchanged_count: int = 0,
-                           challenge_summary: str = "") -> tuple[str, str]:
+                           challenge_summary: str = "",
+                           agent_learnings: list[str] = None) -> tuple[str, str]:
     """Overview agent - analyzes full page with memory of previous actions.
 
     Args:
@@ -76,10 +100,12 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
     """
     from .prompts import OVERVIEW_PROMPT
 
-    # Update system message with persistent challenge summary
+    # Update system message with persistent challenge summary and learnings
     system_content = OVERVIEW_PROMPT
     if challenge_summary:
         system_content += f"\n\nCurrent context:\n{challenge_summary}"
+    if agent_learnings:
+        system_content += "\n\nLearnings from previous pages:\n" + "\n".join(f"- {l}" for l in agent_learnings)
     memory[0] = {"role": "system", "content": system_content}
 
     # Build structured content (replaces noisy full_text dump)
@@ -164,6 +190,9 @@ Page content:
 
         return (result, updated_summary)
     except Exception as e:
+        err_msg = str(e).lower()
+        if any(k in err_msg for k in ("not supported", "invalid model", "model not found", "authentication", "api key")):
+            raise RuntimeError(f"Model config error: {e}") from e
         log(f"Overview agent error: {e}")
         return ("GOAL: Complete the page task\nDATA: Check page content\nPROGRESS: Starting\nNEXT: Interact with elements", challenge_summary)
 
@@ -215,6 +244,9 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_actio
             temperature=0,
         )
     except Exception as e:
+        err_msg = str(e).lower()
+        if any(k in err_msg for k in ("not supported", "invalid model", "model not found", "authentication", "api key")):
+            raise RuntimeError(f"Model config error: {e}") from e
         log(f"  ERROR: LLM call failed - {e}")
         return [{"a": "error", "error": str(e)}]
 
