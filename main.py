@@ -9,7 +9,7 @@ import time
 from groq import AsyncGroq
 from playwright.async_api import async_playwright
 
-from src.agent.action_executor import execute
+from src.agent.action_executor import execute_batch
 from src.agent.config import DEFAULT_BASE_URL, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD
 from src.agent.content_extraction import extract_structured_content
 from src.agent.element_utils import extract_elements, format_context
@@ -143,40 +143,49 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             context_str = format_context(overview, elements)
 
             # THINK - pass action memory and previous action/result for sequencing
-            action = await llm_decide(client, action_messages, context_str, last_action, last_result)
+            actions = await llm_decide(client, action_messages, context_str, last_action, last_result)
 
-            if action.get("a") == "error":
+            if len(actions) == 1 and actions[0].get("a") == "error":
                 log(f"  ⚠ LLM error, retrying...")
                 continue
 
-            # Show what element we're targeting
-            action_idx = action.get("n", 0)
-            if not isinstance(action_idx, int):
-                try:
-                    action_idx = int(action_idx)
-                except (ValueError, TypeError):
-                    action_idx = 0
-            if action_idx < len(elements):
-                el = elements[action_idx]
-                tag = el.get('role') or el['tag']
-                state = f" [{el['state']}]" if el.get('state') else ""
-                log(f"  Target: [{action_idx}] {tag} \"{el['text']}\"{state}")
+            # Log batch size and targets
+            if len(actions) > 1:
+                log(f"  Batch: {len(actions)} actions")
+            for action in actions:
+                action_idx = action.get("n", 0)
+                if not isinstance(action_idx, int):
+                    try:
+                        action_idx = int(action_idx)
+                    except (ValueError, TypeError):
+                        action_idx = 0
+                if action_idx < len(elements):
+                    el = elements[action_idx]
+                    tag = el.get('role') or el['tag']
+                    state = f" [{el['state']}]" if el.get('state') else ""
+                    log(f"  Target: [{action_idx}] {tag} \"{el['text']}\"{state}")
 
-            # ACT
-            result = await execute(page, action, handles)
+            # ACT - execute batch with verification
+            results = await execute_batch(page, actions, handles)
 
-            # Log execution result
-            action_type = action.get("a", "?")
-            action_val = action.get("v", "")
+            # Log each executed action result
+            for action, result in results:
+                action_type = action.get("a", "?")
+                action_idx = action.get("n", 0)
+                action_val = action.get("v", "")
+                if action_val:
+                    log(f"  Result: {action_type}[{action_idx}] \"{action_val}\" -> {result}")
+                else:
+                    log(f"  Result: {action_type}[{action_idx}] -> {result}")
+
             step_time = time.time() - step_start
-            if action_val:
-                log(f"  Result: {action_type}[{action_idx}] \"{action_val}\" -> {result} ({step_time:.1f}s)")
+            if len(results) != len(actions):
+                log(f"  Batch cut short: {len(results)}/{len(actions)} executed ({step_time:.1f}s)")
             else:
-                log(f"  Result: {action_type}[{action_idx}] -> {result} ({step_time:.1f}s)")
+                log(f"  Step time: {step_time:.1f}s ({len(results)} action{'s' if len(results) > 1 else ''})")
 
-            # Store for next iteration's memory
-            last_action = action
-            last_result = result
+            # Store last executed action for next iteration's memory
+            last_action, last_result = results[-1]
 
             await asyncio.sleep(0.05)  # Reduced delay
 

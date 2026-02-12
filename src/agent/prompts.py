@@ -7,13 +7,22 @@ Actions:
 {"a":"drag","n":2,"v":"Slot 1"} - drag element 2 to drop zone by text (use "v" for drop targets not in element list)
 {"a":"key","v":"Control+a"} - press key or shortcut
 {"a":"scroll","v":"down"} - scroll down/up
+{"a":"wait","v":"3"} - wait for N seconds (max 10)
 
 IMPORTANT: Follow the PAGE ANALYSIS instructions exactly.
 - The NEXT ACTION tells you what to do
 - The DATA section has exact values to use
 - Match element names from INTERACTIVE ELEMENTS list
 
-Output ONLY one JSON object."""
+Output valid JSON. You may return:
+- A single action: {"a":"click","n":0}
+- Multiple sequential actions: [{"a":"type","n":1,"v":"ABC123"},{"a":"click","n":2}]
+
+BATCHING RULES:
+- Only batch when steps are obvious and use CURRENT element indices
+- Never batch more than 4 actions
+- Never batch after scroll, wait, or any action that changes visible elements
+- When unsure, return a single action"""
 
 OVERVIEW_PROMPT = """You are a strategic planner for a browser automation agent.
 

@@ -2,7 +2,7 @@ import json
 import re
 from groq import AsyncGroq
 import asyncio
-from .config import MODEL_NAME, FILTER_MODEL_NAME
+from .config import MODEL_NAME, ACTION_MODEL_NAME, FILTER_MODEL_NAME
 from .element_utils import format_element_summary
 from .logging_utils import log, log_verbose
 
@@ -167,8 +167,24 @@ Page content:
         log(f"Overview agent error: {e}")
         return ("GOAL: Complete the page task\nDATA: Check page content\nPROGRESS: Starting\nNEXT: Interact with elements", challenge_summary)
 
-async def llm_decide(client: AsyncGroq, messages: list, context: str, last_action: dict = None, last_result: str = None) -> dict:
-    """Get next action from LLM with challenge-level memory."""
+def _convert_tool_call(action: dict) -> dict:
+    """Convert tool-calling format to standard action format."""
+    if "arguments" in action and "name" in action:
+        name = action["name"].lower()
+        args = action["arguments"]
+        if "click" in name:
+            return {"a": "click", "n": args.get("n", 0)}
+        elif "type" in name:
+            return {"a": "type", "n": args.get("n", 0), "v": args.get("v", "")}
+        elif "scroll" in name:
+            return {"a": "scroll", "v": args.get("v", "down")}
+    return action
+
+async def llm_decide(client: AsyncGroq, messages: list, context: str, last_action: dict = None, last_result: str = None) -> list[dict]:
+    """Get next action(s) from LLM with challenge-level memory.
+
+    Returns a list of action dicts (always a list, even for single actions).
+    """
 
     # Add previous action to context for sequencing awareness
     if last_action and last_result:
@@ -193,15 +209,14 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_actio
 
     try:
         response = await client.chat.completions.create(
-            model=MODEL_NAME,
+            model=ACTION_MODEL_NAME,
             messages=messages,
-            max_completion_tokens=200,
-            reasoning_effort="none",
+            max_completion_tokens=350,
             temperature=0,
         )
     except Exception as e:
         log(f"  ERROR: LLM call failed - {e}")
-        return {"a": "error", "error": str(e)}
+        return [{"a": "error", "error": str(e)}]
 
     # Log token usage
     usage = response.usage
@@ -211,41 +226,46 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_actio
     content = response.choices[0].message.content
     if not content:
         log("  Action LLM: (empty response)")
-        return {"a": "error", "error": "Empty response"}
+        return [{"a": "error", "error": "Empty response"}]
 
     content = content.strip()
     # Log raw action LLM output
     log(f"  Action LLM: {content}")
     messages.append({"role": "assistant", "content": content})
 
-    # Parse JSON - handle multiple formats
+    # Parse JSON - handle single action or array of actions
     try:
         # Strip markdown code blocks
         if "```" in content:
             match = re.search(r'```(?:json)?\s*(.*?)```', content, re.DOTALL)
             content = match.group(1) if match else content
 
-        action = json.loads(content)
+        parsed = json.loads(content)
 
-        # Handle tool-calling format: {"name": "browser.click", "arguments": {...}}
-        if "arguments" in action and "name" in action:
-            name = action["name"].lower()
-            args = action["arguments"]
-            if "click" in name:
-                return {"a": "click", "n": args.get("n", 0)}
-            elif "type" in name:
-                return {"a": "type", "n": args.get("n", 0), "v": args.get("v", "")}
-            elif "scroll" in name:
-                return {"a": "scroll", "v": args.get("v", "down")}
+        # Normalize to list
+        if isinstance(parsed, dict):
+            return [_convert_tool_call(parsed)]
+        elif isinstance(parsed, list):
+            return [_convert_tool_call(a) for a in parsed if isinstance(a, dict)][:4]
+        else:
+            return [{"a": "error", "error": "Unexpected format"}]
 
-        return action
     except json.JSONDecodeError:
-        # Try to extract JSON from text
+        # Try array first
+        match = re.search(r'\[.*\]', content, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group())
+                if isinstance(parsed, list):
+                    return [_convert_tool_call(a) for a in parsed if isinstance(a, dict)][:4]
+            except:
+                pass
+        # Fall back to single object
         match = re.search(r'\{[^}]+\}', content)
         if match:
             try:
-                return json.loads(match.group())
+                return [json.loads(match.group())]
             except:
                 pass
         log(f"  ERROR: Failed to parse LLM response: {content}")
-        return {"a": "error", "error": f"Parse error"}
+        return [{"a": "error", "error": "Parse error"}]

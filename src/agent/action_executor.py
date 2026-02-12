@@ -1,4 +1,5 @@
 import asyncio
+import re
 from playwright.async_api import Page
 
 async def execute(page: Page, action: dict, handles: list) -> str:
@@ -92,10 +93,84 @@ async def execute(page: Page, action: dict, handles: list) -> str:
             return f"scrolled {direction}"
 
         elif action_type == "wait":
-            await asyncio.sleep(min(float(value) if value else 1, 3))
+            match = re.search(r'[\d.]+', str(value)) if value else None
+            seconds = min(float(match.group()) if match else 1, 10)
+            await asyncio.sleep(seconds)
             return "waited"
 
     except Exception as e:
         return f"error: {e}"
 
     return f"unknown: {action_type}"
+
+
+async def _verify_action(page: Page, action: dict, handles: list, result: str) -> str | None:
+    """Verify an action succeeded. Returns None if OK, or an error string."""
+    action_type = action.get("a", "")
+    index = action.get("n", 0)
+    value = action.get("v", "")
+
+    try:
+        if action_type == "type" and index < len(handles):
+            actual = await handles[index].input_value(timeout=1000)
+            if actual.lower() != str(value).lower():
+                return f"verify failed: expected '{value}', got '{actual}'"
+
+        elif action_type == "click" and index < len(handles):
+            # Check handle is still attached (page didn't navigate unexpectedly)
+            try:
+                await handles[index].is_visible()
+            except Exception:
+                return f"verify failed: element [{index}] detached after click"
+
+        elif action_type == "drag":
+            target_text = str(value or "")
+            if target_text:
+                # If the slot is still an empty leaf with the same text, drag failed
+                still_empty = await page.evaluate('''(text) => {
+                    const all = document.querySelectorAll('*');
+                    for (const el of all) {
+                        if (el.children.length === 0 && el.textContent.trim() === text) return true;
+                    }
+                    return false;
+                }''', target_text)
+                if still_empty:
+                    return f"verify failed: '{target_text}' still empty after drag"
+    except Exception:
+        pass  # Verification errors are non-fatal
+
+    return None
+
+
+async def execute_batch(page: Page, actions: list[dict], handles: list) -> list[tuple[dict, str]]:
+    """Execute a batch of actions sequentially with verification.
+
+    Stops on error or verification failure so the main loop can re-observe.
+
+    Returns:
+        List of (action_dict, result_string) tuples for executed actions.
+    """
+    results = []
+
+    for action in actions:
+        action_type = action.get("a", "error")
+
+        # Stop on terminal actions
+        if action_type in ("done", "error"):
+            results.append((action, action_type))
+            break
+
+        result = await execute(page, action, handles)
+        results.append((action, result))
+
+        # Stop batch on execution error
+        if result.startswith("error") or "not found" in result:
+            break
+
+        # Verify action succeeded
+        verify_err = await _verify_action(page, action, handles, result)
+        if verify_err:
+            results[-1] = (action, verify_err)
+            break
+
+    return results

@@ -2,5 +2,6 @@ LOG_FILE = "logs/agent.log"
 VERBOSE_LOG_FILE = "logs/agent_verbose.log"
 STUCK_THRESHOLD = 5
 MODEL_NAME = "qwen/qwen3-32b"
+ACTION_MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
 FILTER_MODEL_NAME = "llama-3.1-8b-instant"
 DEFAULT_BASE_URL = "https://serene-frangipane-7fd25b.netlify.app"
