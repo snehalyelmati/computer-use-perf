@@ -289,7 +289,9 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_actio
             try:
                 parsed = json.loads(match.group())
                 if isinstance(parsed, list):
-                    return [_convert_tool_call(a) for a in parsed if isinstance(a, dict)][:4]
+                    actions = [_convert_tool_call(a) for a in parsed if isinstance(a, dict)][:4]
+                    if actions:
+                        return actions
             except:
                 pass
         # Fall back to single object
