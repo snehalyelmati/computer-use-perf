@@ -23,3 +23,9 @@ A fast computer use agent — the goal is to use computers better than humans. P
 - Let the LLM figure out what to click/type based on context, not hardcoded rules
 - Keep element selection generic - pass all elements to LLM and let it decide
 - If filtering is needed, base it on element type (input, button) not text content
+
+## Architecture
+
+- Entry point: `main.py`
+- Core modules live in `src/agent/`
+- Runtime artifacts live in `logs/`

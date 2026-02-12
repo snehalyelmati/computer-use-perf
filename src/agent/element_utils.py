@@ -1,0 +1,132 @@
+from playwright.async_api import Page
+
+async def extract_elements(page: Page) -> tuple[list, list]:
+    """Extract interactive elements with indices and return element handles.
+
+    Returns:
+        tuple: (metadata_list, element_handles) where indices match between both
+    """
+    selector = ', '.join([
+        'button', 'input', 'textarea', 'select', 'a[href]',
+        '[onclick]', '[contenteditable]', '[tabindex]:not([tabindex="-1"])',
+        '[role="button"]', '[role="radio"]', '[role="checkbox"]',
+        '[role="tab"]', '[role="switch"]', '[role="menuitem"]',
+        '[role="option"]', '[role="link"]', '[role="slider"]'
+    ])
+    handles = await page.query_selector_all(selector)
+
+    elements = []
+    visible_handles = []
+
+    for handle in handles:
+        try:
+            if not await handle.is_visible():
+                continue
+
+            # Extract metadata from element including role, state, and values
+            metadata = await handle.evaluate('''el => {
+                const tag = el.tagName.toLowerCase();
+                const type = el.type || '';
+
+                // Fix: Proper text extraction with whitespace handling
+                const innerText = (el.innerText || '').trim();
+                const text = (innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.title || '').trim().slice(0, 40);
+
+                const role = el.getAttribute('role') || '';
+                const state = el.getAttribute('data-state') || '';
+                const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+                const href = el.getAttribute('href') || '';
+
+                // Additional metadata for better decision making
+                const value = el.value || '';
+                const checked = el.checked || el.getAttribute('aria-checked') === 'true';
+                const selected = el.getAttribute('aria-selected') === 'true';
+                const name = el.name || el.id || '';
+                const dataValue = el.getAttribute('data-value') || el.getAttribute('data-code') || el.getAttribute('data-answer') || '';
+
+                let abbr = tag;
+                if (tag === 'button') abbr = 'btn';
+                else if (tag === 'input') abbr = 'inp';
+                else if (tag === 'textarea') abbr = 'txt';
+                else if (tag === 'select') abbr = 'sel';
+                else if (tag === 'a') abbr = 'link';
+                else if (role === 'tab') abbr = 'tab';
+                else if (role === 'switch') abbr = 'switch';
+
+                return {
+                    tag: abbr, text: text, type: type, role: role,
+                    state: state, disabled: disabled, href: href,
+                    value: value, checked: checked, selected: selected,
+                    name: name, dataValue: dataValue
+                };
+            }''')
+
+            # Assign sequential index that matches position in visible_handles
+            metadata['index'] = len(elements)
+            elements.append(metadata)
+            visible_handles.append(handle)
+
+        except Exception:
+            # Element may have been removed from DOM
+            continue
+
+    return elements, visible_handles
+
+def format_context(overview: str, elements: list) -> str:
+    """Format the analysis and elements for the action LLM.
+
+    Note: Elements now have sequential indices (0, 1, 2...) that match
+    the element handles list, so we show them all without reordering.
+    """
+
+    parts = []
+
+    # Overview from analysis
+    parts.append("=== PAGE ANALYSIS ===")
+    parts.append(overview)
+
+    # Elements - show all with enriched info (role, state)
+    parts.append("\n=== INTERACTIVE ELEMENTS ===")
+
+    el_strs = []
+    for el in elements:
+        # Use role if available, otherwise tag
+        tag = el.get('role') or el['tag']
+
+        # Build state string with new metadata
+        state = ""
+        if el.get('state'):
+            state = f" [{el['state']}]"
+        if el.get('disabled'):
+            state += " [disabled]"
+        if el.get('checked'):
+            state += " [checked]"
+        if el.get('selected'):
+            state += " [selected]"
+
+        text = el["text"][:25] if el["text"] else el["type"] or "?"
+
+        # Show current value for inputs (helps LLM know what's already filled)
+        value_info = ""
+        if el.get('value') and el['tag'] == 'inp':
+            value_info = f" value=\"{el['value'][:15]}\""
+
+        # Show data-value/data-code if present (might contain answer)
+        if el.get('dataValue'):
+            value_info += f" data=\"{el['dataValue'][:15]}\""
+
+        # Show name/id for form field identification
+        name_info = ""
+        if el.get('name'):
+            name_info = f" ({el['name'][:15]})"
+
+        # Include href for links
+        href = el.get('href', '')
+        if href and href != '#':
+            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info} -> {href[:30]}{state}")
+        else:
+            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info}{value_info}{state}")
+
+    parts.append("\n".join(el_strs))
+
+    return "\n".join(parts)

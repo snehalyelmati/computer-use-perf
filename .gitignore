@@ -13,8 +13,8 @@ wheels/
 .envrc
 
 # Runtime logs
+logs/
 *.log
-agent_output.txt
 
 # Claude Code internals
 .claude/
