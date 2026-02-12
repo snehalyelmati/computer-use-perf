@@ -19,6 +19,42 @@ def compute_state_hash(url: str, elements: list) -> str:
     el_sig = "|".join(f"{e['tag']}:{e['text'][:10]}" for e in elements[:20])
     return hashlib.md5(f"{url}|{el_sig}".encode()).hexdigest()[:8]
 
+
+def extract_prioritized_data_attrs(soup) -> list:
+    """Extract data attributes with deduplication and priority sorting.
+
+    Prioritizes code-like values over common noise like 'unchecked'/'true'.
+    """
+    seen = set()
+    attrs = []
+
+    for el in soup.find_all(True):
+        if not el.attrs:
+            continue
+        for key, val in el.attrs.items():
+            if not val or not isinstance(val, str) or len(val) > 50:
+                continue
+            if key.startswith('data-') or key in ('aria-label', 'title', 'alt'):
+                attr_str = f"{key}={val}"
+                if attr_str in seen:
+                    continue
+                seen.add(attr_str)
+                # Skip common noise values (but keep a few for context)
+                if val.lower() in ('unchecked', 'checked', 'true', 'false', 'open', 'closed'):
+                    # Keep at most one of each noise type for context
+                    if sum(1 for _, a in attrs if val.lower() in a.lower()) >= 1:
+                        continue
+                # Prioritize code-like values (alphanumeric 4-10 chars)
+                priority = 100 if re.match(r'^[A-Z0-9]{4,10}$', val) else 0
+                # Boost priority for likely code/answer attributes
+                if re.search(r'code|answer|secret|key|value|token', key, re.I):
+                    priority += 50
+                attrs.append((priority, attr_str))
+
+    # Sort by priority (highest first) and return top 30
+    attrs.sort(key=lambda x: -x[0])
+    return [a for _, a in attrs[:30]]
+
 # Logging setup
 LOG_FILE = "agent.log"
 STUCK_THRESHOLD = 5  # Number of unchanged states before considering stuck
@@ -63,14 +99,8 @@ async def extract_structured_content(page: Page) -> dict:
     html = await page.content()
     soup = BeautifulSoup(html, 'lxml')
 
-    # Remove noise elements (but NOT hidden elements - they may contain answers!)
-    noise_tags = ['script', 'style', 'noscript', 'iframe', 'nav', 'footer', 'header', 'aside']
-    for tag in soup.find_all(noise_tags):
-        tag.decompose()
-
-    # Remove role-based noise
-    for el in soup.find_all(attrs={'role': ['banner', 'navigation', 'contentinfo']}):
-        el.decompose()
+    # FIRST: Extract hidden content and data attrs BEFORE removing any elements
+    # This ensures we capture codes that might be inside nav/header/footer/aside
 
     # Extract hidden content that might contain codes/answers
     hidden_content = []
@@ -83,15 +113,17 @@ async def extract_structured_content(page: Page) -> dict:
         if text and text not in str(hidden_content):
             hidden_content.append(f"[hidden] {text}")
 
-    # Extract attributes that might contain important data
-    data_attrs = []
-    for el in soup.find_all(True):  # All elements
-        if el.attrs:
-            for key, val in el.attrs.items():
-                if val and isinstance(val, str) and len(val) <= 50:
-                    # Capture data-*, aria-*, title, alt attributes
-                    if key.startswith('data-') or key in ('aria-label', 'title', 'alt'):
-                        data_attrs.append(f"{key}={val}")
+    # Extract prioritized data attributes (deduplicated, codes first)
+    data_attrs = extract_prioritized_data_attrs(soup)
+
+    # THEN: Remove noise elements for text extraction
+    noise_tags = ['script', 'style', 'noscript', 'iframe', 'nav', 'footer', 'header', 'aside']
+    for tag in soup.find_all(noise_tags):
+        tag.decompose()
+
+    # Remove role-based noise
+    for el in soup.find_all(attrs={'role': ['banner', 'navigation', 'contentinfo']}):
+        el.decompose()
 
     # Extract structured data
     title = soup.find('h1')
@@ -102,7 +134,7 @@ async def extract_structured_content(page: Page) -> dict:
     paragraphs = []
     for p in soup.find_all('p'):
         text = p.get_text(strip=True)
-        if text and len(text) > 10:
+        if text and len(text) >= 2:
             paragraphs.append(text)
 
     # Extract form elements with context
@@ -122,10 +154,9 @@ async def extract_structured_content(page: Page) -> dict:
 
     # Track if limits were hit
     limits_hit = []
-    if len(hidden_content) > 10:
-        limits_hit.append(f"hidden_content: {len(hidden_content)} -> 10")
-    if len(data_attrs) > 20:
-        limits_hit.append(f"data_attrs: {len(data_attrs)} -> 20")
+    if len(hidden_content) > 15:
+        limits_hit.append(f"hidden_content: {len(hidden_content)} -> 15")
+    # data_attrs now uses extract_prioritized_data_attrs with 30 limit and dedup
 
     return {
         "title": title_text,
@@ -133,8 +164,8 @@ async def extract_structured_content(page: Page) -> dict:
         "paragraphs": paragraphs[:10],
         "forms": forms,
         "full_text": full_text,
-        "hidden_content": hidden_content[:10],
-        "data_attrs": data_attrs[:20],
+        "hidden_content": hidden_content[:15],
+        "data_attrs": data_attrs,  # Already limited to 30 by extract_prioritized_data_attrs
         "limits_hit": limits_hit,
         "url": page.url
     }
@@ -236,7 +267,13 @@ async def extract_elements(page: Page) -> tuple[list, list]:
     Returns:
         tuple: (metadata_list, element_handles) where indices match between both
     """
-    selector = 'button, input, textarea, select, a[href], [onclick], [role="button"], [role="radio"], [role="checkbox"]'
+    selector = ', '.join([
+        'button', 'input', 'textarea', 'select', 'a[href]',
+        '[onclick]', '[contenteditable]', '[tabindex]:not([tabindex="-1"])',
+        '[role="button"]', '[role="radio"]', '[role="checkbox"]',
+        '[role="tab"]', '[role="switch"]', '[role="menuitem"]',
+        '[role="option"]', '[role="link"]', '[role="slider"]'
+    ])
     handles = await page.query_selector_all(selector)
 
     elements = []
@@ -247,15 +284,26 @@ async def extract_elements(page: Page) -> tuple[list, list]:
             if not await handle.is_visible():
                 continue
 
-            # Extract metadata from element including role and state
+            # Extract metadata from element including role, state, and values
             metadata = await handle.evaluate('''el => {
                 const tag = el.tagName.toLowerCase();
                 const type = el.type || '';
-                const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 40);
+
+                // Fix: Proper text extraction with whitespace handling
+                const innerText = (el.innerText || '').trim();
+                const text = (innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.title || '').trim().slice(0, 40);
+
                 const role = el.getAttribute('role') || '';
                 const state = el.getAttribute('data-state') || '';
                 const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
                 const href = el.getAttribute('href') || '';
+
+                // Additional metadata for better decision making
+                const value = el.value || '';
+                const checked = el.checked || el.getAttribute('aria-checked') === 'true';
+                const selected = el.getAttribute('aria-selected') === 'true';
+                const name = el.name || el.id || '';
+                const dataValue = el.getAttribute('data-value') || el.getAttribute('data-code') || el.getAttribute('data-answer') || '';
 
                 let abbr = tag;
                 if (tag === 'button') abbr = 'btn';
@@ -263,8 +311,15 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 else if (tag === 'textarea') abbr = 'txt';
                 else if (tag === 'select') abbr = 'sel';
                 else if (tag === 'a') abbr = 'link';
+                else if (role === 'tab') abbr = 'tab';
+                else if (role === 'switch') abbr = 'switch';
 
-                return { tag: abbr, text: text, type: type, role: role, state: state, disabled: disabled, href: href };
+                return {
+                    tag: abbr, text: text, type: type, role: role,
+                    state: state, disabled: disabled, href: href,
+                    value: value, checked: checked, selected: selected,
+                    name: name, dataValue: dataValue
+                };
             }''')
 
             # Assign sequential index that matches position in visible_handles
@@ -300,20 +355,39 @@ def format_context(overview: str, elements: list) -> str:
         # Use role if available, otherwise tag
         tag = el.get('role') or el['tag']
 
-        # Build state string
+        # Build state string with new metadata
         state = ""
         if el.get('state'):
             state = f" [{el['state']}]"
         if el.get('disabled'):
             state += " [disabled]"
+        if el.get('checked'):
+            state += " [checked]"
+        if el.get('selected'):
+            state += " [selected]"
 
         text = el["text"][:25] if el["text"] else el["type"] or "?"
+
+        # Show current value for inputs (helps LLM know what's already filled)
+        value_info = ""
+        if el.get('value') and el['tag'] == 'inp':
+            value_info = f" value=\"{el['value'][:15]}\""
+
+        # Show data-value/data-code if present (might contain answer)
+        if el.get('dataValue'):
+            value_info += f" data=\"{el['dataValue'][:15]}\""
+
+        # Show name/id for form field identification
+        name_info = ""
+        if el.get('name'):
+            name_info = f" ({el['name'][:15]})"
+
         # Include href for links
         href = el.get('href', '')
         if href and href != '#':
-            el_strs.append(f"[{el['index']}] {tag} \"{text}\" -> {href[:30]}{state}")
+            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info} -> {href[:30]}{state}")
         else:
-            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{state}")
+            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info}{value_info}{state}")
 
     parts.append("\n".join(el_strs))
 
