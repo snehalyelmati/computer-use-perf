@@ -57,8 +57,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT}]
         challenge_start = time.time()
-        last_action = None
-        last_result = None
+        last_results = []  # List of (action, result) tuples from previous step
         challenge_summary = ""  # Persistent summary that survives memory truncation
         state_hashes = []  # Track last STUCK_THRESHOLD state hashes
         agent_learnings = []  # Persistent learnings across entire run
@@ -83,8 +82,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                     action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                     overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT}]
                     state_hashes.clear()
-                    last_action = None
-                    last_result = None
+                    last_results = []
                     challenge_summary = ""
 
                 log(f"\n[Challenge {challenge}] {current_url}")
@@ -146,7 +144,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
 
             overview, challenge_summary = await analyze_overview(
                 client, content, elements, overview_messages,
-                last_action, last_result, state_changed, unchanged_count,
+                last_results, state_changed, unchanged_count,
                 challenge_summary, agent_learnings
             )
 
@@ -158,8 +156,8 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
 
             context_str = format_context(overview, elements)
 
-            # THINK - pass action memory and previous action/result for sequencing
-            actions = await llm_decide(client, action_messages, context_str, last_action, last_result)
+            # THINK - pass action memory and previous results for sequencing
+            actions = await llm_decide(client, action_messages, context_str, last_results)
 
             if len(actions) == 1 and actions[0].get("a") == "error":
                 log(f"  ⚠ LLM error, retrying...")
@@ -200,12 +198,12 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             else:
                 log(f"  Step time: {step_time:.1f}s ({len(results)} action{'s' if len(results) > 1 else ''})")
 
-            # Store last executed action for next iteration's memory
+            # Store all executed results for next iteration's context
             if not results:
                 log("  No valid actions — waiting 3s")
                 await asyncio.sleep(3)
                 continue
-            last_action, last_result = results[-1]
+            last_results = results
 
             await asyncio.sleep(0.05)  # Reduced delay
 

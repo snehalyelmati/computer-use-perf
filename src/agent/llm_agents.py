@@ -77,8 +77,23 @@ async def extract_learning(client: AsyncGroq, challenge_summary: str) -> str:
         return ""
 
 
+def _format_results(last_results: list[tuple[dict, str]]) -> str:
+    """Format batch results into a human-readable summary."""
+    if not last_results:
+        return ""
+    lines = []
+    for action, result in last_results:
+        action_summary = f"{action.get('a', '?')}"
+        if 'n' in action:
+            action_summary += f"[{action['n']}]"
+        if 'v' in action:
+            action_summary += f" \"{action['v']}\""
+        lines.append(f"  {action_summary} -> {result}")
+    return "Previous actions:\n" + "\n".join(lines)
+
+
 async def analyze_overview(client: AsyncGroq, content: dict, elements: list, memory: list,
-                           last_action: dict = None, last_result: str = None,
+                           last_results: list[tuple[dict, str]] = None,
                            state_changed: bool = True, unchanged_count: int = 0,
                            challenge_summary: str = "",
                            agent_learnings: list[str] = None) -> tuple[str, str]:
@@ -89,8 +104,7 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
         content: Structured page content from extract_structured_content()
         elements: List of interactive elements with indices
         memory: List of previous messages for context (modified in place)
-        last_action: Previous action dict
-        last_result: Result string from previous action
+        last_results: List of (action_dict, result_string) tuples from previous step
         state_changed: Whether page state changed since last step
         unchanged_count: Number of consecutive unchanged states
         challenge_summary: Persistent summary from previous steps (survives truncation)
@@ -140,15 +154,11 @@ Page content:
     if not state_changed:
         page_content += f"\n\n*** WARNING: State unchanged for {unchanged_count} iterations! Your previous action had NO effect. You MUST try a COMPLETELY DIFFERENT approach. ***"
 
-    # Combine previous action with current page state into single user message
+    # Combine previous results with current page state into single user message
     combined_content = ""
-    if last_action and last_result:
-        action_summary = f"{last_action.get('a', '?')}"
-        if 'n' in last_action:
-            action_summary += f"[{last_action['n']}]"
-        if 'v' in last_action:
-            action_summary += f" \"{last_action['v']}\""
-        combined_content = f"Previous action: {action_summary} -> {last_result}\n\n"
+    results_summary = _format_results(last_results or [])
+    if results_summary:
+        combined_content = results_summary + "\n\n"
     combined_content += f"Current page state:\n{page_content}\n\nWhat should we do next?"
 
     memory.append({
@@ -209,22 +219,18 @@ def _convert_tool_call(action: dict) -> dict:
             return {"a": "scroll", "v": args.get("v", "down")}
     return action
 
-async def llm_decide(client: AsyncGroq, messages: list, context: str, last_action: dict = None, last_result: str = None) -> list[dict]:
+async def llm_decide(client: AsyncGroq, messages: list, context: str, last_results: list[tuple[dict, str]] = None) -> list[dict]:
     """Get next action(s) from LLM with challenge-level memory.
 
     Returns a list of action dicts (always a list, even for single actions).
     """
 
-    # Add previous action to context for sequencing awareness
-    if last_action and last_result:
-        action_summary = f"{last_action.get('a', '?')}"
-        if 'n' in last_action:
-            action_summary += f"[{last_action['n']}]"
-        if 'v' in last_action:
-            action_summary += f" \"{last_action['v']}\""
+    # Add previous results to context for sequencing awareness
+    results_summary = _format_results(last_results or [])
+    if results_summary:
         messages.append({
             "role": "user",
-            "content": f"Previous action: {action_summary} -> {last_result}"
+            "content": results_summary
         })
 
     messages.append({"role": "user", "content": context})
