@@ -72,24 +72,19 @@ async def extract_elements(page: Page) -> tuple[list, list]:
 
     return elements, visible_handles
 
-def format_context(overview: str, elements: list) -> str:
-    """Format the analysis and elements for the action LLM.
+def format_element_summary(elements: list, max_elements: int = None) -> str:
+    """Format elements with rich annotations (state, checked, disabled, value, dataValue, name).
 
-    Note: Elements now have sequential indices (0, 1, 2...) that match
-    the element handles list, so we show them all without reordering.
+    Used by both overview and action LLMs for consistent element representation.
+
+    Args:
+        elements: List of element metadata dicts from extract_elements()
+        max_elements: If set, truncate to this many elements and append count of remaining
     """
-
-    parts = []
-
-    # Overview from analysis
-    parts.append("=== PAGE ANALYSIS ===")
-    parts.append(overview)
-
-    # Elements - show all with enriched info (role, state)
-    parts.append("\n=== INTERACTIVE ELEMENTS ===")
-
+    subset = elements[:max_elements] if max_elements else elements
     el_strs = []
-    for el in elements:
+
+    for el in subset:
         # Use role if available, otherwise tag
         tag = el.get('role') or el['tag']
 
@@ -127,6 +122,26 @@ def format_context(overview: str, elements: list) -> str:
         else:
             el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info}{value_info}{state}")
 
-    parts.append("\n".join(el_strs))
+    if max_elements and len(elements) > max_elements:
+        el_strs.append(f"... and {len(elements) - max_elements} more elements")
+
+    return "\n".join(el_strs)
+
+def format_context(overview: str, elements: list) -> str:
+    """Format the analysis and elements for the action LLM.
+
+    Note: Elements now have sequential indices (0, 1, 2...) that match
+    the element handles list, so we show them all without reordering.
+    """
+
+    parts = []
+
+    # Overview from analysis
+    parts.append("=== PAGE ANALYSIS ===")
+    parts.append(overview)
+
+    # Elements - show all with enriched info (role, state)
+    parts.append("\n=== INTERACTIVE ELEMENTS ===")
+    parts.append(format_element_summary(elements))
 
     return "\n".join(parts)

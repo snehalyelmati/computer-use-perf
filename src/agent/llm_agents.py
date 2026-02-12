@@ -2,11 +2,25 @@ import json
 import re
 from groq import AsyncGroq
 from .config import MODEL_NAME
+from .element_utils import format_element_summary
 from .logging_utils import log
+
+def _extract_summary(text: str) -> str:
+    """Parse GOAL, DATA, and PROGRESS lines from overview LLM response.
+
+    Returns a compact summary string to persist in the system message.
+    """
+    lines = []
+    for label in ("GOAL", "DATA", "PROGRESS"):
+        match = re.search(rf'^{label}:\s*(.+)', text, re.MULTILINE | re.IGNORECASE)
+        if match:
+            lines.append(f"{label}: {match.group(1).strip()}")
+    return "\n".join(lines) if lines else ""
 
 async def analyze_overview(client: AsyncGroq, content: dict, elements: list, memory: list,
                            last_action: dict = None, last_result: str = None,
-                           state_changed: bool = True, unchanged_count: int = 0) -> str:
+                           state_changed: bool = True, unchanged_count: int = 0,
+                           challenge_summary: str = "") -> tuple[str, str]:
     """Overview agent - analyzes full page with memory of previous actions.
 
     Args:
@@ -18,43 +32,54 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
         last_result: Result string from previous action
         state_changed: Whether page state changed since last step
         unchanged_count: Number of consecutive unchanged states
+        challenge_summary: Persistent summary from previous steps (survives truncation)
+
+    Returns:
+        tuple: (overview_text, updated_challenge_summary)
     """
+    from .prompts import OVERVIEW_PROMPT
 
-    # Build content string (limited for faster LLM calls)
+    # Update system message with persistent challenge summary
+    system_content = OVERVIEW_PROMPT
+    if challenge_summary:
+        system_content += f"\n\nCurrent context:\n{challenge_summary}"
+    memory[0] = {"role": "system", "content": system_content}
+
+    # Build structured content (replaces noisy full_text dump)
     hidden = content.get('hidden_content', [])
-    data_attrs = content.get('data_attrs', [])
+    data_attrs = content.get('data_attrs', [])[:10]
 
-    # Format top interactive elements for overview
-    el_summary = []
-    for el in elements[:30]:  # Top 30 elements
-        tag = el.get('role') or el['tag']
-        text = el['text'][:30] if el['text'] else el.get('type', '?')
-        # Include href for links to help identify real navigation
-        href = el.get('href', '')
-        if href and href != '#':
-            el_summary.append(f"[{el['index']}] {tag}: {text} -> {href[:40]}")
-        else:
-            el_summary.append(f"[{el['index']}] {tag}: {text}")
+    # Use structured paragraphs and forms instead of raw full_text
+    paragraphs = content.get('paragraphs', [])
+    forms = content.get('forms', [])
+    structured_text = ""
+    if paragraphs:
+        structured_text = "\n".join(paragraphs[:10])
+    if forms:
+        structured_text += f"\nForms: {', '.join(forms)}"
+    # Fallback to truncated full_text only when structured content is empty
+    if not structured_text.strip():
+        structured_text = content['full_text'][:3000]
 
-    page_content = f"""
-URL: {content['url']}
+    # Use shared format_element_summary with rich annotations, cap at 50
+    el_summary = format_element_summary(elements, max_elements=50)
+
+    page_content = f"""URL: {content['url']}
 Title: {content['title']}
 Headings: {', '.join(content['headings'])}
-Forms: {', '.join(content['forms'])}
 
 Interactive elements:
-{chr(10).join(el_summary)}
+{el_summary}
 
-Hidden content (may contain codes): {', '.join(hidden) if hidden else 'none found'}
-Data attributes: {', '.join(data_attrs) if data_attrs else 'none found'}
+Hidden content: {', '.join(hidden) if hidden else 'none'}
+Data attributes: {', '.join(data_attrs) if data_attrs else 'none'}
 
 Page content:
-{content['full_text'][:10000]}
-"""
+{structured_text}"""
 
-    # Add warning if state unchanged - make it prominent
+    # Add warning if state unchanged
     if not state_changed:
-        page_content += f"\n\n*** WARNING: State unchanged for {unchanged_count} iterations! Your previous action had NO effect. You MUST try a DIFFERENT action (if you scrolled, try clicking a button instead). ***"
+        page_content += f"\n\n*** WARNING: State unchanged for {unchanged_count} iterations! Your previous action had NO effect. You MUST try a COMPLETELY DIFFERENT approach. ***"
 
     # Combine previous action with current page state into single user message
     combined_content = ""
@@ -72,26 +97,34 @@ Page content:
         "content": combined_content
     })
 
-    # Limit memory to prevent context overflow
-    if len(memory) > 15:
-        memory[:] = [memory[0]] + memory[-12:]
+    # Limit memory — increased window since per-message size is smaller now
+    if len(memory) > 19:
+        memory[:] = [memory[0]] + memory[-16:]
 
     try:
         response = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=memory,
-            max_completion_tokens=1000,  # Increased for more detailed analysis
-            reasoning_effort="none",    # Disables <think> tags at API level
+            max_completion_tokens=1000,
+            reasoning_effort="none",
             temperature=0,
         )
         result = response.choices[0].message.content.strip()
 
         # Add response to memory
         memory.append({"role": "assistant", "content": result})
-        return result if result else "TASK: Complete the page task\nSTEPS: Interact with elements\nDATA: Check content"
+
+        if not result:
+            return ("GOAL: Complete the page task\nDATA: Check content\nPROGRESS: Starting\nNEXT: Interact with elements", challenge_summary)
+
+        # Extract and update persistent summary
+        new_summary = _extract_summary(result)
+        updated_summary = new_summary if new_summary else challenge_summary
+
+        return (result, updated_summary)
     except Exception as e:
         log(f"Overview agent error: {e}")
-        return "TASK: Complete the page task\nSTEPS: Interact with the page elements\nDATA: Check page content"
+        return ("GOAL: Complete the page task\nDATA: Check page content\nPROGRESS: Starting\nNEXT: Interact with elements", challenge_summary)
 
 async def llm_decide(client: AsyncGroq, messages: list, context: str, last_action: dict = None, last_result: str = None) -> dict:
     """Get next action from LLM with challenge-level memory."""

@@ -59,6 +59,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         challenge_start = time.time()
         last_action = None
         last_result = None
+        challenge_summary = ""  # Persistent summary that survives memory truncation
         state_hashes = []  # Track last STUCK_THRESHOLD state hashes
 
         for step in range(500):
@@ -77,6 +78,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                     state_hashes.clear()
                     last_action = None
                     last_result = None
+                    challenge_summary = ""
 
                 log(f"\n[Challenge {challenge}] {current_url}")
                 prev_url = current_url
@@ -128,9 +130,10 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             if limits_hit:
                 log(f"  ⚠ Limits hit: {limits_hit}")
 
-            overview = await analyze_overview(
+            overview, challenge_summary = await analyze_overview(
                 client, content, elements, overview_messages,
-                last_action, last_result, state_changed, unchanged_count
+                last_action, last_result, state_changed, unchanged_count,
+                challenge_summary
             )
 
             # Log full overview (multi-line)
@@ -150,6 +153,11 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
 
             # Show what element we're targeting
             action_idx = action.get("n", 0)
+            if not isinstance(action_idx, int):
+                try:
+                    action_idx = int(action_idx)
+                except (ValueError, TypeError):
+                    action_idx = 0
             if action_idx < len(elements):
                 el = elements[action_idx]
                 tag = el.get('role') or el['tag']
