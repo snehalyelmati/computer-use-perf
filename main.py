@@ -4,6 +4,7 @@ Target: 30 challenges in <5 minutes.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -11,6 +12,12 @@ import time
 from bs4 import BeautifulSoup
 from groq import AsyncGroq
 from playwright.async_api import async_playwright, Page
+
+
+def compute_state_hash(url: str, elements: list) -> str:
+    """Hash of current page state for change detection."""
+    el_sig = "|".join(f"{e['tag']}:{e['text'][:10]}" for e in elements[:20])
+    return hashlib.md5(f"{url}|{el_sig}".encode()).hexdigest()[:8]
 
 # Logging setup
 LOG_FILE = "agent.log"
@@ -53,8 +60,21 @@ async def extract_structured_content(page: Page) -> dict:
     soup = BeautifulSoup(html, 'lxml')
 
     # Remove noise elements
-    for tag in soup.find_all(['script', 'style', 'noscript', 'iframe']):
+    noise_tags = ['script', 'style', 'noscript', 'iframe', 'nav', 'footer', 'header', 'aside']
+    for tag in soup.find_all(noise_tags):
         tag.decompose()
+
+    # Remove hidden elements
+    for el in soup.find_all(attrs={'hidden': True}):
+        el.decompose()
+    for el in soup.find_all(class_='hidden'):
+        el.decompose()
+    for el in soup.find_all(attrs={'style': re.compile(r'display:\s*none', re.I)}):
+        el.decompose()
+
+    # Remove role-based noise
+    for el in soup.find_all(attrs={'role': ['banner', 'navigation', 'contentinfo']}):
+        el.decompose()
 
     # Extract structured data
     title = soup.find('h1')
@@ -93,10 +113,16 @@ async def extract_structured_content(page: Page) -> dict:
     }
 
 
-async def analyze_overview(client: AsyncGroq, content: dict) -> str:
-    """Overview agent - analyzes full page to understand the task."""
+async def analyze_overview(client: AsyncGroq, content: dict, memory: list) -> str:
+    """Overview agent - analyzes full page with memory of previous actions.
 
-    # Build content string (up to ~10k tokens)
+    Args:
+        client: Groq client
+        content: Structured page content from extract_structured_content()
+        memory: List of previous messages for context (modified in place)
+    """
+
+    # Build content string (limited for faster LLM calls)
     page_content = f"""
 URL: {content['url']}
 Title: {content['title']}
@@ -104,64 +130,88 @@ Headings: {', '.join(content['headings'])}
 Forms: {', '.join(content['forms'])}
 
 Page content:
-{content['full_text'][:35000]}
+{content['full_text'][:15000]}
 """
+
+    # Add current page state to memory
+    memory.append({
+        "role": "user",
+        "content": f"Current page state:\n{page_content}\n\nWhat should we do next?"
+    })
+
+    # Limit memory to prevent context overflow
+    if len(memory) > 15:
+        memory[:] = [memory[0]] + memory[-12:]
 
     try:
         response = await client.chat.completions.create(
-            model="meta-llama/llama-4-maverick-17b-128e-instruct",
-            messages=[
-                {"role": "system", "content": OVERVIEW_PROMPT.format(content=page_content)},
-                {"role": "user", "content": "Analyze this page."}
-            ],
-            max_tokens=400,
+            model="qwen/qwen3-32b",
+            messages=memory,
+            max_completion_tokens=500,  # Use max_completion_tokens (max_tokens deprecated)
+            reasoning_effort="none",    # Disables <think> tags at API level
             temperature=0,
         )
-        return response.choices[0].message.content.strip()
+        result = response.choices[0].message.content.strip()
+
+        # Add response to memory
+        memory.append({"role": "assistant", "content": result})
+        return result if result else "TASK: Complete the page task\nSTEPS: Interact with elements\nDATA: Check content"
     except Exception as e:
         log(f"Overview agent error: {e}")
         return "TASK: Complete the page task\nSTEPS: Interact with the page elements\nDATA: Check page content"
 
 
-async def extract_elements(page: Page) -> list:
-    """Extract interactive elements with indices."""
+async def extract_elements(page: Page) -> tuple[list, list]:
+    """Extract interactive elements with indices and return element handles.
 
-    js_code = """
-    () => {
-        const elements = [];
-        const selector = 'button, input, textarea, select, a[href], [onclick], [role="button"]';
-
-        document.querySelectorAll(selector).forEach((el) => {
-            const tag = el.tagName.toLowerCase();
-            const type = el.type || '';
-            const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 40);
-            const visible = el.offsetParent !== null || el.offsetWidth > 0;
-
-            if (!visible) return;
-
-            let abbr = tag;
-            if (tag === 'button') abbr = 'btn';
-            else if (tag === 'input') abbr = 'inp';
-            else if (tag === 'textarea') abbr = 'txt';
-            else if (tag === 'select') abbr = 'sel';
-            else if (tag === 'a') abbr = 'link';
-
-            elements.push({
-                tag: abbr,
-                text: text,
-                type: type,
-                index: elements.length
-            });
-        });
-
-        return elements;
-    }
+    Returns:
+        tuple: (metadata_list, element_handles) where indices match between both
     """
-    return await page.evaluate(js_code)
+    selector = 'button, input, textarea, select, a[href], [onclick], [role="button"]'
+    handles = await page.query_selector_all(selector)
+
+    elements = []
+    visible_handles = []
+
+    for handle in handles:
+        try:
+            if not await handle.is_visible():
+                continue
+
+            # Extract metadata from element
+            metadata = await handle.evaluate('''el => {
+                const tag = el.tagName.toLowerCase();
+                const type = el.type || '';
+                const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 40);
+
+                let abbr = tag;
+                if (tag === 'button') abbr = 'btn';
+                else if (tag === 'input') abbr = 'inp';
+                else if (tag === 'textarea') abbr = 'txt';
+                else if (tag === 'select') abbr = 'sel';
+                else if (tag === 'a') abbr = 'link';
+
+                return { tag: abbr, text: text, type: type };
+            }''')
+
+            # Assign sequential index that matches position in visible_handles
+            metadata['index'] = len(elements)
+            elements.append(metadata)
+            visible_handles.append(handle)
+
+        except Exception:
+            # Element may have been removed from DOM
+            continue
+
+    return elements, visible_handles
 
 
 def format_context(overview: str, elements: list) -> str:
-    """Format the analysis and elements for the action LLM."""
+    """Format the analysis and elements for the action LLM.
+
+    Note: Elements now have sequential indices (0, 1, 2...) that match
+    the element handles list, so we show them all without reordering.
+    """
 
     parts = []
 
@@ -169,16 +219,11 @@ def format_context(overview: str, elements: list) -> str:
     parts.append("=== PAGE ANALYSIS ===")
     parts.append(overview)
 
-    # Elements
+    # Elements - show all with their sequential indices
     parts.append("\n=== INTERACTIVE ELEMENTS ===")
-    inputs = [el for el in elements if el["tag"] in ("inp", "txt", "sel")]
-    buttons = [el for el in elements if el["tag"] not in ("inp", "txt", "sel")]
-
-    # Show all inputs and limited buttons
-    shown = inputs + buttons[:15]
 
     el_strs = []
-    for el in shown:
+    for el in elements:
         text = el["text"].replace(" ", "_") if el["text"] else el["type"] or "?"
         el_strs.append(f"[{el['index']}]{el['tag']}:{text[:20]}")
 
@@ -196,43 +241,66 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str) -> dict:
     if len(messages) > 12:
         messages[:] = [messages[0]] + messages[-10:]
 
-    log(f"Action LLM: {len(messages)} messages")
-
     try:
         response = await client.chat.completions.create(
-            model="meta-llama/llama-4-maverick-17b-128e-instruct",
+            model="openai/gpt-oss-120b",  # Larger model for better reasoning
             messages=messages,
-            max_tokens=50,
-            temperature=0,
+            max_completion_tokens=200,
+            reasoning_effort="low",
         )
     except Exception as e:
-        log(f"LLM ERROR: {e}")
+        log(f"  ERROR: LLM call failed - {e}")
         return {"a": "error", "error": str(e)}
 
-    content = response.choices[0].message.content.strip()
-    log(f"LLM: {content}")
+    content = response.choices[0].message.content
+    if not content:
+        log("  ERROR: LLM returned empty response")
+        return {"a": "error", "error": "Empty response"}
+
+    content = content.strip()
     messages.append({"role": "assistant", "content": content})
 
-    # Parse JSON
+    # Parse JSON - handle multiple formats
     try:
+        # Strip markdown code blocks
         if "```" in content:
             match = re.search(r'```(?:json)?\s*(.*?)```', content, re.DOTALL)
             content = match.group(1) if match else content
 
         action = json.loads(content)
+
+        # Handle tool-calling format: {"name": "browser.click", "arguments": {...}}
+        if "arguments" in action and "name" in action:
+            name = action["name"].lower()
+            args = action["arguments"]
+            if "click" in name:
+                return {"a": "click", "n": args.get("n", 0)}
+            elif "type" in name:
+                return {"a": "type", "n": args.get("n", 0), "v": args.get("v", "")}
+            elif "scroll" in name:
+                return {"a": "scroll", "v": args.get("v", "down")}
+
         return action
-    except:
+    except json.JSONDecodeError:
+        # Try to extract JSON from text
         match = re.search(r'\{[^}]+\}', content)
         if match:
             try:
                 return json.loads(match.group())
             except:
                 pass
-        return {"a": "error", "error": f"Parse error: {content}"}
+        log(f"  ERROR: Failed to parse LLM response: {content[:50]}")
+        return {"a": "error", "error": f"Parse error"}
 
 
-async def execute(page: Page, action: dict) -> str:
-    """Execute action on page."""
+async def execute(page: Page, action: dict, handles: list) -> str:
+    """Execute action on page using stored element handles.
+
+    Args:
+        page: Playwright page
+        action: Action dict from LLM (e.g., {"a": "click", "n": 0})
+        handles: List of ElementHandles from extract_elements()
+    """
 
     action_type = action.get("a", "error")
     index = action.get("n", 0)
@@ -243,24 +311,16 @@ async def execute(page: Page, action: dict) -> str:
 
     try:
         if action_type == "click":
-            selector = 'button, input, textarea, select, a[href], [onclick], [role="button"]'
-            els = await page.query_selector_all(selector)
-            visible = [el for el in els if await el.is_visible()]
-
-            if index < len(visible):
-                await visible[index].click(force=True, timeout=2000)
+            if index < len(handles):
+                await handles[index].click(force=True, timeout=2000)
                 return f"clicked [{index}]"
-            return f"[{index}] not found"
+            return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "type":
-            selector = 'button, input, textarea, select, a[href], [onclick], [role="button"]'
-            els = await page.query_selector_all(selector)
-            visible = [el for el in els if await el.is_visible()]
-
-            if index < len(visible):
-                await visible[index].fill(str(value), force=True, timeout=2000)
+            if index < len(handles):
+                await handles[index].fill(str(value), force=True, timeout=2000)
                 return f"typed '{value}'"
-            return f"[{index}] not found"
+            return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "scroll":
             direction = value or "down"
@@ -314,11 +374,11 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
         challenge = 1
         prev_url = ""
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT.format(content="")}]
         challenge_start = time.time()
-        last_actions = []
-        steps = 0
-        stuck_count = 0
-        cached_overview = None
+        last_action = None
+        last_result = None
+        state_hashes = []  # Track last 3 state hashes
 
         for step in range(500):
             current_url = page.url
@@ -331,75 +391,78 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
                     challenge += 1
                     challenge_start = time.time()
                     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-                    last_actions.clear()
-                    steps = 0
-                    stuck_count = 0
-                    cached_overview = None
+                    overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT.format(content="")}]
+                    state_hashes.clear()
 
                 log(f"\n[Challenge {challenge}] {current_url}")
                 prev_url = current_url
 
-                if "complete" in current_url.lower() or "finish" in current_url.lower():
-                    log("🎉 All challenges completed!")
-                    break
+            # OBSERVE - fresh every step
+            elements, handles = await extract_elements(page)
 
-                if challenge > 30:
-                    log("✓ Completed 30 challenges!")
-                    break
+            step_start = time.time()
 
-            # OBSERVE
-            # Run overview analysis once per challenge, or re-run every 5 steps if stuck
-            if cached_overview is None or (steps > 0 and steps % 5 == 0):
-                content = await extract_structured_content(page)
-                cached_overview = await analyze_overview(client, content)
-                log(f"Overview: {cached_overview[:150]}...")
+            # State-based stuck detection
+            state_hash = compute_state_hash(current_url, elements)
+            prev_hash = state_hashes[-1] if state_hashes else None
+            state_hashes.append(state_hash)
+            if len(state_hashes) > 3:
+                state_hashes.pop(0)
 
-            elements = await extract_elements(page)
-            context_str = format_context(cached_overview, elements)
+            # Check if state changed
+            state_changed = prev_hash is None or prev_hash != state_hash
+            unchanged_count = len([h for h in state_hashes if h == state_hash])
+
+            # Check if stuck (same state for 3 iterations)
+            if len(state_hashes) >= 3 and len(set(state_hashes)) == 1:
+                log(f"STUCK: State unchanged 3x | hash={state_hash} | {len(elements)} elements")
+                break
+
+            # Add previous action to overview memory
+            if last_action and last_result:
+                overview_messages.append({
+                    "role": "user",
+                    "content": f"Previous action: {last_action} -> {last_result}"
+                })
+
+            # Get fresh overview with memory
+            content = await extract_structured_content(page)
+            overview = await analyze_overview(client, content, overview_messages)
+
+            # Log step header with timing context
+            inp_count = sum(1 for e in elements if e['tag'] == 'inp')
+            btn_count = sum(1 for e in elements if e['tag'] == 'btn')
+            state_indicator = "(changed)" if state_changed else f"(UNCHANGED {unchanged_count}/3)"
+            log(f"[Step {step+1}] {inp_count} inp, {btn_count} btn | {state_hash} {state_indicator}")
+            log(f"  Task: {overview[:80]}")
+
+            context_str = format_context(overview, elements)
 
             # THINK
             action = await llm_decide(client, messages, context_str)
 
             if action.get("a") == "error":
-                log(f"Error: {action.get('error')}")
-                stuck_count += 1
-                if stuck_count >= 3:
-                    break
+                log(f"  ⚠ LLM error, retrying...")
                 continue
 
             # ACT
-            result = await execute(page, action)
-            log(f"Action: {action} -> {result}")
+            result = await execute(page, action, handles)
 
-            # Track stuck
-            sig = f"{action.get('a')}_{action.get('n')}_{str(action.get('v', ''))[:10]}"
-            last_actions.append(sig)
-            if len(last_actions) > 5:
-                last_actions.pop(0)
-            steps += 1
+            # Format action log (compact)
+            action_type = action.get("a", "?")
+            action_idx = action.get("n", "")
+            action_val = action.get("v", "")
+            step_time = time.time() - step_start
+            if action_val:
+                log(f"  > {action_type}[{action_idx}] \"{action_val[:20]}\" -> {result} ({step_time:.1f}s)")
+            else:
+                log(f"  > {action_type}[{action_idx}] -> {result} ({step_time:.1f}s)")
 
-            # Stuck detection
-            if len(last_actions) >= 3 and len(set(last_actions[-3:])) == 1:
-                stuck_count += 1
-                log(f"STUCK: Repeated action ({stuck_count}/3)")
-                last_actions.clear()
-                cached_overview = None  # Re-analyze page
+            # Store for next iteration's memory
+            last_action = action
+            last_result = result
 
-                if stuck_count >= 3:
-                    log("Giving up on challenge")
-                    break
-                continue
-
-            if steps > 20:
-                log("STUCK: Too many steps")
-                stuck_count += 1
-                if stuck_count >= 2:
-                    break
-                steps = 0
-                cached_overview = None
-                continue
-
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)  # Reduced delay
 
         total_time = time.time() - total_start
 
