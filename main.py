@@ -13,7 +13,7 @@ from src.agent.action_executor import execute_batch
 from src.agent.config import DEFAULT_BASE_URL, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD, FAILURE_RESET_THRESHOLD, REPETITION_WINDOW
 from src.agent.content_extraction import extract_structured_content
 from src.agent.element_utils import extract_elements, format_context
-from src.agent.llm_agents import analyze_overview, llm_decide, extract_learning
+from src.agent.llm_agents import analyze_overview, llm_decide, extract_learning, diagnose_failure
 from src.agent.logging_utils import log, log_verbose
 from src.agent.prompts import OVERVIEW_PROMPT, SYSTEM_PROMPT
 from src.agent.state_utils import compute_state_hash
@@ -167,37 +167,33 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 log(f"  ⚠ LLM error, retrying...")
                 continue
 
-            # Compute action signature for repetition detection (structure, not values)
-            sig = "|".join(f"{a.get('a','?')}:{a.get('n','')}" for a in actions)
+            # Compute action signature for repetition detection (semantic type, not index)
+            def _action_sig(a):
+                action_type = a.get('a', '?')
+                idx = a.get('n', 0)
+                if isinstance(idx, int) and 0 <= idx < len(elements):
+                    return f"{action_type}:{elements[idx]['tag']}"
+                return f"{action_type}:{a.get('v', '?')}"
+            sig = "|".join(_action_sig(a) for a in actions)
             recent_action_sigs.append(sig)
             if len(recent_action_sigs) > REPETITION_WINDOW:
                 recent_action_sigs.pop(0)
 
             # Detect repetition: if only 1-3 unique signatures in last REPETITION_WINDOW steps
             if len(recent_action_sigs) >= REPETITION_WINDOW and len(set(recent_action_sigs)) <= 3:
-                log(f"  Repetition detected: {len(set(recent_action_sigs))} unique actions in last {REPETITION_WINDOW} steps — clearing LLM memory")
+                log(f"  Repetition detected: {len(set(recent_action_sigs))} unique actions in last {REPETITION_WINDOW} steps — running diagnosis")
+                challenge_summary = await diagnose_failure(
+                    client, challenge_summary, content, elements,
+                    last_results, "repetition", agent_learnings, recent_action_sigs
+                )
                 overview_messages[:] = [{"role": "system", "content": OVERVIEW_PROMPT}]
                 action_messages[:] = [{"role": "system", "content": SYSTEM_PROMPT}]
-                challenge_summary = ""
                 consecutive_failures = 0
                 recent_action_sigs.clear()
                 continue  # Skip executing repeated action, start fresh
 
-            # Log batch size and targets
             if len(actions) > 1:
                 log(f"  Batch: {len(actions)} actions")
-            for action in actions:
-                action_idx = action.get("n", 0)
-                if not isinstance(action_idx, int):
-                    try:
-                        action_idx = int(action_idx)
-                    except (ValueError, TypeError):
-                        action_idx = 0
-                if action_idx < len(elements):
-                    el = elements[action_idx]
-                    tag = el.get('role') or el['tag']
-                    state = f" [{el['state']}]" if el.get('state') else ""
-                    log(f"  Target: [{action_idx}] {tag} \"{el['text']}\"{state}")
 
             # ACT - execute batch with verification
             results = await execute_batch(page, actions, handles)
@@ -229,10 +225,13 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 consecutive_failures = 0
 
             if consecutive_failures >= FAILURE_RESET_THRESHOLD:
-                log(f"  Context reset: {consecutive_failures} consecutive failures — clearing LLM memory for fresh read")
+                log(f"  Context reset: {consecutive_failures} consecutive failures — running diagnosis")
+                challenge_summary = await diagnose_failure(
+                    client, challenge_summary, content, elements,
+                    results, "consecutive_failures", agent_learnings, recent_action_sigs
+                )
                 overview_messages[:] = [{"role": "system", "content": OVERVIEW_PROMPT}]
                 action_messages[:] = [{"role": "system", "content": SYSTEM_PROMPT}]
-                challenge_summary = ""
                 consecutive_failures = 0
                 recent_action_sigs.clear()
 

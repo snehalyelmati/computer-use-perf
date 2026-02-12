@@ -1,7 +1,11 @@
 import asyncio
+import base64
+import codecs
 import random
 import re
+import urllib.parse
 from playwright.async_api import Page
+from .config import ACTION_DELAY
 
 async def execute(page: Page, action: dict, handles: list) -> str:
     """Execute action on page using stored element handles.
@@ -26,14 +30,14 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                     await handles[index].dispatch_event("click")
                 except Exception:
                     await handles[index].click(force=True, timeout=2000)
-                await asyncio.sleep(0.5)  # Allow page to react
+                await asyncio.sleep(ACTION_DELAY)  # Allow page to react
                 return f"clicked [{index}]"
             return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "type":
             if index < len(handles):
                 await handles[index].fill(str(value), force=True, timeout=2000)
-                await asyncio.sleep(0.5)  # Allow form to register
+                await asyncio.sleep(ACTION_DELAY)  # Allow form to register
                 return f"typed '{value}'"
             return f"[{index}] not found (only {len(handles)} elements)"
 
@@ -66,7 +70,7 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                     dst.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
                     src.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
                 }''', [handles[index], dst])
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(ACTION_DELAY)
                 label = target_text or f"[{target}]"
                 return f"dragged [{index}] to {label}"
             return f"[{index}] not found (only {len(handles)} elements)"
@@ -78,7 +82,7 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                 except Exception:
                     await handles[index].dispatch_event("mouseenter")
                     await handles[index].dispatch_event("mouseover")
-                await asyncio.sleep(0.5)  # Allow hover effects to appear
+                await asyncio.sleep(ACTION_DELAY)  # Allow hover effects to appear
                 return f"hovered [{index}]"
             return f"[{index}] not found (only {len(handles)} elements)"
 
@@ -119,13 +123,13 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                         requestAnimationFrame(next);
                     });
                 }''', handles[index])
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(ACTION_DELAY)
                 return f"drew stroke on canvas [{index}]"
             return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "key":
             await page.keyboard.press(str(value))
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(ACTION_DELAY)
             return f"pressed '{value}'"
 
         elif action_type == "scroll":
@@ -176,6 +180,56 @@ async def execute(page: Page, action: dict, handles: list) -> str:
             if result == "found":
                 return f"watched and clicked '{text}'"
             return f"watch timeout: '{text}' not found"
+
+        elif action_type == "decode":
+            v = str(value)
+            if not v:
+                return "decode error: no value provided"
+            results = []
+            # Base64
+            try:
+                decoded = base64.b64decode(v, validate=True).decode('utf-8')
+                if decoded.isprintable() and len(decoded) >= 1:
+                    results.append(f"base64='{decoded}'")
+            except Exception:
+                pass
+            # Hex
+            try:
+                cleaned = v.replace(' ', '').replace('0x', '').replace(',', '')
+                decoded = bytes.fromhex(cleaned).decode('utf-8')
+                if decoded.isprintable() and len(decoded) >= 1:
+                    results.append(f"hex='{decoded}'")
+            except Exception:
+                pass
+            # ROT13
+            try:
+                decoded = codecs.decode(v, 'rot_13')
+                if decoded != v:
+                    results.append(f"rot13='{decoded}'")
+            except Exception:
+                pass
+            # URL encoding
+            try:
+                decoded = urllib.parse.unquote(v)
+                if decoded != v:
+                    results.append(f"url='{decoded}'")
+            except Exception:
+                pass
+            # Reverse
+            reversed_v = v[::-1]
+            if reversed_v != v:
+                results.append(f"reverse='{reversed_v}'")
+            # Binary (space-separated)
+            try:
+                if re.match(r'^[01]{7,8}(\s+[01]{7,8})+$', v.strip()):
+                    decoded = ''.join(chr(int(b, 2)) for b in v.strip().split())
+                    if decoded.isprintable():
+                        results.append(f"binary='{decoded}'")
+            except Exception:
+                pass
+            if results:
+                return "decoded: " + " | ".join(results)
+            return f"decode: no valid decoding found for '{v}'"
 
         elif action_type == "wait":
             match = re.search(r'[\d.]+', str(value)) if value else None
@@ -241,7 +295,7 @@ async def _verify_action(page: Page, action: dict, handles: list, result: str) -
                             dst.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
                             src.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
                         }''', [handles[index], dst])
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(ACTION_DELAY)
             except Exception:
                 pass  # Element detached = drag succeeded
     except Exception:

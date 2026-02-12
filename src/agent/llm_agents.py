@@ -2,20 +2,24 @@ import json
 import re
 from groq import AsyncGroq
 import asyncio
-from .config import MODEL_NAME, ACTION_MODEL_NAME, FILTER_MODEL_NAME
+from .config import MODEL_NAME, ACTION_MODEL_NAME, FILTER_MODEL_NAME, ORACLE_MODEL, MAX_BATCH_SIZE
 from .element_utils import format_element_summary
 from .logging_utils import log, log_verbose
 
 def _extract_summary(text: str) -> str:
-    """Parse GOAL, DATA, and PROGRESS lines from overview LLM response.
+    """Parse GOAL, DATA, and PROGRESS sections from overview LLM response.
 
     Returns a compact summary string to persist in the system message.
+    Captures multi-line content (bullet lists, etc.) not just the first line.
     """
     lines = []
     for label in ("GOAL", "DATA", "PROGRESS"):
-        match = re.search(rf'^{label}:\s*(.+)', text, re.MULTILINE | re.IGNORECASE)
+        pattern = rf'^{label}:\s*(.*?)(?=^(?:GOAL|DATA|PROGRESS|NEXT):|\Z)'
+        match = re.search(pattern, text, re.MULTILINE | re.IGNORECASE | re.DOTALL)
         if match:
-            lines.append(f"{label}: {match.group(1).strip()}")
+            content = match.group(1).strip()
+            if content:
+                lines.append(f"{label}: {content}")
     return "\n".join(lines) if lines else ""
 
 async def filter_page_content(client: AsyncGroq, all_text: list[str]) -> list[str]:
@@ -54,6 +58,94 @@ async def filter_page_content(client: AsyncGroq, all_text: list[str]) -> list[st
         log(f"  Filter error (returning unfiltered): {e}")
         return all_text
 
+async def diagnose_failure(client: AsyncGroq, challenge_summary: str, content: dict,
+                           elements: list, last_results: list[tuple[dict, str]],
+                           trigger: str, agent_learnings: list[str] = None,
+                           recent_action_sigs: list[str] = None) -> str:
+    """Run a diagnostic LLM call before resetting conversation memory.
+
+    Analyzes the failure pattern and produces an informed recovery plan
+    so the agent doesn't start blind after a reset.
+
+    Returns an updated challenge_summary in GOAL/DATA/PROGRESS format.
+    """
+    from .prompts import DIAGNOSIS_PROMPT, OVERVIEW_PROMPT
+
+    try:
+        # Build comprehensive context for diagnosis
+        hidden = content.get('hidden_content', [])
+        data_attrs = content.get('data_attrs', [])
+        all_text = content.get('all_text', [])
+        el_summary = format_element_summary(elements)
+        results_summary = _format_results(last_results or [])
+
+        parts = [f"FAILURE TRIGGER: {trigger}"]
+
+        if challenge_summary:
+            parts.append(f"CURRENT STATE:\n{challenge_summary}")
+
+        if results_summary:
+            parts.append(f"RECENT RESULTS:\n{results_summary}")
+
+        parts.append(f"""CURRENT PAGE:
+URL: {content.get('url', '?')}
+Title: {content.get('title', '?')}
+
+Interactive elements:
+{el_summary}
+
+Hidden content: {', '.join(hidden) if hidden else 'none'}
+Data attributes: {', '.join(data_attrs) if data_attrs else 'none'}
+
+Page text:
+{chr(10).join(all_text[:80])}""")
+
+        if agent_learnings:
+            parts.append("AGENT LEARNINGS:\n" + "\n".join(f"- {l}" for l in agent_learnings))
+
+        if recent_action_sigs:
+            parts.append(f"RECENT ACTION PATTERN: {' -> '.join(recent_action_sigs)}")
+
+        parts.append(f"AVAILABLE ACTIONS REFERENCE:\n{OVERVIEW_PROMPT}")
+
+        user_message = "\n\n".join(parts)
+
+        log(f"  Running diagnosis ({trigger})...")
+        log_verbose(f"=== Diagnosis Input ===\n{user_message}\n=== End Diagnosis Input ===")
+
+        response = await client.chat.completions.create(
+            model=ORACLE_MODEL,
+            messages=[
+                {"role": "system", "content": DIAGNOSIS_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            max_completion_tokens=1500,
+            temperature=0,
+        )
+        result = response.choices[0].message.content.strip()
+
+        usage = response.usage
+        if usage:
+            log(f"  Diagnosis LLM ({usage.prompt_tokens} prompt + {usage.completion_tokens} completion tokens)")
+
+        log_verbose(f"=== Diagnosis Output ===\n{result}\n=== End Diagnosis Output ===")
+
+        new_summary = _extract_summary(result)
+        if new_summary:
+            log(f"  Diagnosis summary:")
+            for line in new_summary.split('\n'):
+                if line.strip():
+                    log(f"    {line.strip()}")
+            return new_summary
+
+        # If extraction failed but we got a response, keep existing summary
+        log(f"  Diagnosis produced no parseable summary, keeping existing")
+        return challenge_summary
+    except Exception as e:
+        log(f"  Diagnosis error: {e}")
+        return challenge_summary
+
+
 async def extract_learning(client: AsyncGroq, challenge_summary: str) -> str:
     """Extract a general learning from a completed interaction, async."""
     if not challenge_summary:
@@ -66,7 +158,7 @@ async def extract_learning(client: AsyncGroq, challenge_summary: str) -> str:
                 {"role": "user", "content": challenge_summary},
             ],
             max_completion_tokens=200,
-            reasoning_effort="none",
+
             temperature=0,
         )
         result = response.choices[0].message.content.strip()
@@ -177,8 +269,8 @@ Page content:
         response = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=memory,
-            max_completion_tokens=1500,
-            reasoning_effort="none",
+            max_completion_tokens=800,
+
             temperature=0,
         )
         result = response.choices[0].message.content.strip()
@@ -248,6 +340,7 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_resul
             messages=messages,
             max_completion_tokens=350,
             temperature=0,
+            response_format={"type": "json_object"},
         )
     except Exception as e:
         err_msg = str(e).lower()
@@ -271,41 +364,29 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_resul
     log(f"  Action LLM: {content}")
     messages.append({"role": "assistant", "content": content})
 
-    # Parse JSON - handle single action or array of actions
+    # Parse JSON — response_format guarantees valid JSON object
     try:
-        # Strip markdown code blocks
-        if "```" in content:
-            match = re.search(r'```(?:json)?\s*(.*?)```', content, re.DOTALL)
-            content = match.group(1) if match else content
-
         parsed = json.loads(content)
 
-        # Normalize to list
+        # Expected format: {"actions": [...]}
         if isinstance(parsed, dict):
-            return [_convert_tool_call(parsed)]
+            if "actions" in parsed and isinstance(parsed["actions"], list):
+                return [_convert_tool_call(a) for a in parsed["actions"] if isinstance(a, dict)][:MAX_BATCH_SIZE]
+            # Fallback: single action object like {"a":"click","n":0}
+            if "a" in parsed:
+                return [_convert_tool_call(parsed)]
+            # Unknown keys — try to find action-like dicts in values
+            for v in parsed.values():
+                if isinstance(v, list):
+                    actions = [_convert_tool_call(a) for a in v if isinstance(a, dict) and "a" in a][:MAX_BATCH_SIZE]
+                    if actions:
+                        return actions
+            return [{"a": "error", "error": "No actions found in response"}]
         elif isinstance(parsed, list):
-            return [_convert_tool_call(a) for a in parsed if isinstance(a, dict)][:4]
+            return [_convert_tool_call(a) for a in parsed if isinstance(a, dict)][:MAX_BATCH_SIZE]
         else:
             return [{"a": "error", "error": "Unexpected format"}]
 
     except json.JSONDecodeError:
-        # Try array first
-        match = re.search(r'\[.*\]', content, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group())
-                if isinstance(parsed, list):
-                    actions = [_convert_tool_call(a) for a in parsed if isinstance(a, dict)][:4]
-                    if actions:
-                        return actions
-            except:
-                pass
-        # Fall back to single object
-        match = re.search(r'\{[^}]+\}', content)
-        if match:
-            try:
-                return [json.loads(match.group())]
-            except:
-                pass
         log(f"  ERROR: Failed to parse LLM response: {content}")
         return [{"a": "error", "error": "Parse error"}]
