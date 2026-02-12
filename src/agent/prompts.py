@@ -3,6 +3,9 @@ SYSTEM_PROMPT = """You execute browser actions. Output ONLY valid JSON.
 Actions:
 {"a":"click","n":0} - click element at index 0
 {"a":"type","n":1,"v":"text"} - type text in element at index 1
+{"a":"hover","n":0} - hover over element at index 0
+{"a":"drag","n":2,"v":"Slot 1"} - drag element 2 to drop zone by text (use "v" for drop targets not in element list)
+{"a":"key","v":"Control+a"} - press key or shortcut
 {"a":"scroll","v":"down"} - scroll down/up
 
 IMPORTANT: Follow the PAGE ANALYSIS instructions exactly.
@@ -27,4 +30,5 @@ NEXT: The ONE action to take now. Reference elements by index [N]. Be specific a
 Rules:
 - If state is UNCHANGED, your previous action had NO effect. Try a completely different approach — different element, different action type, or scroll to find new elements.
 - Pay attention to element annotations: [checked] means already selected, [disabled] means not clickable, value="X" shows current input content.
-- When you see data= or hidden content with codes/values, record them in DATA immediately."""
+- When you see data= or hidden content with codes/values, record them in DATA immediately.
+- For drag-and-drop: use {"a":"drag","n":X,"v":"Slot 1"} — specify the drop target text in "v" (e.g., "Slot 1", "Slot 2"). Each slot must be targeted individually."""

@@ -1,9 +1,10 @@
 import json
 import re
 from groq import AsyncGroq
-from .config import MODEL_NAME
+import asyncio
+from .config import MODEL_NAME, FILTER_MODEL_NAME
 from .element_utils import format_element_summary
-from .logging_utils import log
+from .logging_utils import log, log_verbose
 
 def _extract_summary(text: str) -> str:
     """Parse GOAL, DATA, and PROGRESS lines from overview LLM response.
@@ -16,6 +17,42 @@ def _extract_summary(text: str) -> str:
         if match:
             lines.append(f"{label}: {match.group(1).strip()}")
     return "\n".join(lines) if lines else ""
+
+async def filter_page_content(client: AsyncGroq, all_text: list[str]) -> list[str]:
+    """Filter filler text (lorem ipsum, section headers, repeated patterns) using a small LLM."""
+    if len(all_text) <= 30:
+        return all_text
+
+    prompt = "Extract ONLY useful text lines (task instructions, codes, values, form labels, errors). Remove filler (section headers, lorem ipsum, repeated patterns). Return one line per output line, no numbering."
+
+    async def _filter_chunk(chunk: list[str]) -> list[str]:
+        numbered = "\n".join(f"{i+1}. {line}" for i, line in enumerate(chunk))
+        response = await client.chat.completions.create(
+            model=FILTER_MODEL_NAME,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": numbered},
+            ],
+            max_completion_tokens=500,
+            temperature=0,
+        )
+        result = response.choices[0].message.content.strip()
+        return [line.strip() for line in result.splitlines() if line.strip()]
+
+    try:
+        if len(all_text) <= 100:
+            return await _filter_chunk(all_text)
+
+        # Map-reduce: chunk into groups of 100, filter in parallel
+        chunks = [all_text[i:i+100] for i in range(0, len(all_text), 100)]
+        results = await asyncio.gather(*[_filter_chunk(c) for c in chunks])
+        combined = []
+        for r in results:
+            combined.extend(r)
+        return combined
+    except Exception as e:
+        log(f"  Filter error (returning unfiltered): {e}")
+        return all_text
 
 async def analyze_overview(client: AsyncGroq, content: dict, elements: list, memory: list,
                            last_action: dict = None, last_result: str = None,
@@ -51,8 +88,11 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
 
     # Use deduped all_text (covers all HTML tags)
     all_text = content.get('all_text', [])
+    filtered_text = await filter_page_content(client, all_text)
+    if len(filtered_text) != len(all_text):
+        log(f"  Filtered text: {len(all_text)} -> {len(filtered_text)} items")
     forms = content.get('forms', [])
-    structured_text = "\n".join(all_text)
+    structured_text = "\n".join(filtered_text)
     if forms:
         structured_text += f"\nForms: {', '.join(forms)}"
 
@@ -90,6 +130,9 @@ Page content:
         "content": combined_content
     })
 
+    # Log full LLM input to verbose log
+    log_verbose(f"=== Overview LLM Input (Step) ===\n{combined_content}\n=== End Overview LLM Input ===")
+
     # Limit memory — increased window since per-message size is smaller now
     if len(memory) > 19:
         memory[:] = [memory[0]] + memory[-16:]
@@ -103,6 +146,11 @@ Page content:
             temperature=0,
         )
         result = response.choices[0].message.content.strip()
+
+        # Log token usage
+        usage = response.usage
+        if usage:
+            log(f"  Overview LLM ({len(memory)} msgs, {usage.prompt_tokens} prompt + {usage.completion_tokens} completion tokens):")
 
         # Add response to memory
         memory.append({"role": "assistant", "content": result})
@@ -136,6 +184,9 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_actio
 
     messages.append({"role": "user", "content": context})
 
+    # Log full LLM input to verbose log
+    log_verbose(f"=== Action LLM Input (Step) ===\n{context}\n=== End Action LLM Input ===")
+
     # Less aggressive truncation - keep more history within challenge
     if len(messages) > 20:
         messages[:] = [messages[0]] + messages[-18:]
@@ -151,6 +202,11 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_actio
     except Exception as e:
         log(f"  ERROR: LLM call failed - {e}")
         return {"a": "error", "error": str(e)}
+
+    # Log token usage
+    usage = response.usage
+    if usage:
+        log(f"  Action LLM ({len(messages)} msgs, {usage.prompt_tokens} prompt + {usage.completion_tokens} completion tokens):")
 
     content = response.choices[0].message.content
     if not content:

@@ -11,7 +11,8 @@ async def extract_elements(page: Page) -> tuple[list, list]:
         '[onclick]', '[contenteditable]', '[tabindex]:not([tabindex="-1"])',
         '[role="button"]', '[role="radio"]', '[role="checkbox"]',
         '[role="tab"]', '[role="switch"]', '[role="menuitem"]',
-        '[role="option"]', '[role="link"]', '[role="slider"]'
+        '[role="option"]', '[role="link"]', '[role="slider"]',
+        '[draggable="true"]', '[ondrop]', '[ondragover]'
     ])
     selector_handles = await page.query_selector_all(selector)
 

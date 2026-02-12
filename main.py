@@ -10,11 +10,11 @@ from groq import AsyncGroq
 from playwright.async_api import async_playwright
 
 from src.agent.action_executor import execute
-from src.agent.config import DEFAULT_BASE_URL, LOG_FILE, STUCK_THRESHOLD
+from src.agent.config import DEFAULT_BASE_URL, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD
 from src.agent.content_extraction import extract_structured_content
 from src.agent.element_utils import extract_elements, format_context
 from src.agent.llm_agents import analyze_overview, llm_decide
-from src.agent.logging_utils import log
+from src.agent.logging_utils import log, log_verbose
 from src.agent.prompts import OVERVIEW_PROMPT, SYSTEM_PROMPT
 from src.agent.state_utils import compute_state_hash
 
@@ -40,7 +40,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         # Navigate and start
         log(f"Navigating to {base_url}...")
         await page.goto(base_url, wait_until="domcontentloaded")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(2.0)
 
         try:
             await page.click("text=Start", timeout=5000)
@@ -48,7 +48,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         except:
             log("No Start button")
 
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1.0)
 
         # Agent loop
         challenge = 1
@@ -116,11 +116,13 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             btn_count = sum(1 for e in elements if e['tag'] == 'btn')
             state_indicator = "(changed)" if state_changed else f"(UNCHANGED {unchanged_count}/{STUCK_THRESHOLD})"
             log(f"{'='*50}")
-            log(f"[Step {step+1}] {inp_count} inp, {btn_count} btn | {state_hash} {state_indicator}")
+            log(f"[Step {step+1}] {len(elements)} elements ({inp_count} inp, {btn_count} btn) | {state_hash} {state_indicator}")
 
-            # Log DOM extraction results
+            # Log content stats
+            all_text = content.get('all_text', [])
             hidden = content.get('hidden_content', [])
             data_attrs = content.get('data_attrs', [])
+            log(f"  Content: {len(all_text)} text, {len(hidden)} hidden, {len(data_attrs)} data_attrs")
             if hidden:
                 log(f"  Hidden: {hidden}")
             if data_attrs:
@@ -194,6 +196,8 @@ def main():
 
     os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
     with open(LOG_FILE, "w") as f:
+        f.write(f"=== Started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+    with open(VERBOSE_LOG_FILE, "w") as f:
         f.write(f"=== Started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
 
     print("=" * 50)
