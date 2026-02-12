@@ -21,6 +21,7 @@ def compute_state_hash(url: str, elements: list) -> str:
 
 # Logging setup
 LOG_FILE = "agent.log"
+STUCK_THRESHOLD = 5  # Number of unchanged states before considering stuck
 
 def log(msg: str):
     """Log to both console and file."""
@@ -31,26 +32,31 @@ def log(msg: str):
         f.write(line + "\n")
 
 # System prompt for action decisions
-SYSTEM_PROMPT = """You are a browser automation agent. Output ONLY valid JSON.
+SYSTEM_PROMPT = """You execute browser actions. Output ONLY valid JSON.
 
 Actions:
 {"a":"click","n":0} - click element at index 0
 {"a":"type","n":1,"v":"text"} - type text in element at index 1
-{"a":"scroll","v":"down"} - scroll down
+{"a":"scroll","v":"down"} - scroll down/up
 
-CRITICAL: Output ONLY the JSON object. No explanation. No text."""
+IMPORTANT: Follow the PAGE ANALYSIS instructions exactly.
+- The NEXT ACTION tells you what to do
+- The DATA section has exact values to use
+- Match element names from INTERACTIVE ELEMENTS list
+
+Output ONLY one JSON object."""
 
 # Overview agent prompt - general purpose, no assumptions
-OVERVIEW_PROMPT = """Analyze this web page and determine what actions are needed.
+OVERVIEW_PROMPT = """Analyze this page and determine what to do next.
 
 {content}
 
-Provide a brief analysis:
-1. TASK: What does this page want the user to do?
-2. STEPS: What specific actions are needed?
-3. DATA: What information on the page is relevant to completing the task?
+Output:
+1. GOAL: What is the main task on this page?
+2. DATA: What information is needed to complete the goal? Extract exact values from the page content.
+3. NEXT: What is the ONE action to take now? Only these actions are possible: click a button, type in an input, or scroll.
 
-Be specific and actionable."""
+Keep it brief. Focus on the primary task, not secondary elements."""
 
 
 async def extract_structured_content(page: Page) -> dict:
@@ -59,22 +65,35 @@ async def extract_structured_content(page: Page) -> dict:
     html = await page.content()
     soup = BeautifulSoup(html, 'lxml')
 
-    # Remove noise elements
+    # Remove noise elements (but NOT hidden elements - they may contain answers!)
     noise_tags = ['script', 'style', 'noscript', 'iframe', 'nav', 'footer', 'header', 'aside']
     for tag in soup.find_all(noise_tags):
         tag.decompose()
 
-    # Remove hidden elements
-    for el in soup.find_all(attrs={'hidden': True}):
-        el.decompose()
-    for el in soup.find_all(class_='hidden'):
-        el.decompose()
-    for el in soup.find_all(attrs={'style': re.compile(r'display:\s*none', re.I)}):
-        el.decompose()
-
     # Remove role-based noise
     for el in soup.find_all(attrs={'role': ['banner', 'navigation', 'contentinfo']}):
         el.decompose()
+
+    # Extract hidden content that might contain codes/answers
+    hidden_content = []
+    for el in soup.find_all(attrs={'hidden': True}):
+        text = el.get_text(strip=True)
+        if text:
+            hidden_content.append(f"[hidden] {text}")
+    for el in soup.find_all(class_=re.compile(r'hidden|invisible|sr-only', re.I)):
+        text = el.get_text(strip=True)
+        if text and text not in str(hidden_content):
+            hidden_content.append(f"[hidden] {text}")
+
+    # Extract attributes that might contain important data
+    data_attrs = []
+    for el in soup.find_all(True):  # All elements
+        if el.attrs:
+            for key, val in el.attrs.items():
+                if val and isinstance(val, str) and len(val) <= 50:
+                    # Capture data-*, aria-*, title, alt attributes
+                    if key.startswith('data-') or key in ('aria-label', 'title', 'alt'):
+                        data_attrs.append(f"{key}={val}")
 
     # Extract structured data
     title = soup.find('h1')
@@ -103,12 +122,22 @@ async def extract_structured_content(page: Page) -> dict:
     # Get full text for analysis
     full_text = soup.get_text(separator='\n', strip=True)
 
+    # Track if limits were hit
+    limits_hit = []
+    if len(hidden_content) > 10:
+        limits_hit.append(f"hidden_content: {len(hidden_content)} -> 10")
+    if len(data_attrs) > 20:
+        limits_hit.append(f"data_attrs: {len(data_attrs)} -> 20")
+
     return {
         "title": title_text,
         "headings": headings[:5],
         "paragraphs": paragraphs[:10],
         "forms": forms,
         "full_text": full_text,
+        "hidden_content": hidden_content[:10],
+        "data_attrs": data_attrs[:20],
+        "limits_hit": limits_hit,
         "url": page.url
     }
 
@@ -123,14 +152,20 @@ async def analyze_overview(client: AsyncGroq, content: dict, memory: list) -> st
     """
 
     # Build content string (limited for faster LLM calls)
+    hidden = content.get('hidden_content', [])
+    data_attrs = content.get('data_attrs', [])
+
     page_content = f"""
 URL: {content['url']}
 Title: {content['title']}
 Headings: {', '.join(content['headings'])}
 Forms: {', '.join(content['forms'])}
 
+Hidden content (may contain codes): {', '.join(hidden) if hidden else 'none found'}
+Data attributes: {', '.join(data_attrs) if data_attrs else 'none found'}
+
 Page content:
-{content['full_text'][:15000]}
+{content['full_text'][:12000]}
 """
 
     # Add current page state to memory
@@ -147,7 +182,7 @@ Page content:
         response = await client.chat.completions.create(
             model="qwen/qwen3-32b",
             messages=memory,
-            max_completion_tokens=500,  # Use max_completion_tokens (max_tokens deprecated)
+            max_completion_tokens=1000,  # Increased for more detailed analysis
             reasoning_effort="none",    # Disables <think> tags at API level
             temperature=0,
         )
@@ -167,7 +202,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
     Returns:
         tuple: (metadata_list, element_handles) where indices match between both
     """
-    selector = 'button, input, textarea, select, a[href], [onclick], [role="button"]'
+    selector = 'button, input, textarea, select, a[href], [onclick], [role="button"], [role="radio"], [role="checkbox"]'
     handles = await page.query_selector_all(selector)
 
     elements = []
@@ -178,11 +213,14 @@ async def extract_elements(page: Page) -> tuple[list, list]:
             if not await handle.is_visible():
                 continue
 
-            # Extract metadata from element
+            # Extract metadata from element including role and state
             metadata = await handle.evaluate('''el => {
                 const tag = el.tagName.toLowerCase();
                 const type = el.type || '';
                 const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 40);
+                const role = el.getAttribute('role') || '';
+                const state = el.getAttribute('data-state') || '';
+                const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
 
                 let abbr = tag;
                 if (tag === 'button') abbr = 'btn';
@@ -191,7 +229,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 else if (tag === 'select') abbr = 'sel';
                 else if (tag === 'a') abbr = 'link';
 
-                return { tag: abbr, text: text, type: type };
+                return { tag: abbr, text: text, type: type, role: role, state: state, disabled: disabled };
             }''')
 
             # Assign sequential index that matches position in visible_handles
@@ -219,34 +257,57 @@ def format_context(overview: str, elements: list) -> str:
     parts.append("=== PAGE ANALYSIS ===")
     parts.append(overview)
 
-    # Elements - show all with their sequential indices
+    # Elements - show all with enriched info (role, state)
     parts.append("\n=== INTERACTIVE ELEMENTS ===")
 
     el_strs = []
     for el in elements:
-        text = el["text"].replace(" ", "_") if el["text"] else el["type"] or "?"
-        el_strs.append(f"[{el['index']}]{el['tag']}:{text[:20]}")
+        # Use role if available, otherwise tag
+        tag = el.get('role') or el['tag']
 
-    parts.append(" ".join(el_strs))
+        # Build state string
+        state = ""
+        if el.get('state'):
+            state = f" [{el['state']}]"
+        if el.get('disabled'):
+            state += " [disabled]"
+
+        text = el["text"][:25] if el["text"] else el["type"] or "?"
+        el_strs.append(f"[{el['index']}] {tag} \"{text}\"{state}")
+
+    parts.append("\n".join(el_strs))
 
     return "\n".join(parts)
 
 
-async def llm_decide(client: AsyncGroq, messages: list, context: str) -> dict:
-    """Get next action from LLM."""
+async def llm_decide(client: AsyncGroq, messages: list, context: str, last_action: dict = None, last_result: str = None) -> dict:
+    """Get next action from LLM with challenge-level memory."""
+
+    # Add previous action to context for sequencing awareness
+    if last_action and last_result:
+        action_summary = f"{last_action.get('a', '?')}"
+        if 'n' in last_action:
+            action_summary += f"[{last_action['n']}]"
+        if 'v' in last_action:
+            action_summary += f" \"{last_action['v'][:20]}\""
+        messages.append({
+            "role": "user",
+            "content": f"Previous action: {action_summary} -> {last_result}"
+        })
 
     messages.append({"role": "user", "content": context})
 
-    # Limit context
-    if len(messages) > 12:
-        messages[:] = [messages[0]] + messages[-10:]
+    # Less aggressive truncation - keep more history within challenge
+    if len(messages) > 20:
+        messages[:] = [messages[0]] + messages[-18:]
 
     try:
         response = await client.chat.completions.create(
-            model="openai/gpt-oss-120b",  # Larger model for better reasoning
+            model="qwen/qwen3-32b",
             messages=messages,
             max_completion_tokens=200,
-            reasoning_effort="low",
+            reasoning_effort="none",
+            temperature=0,
         )
     except Exception as e:
         log(f"  ERROR: LLM call failed - {e}")
@@ -254,10 +315,12 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str) -> dict:
 
     content = response.choices[0].message.content
     if not content:
-        log("  ERROR: LLM returned empty response")
+        log("  Action LLM: (empty response)")
         return {"a": "error", "error": "Empty response"}
 
     content = content.strip()
+    # Log raw action LLM output
+    log(f"  Action LLM: {content[:200]}")
     messages.append({"role": "assistant", "content": content})
 
     # Parse JSON - handle multiple formats
@@ -313,12 +376,14 @@ async def execute(page: Page, action: dict, handles: list) -> str:
         if action_type == "click":
             if index < len(handles):
                 await handles[index].click(force=True, timeout=2000)
+                await asyncio.sleep(0.3)  # Allow page to react
                 return f"clicked [{index}]"
             return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "type":
             if index < len(handles):
                 await handles[index].fill(str(value), force=True, timeout=2000)
+                await asyncio.sleep(0.2)  # Allow form to register
                 return f"typed '{value}'"
             return f"[{index}] not found (only {len(handles)} elements)"
 
@@ -373,12 +438,13 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
         # Agent loop
         challenge = 1
         prev_url = ""
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # Challenge-level memory for both LLMs
+        action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT.format(content="")}]
         challenge_start = time.time()
         last_action = None
         last_result = None
-        state_hashes = []  # Track last 3 state hashes
+        state_hashes = []  # Track last STUCK_THRESHOLD state hashes
 
         for step in range(500):
             current_url = page.url
@@ -390,9 +456,12 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
                     log(f"✓ Challenge {challenge} complete ({elapsed:.1f}s)")
                     challenge += 1
                     challenge_start = time.time()
-                    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                    # Clear both LLM memories on new challenge
+                    action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                     overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT.format(content="")}]
                     state_hashes.clear()
+                    last_action = None
+                    last_result = None
 
                 log(f"\n[Challenge {challenge}] {current_url}")
                 prev_url = current_url
@@ -406,16 +475,19 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
             state_hash = compute_state_hash(current_url, elements)
             prev_hash = state_hashes[-1] if state_hashes else None
             state_hashes.append(state_hash)
-            if len(state_hashes) > 3:
+            if len(state_hashes) > STUCK_THRESHOLD:
                 state_hashes.pop(0)
 
             # Check if state changed
             state_changed = prev_hash is None or prev_hash != state_hash
             unchanged_count = len([h for h in state_hashes if h == state_hash])
 
-            # Check if stuck (same state for 3 iterations)
-            if len(state_hashes) >= 3 and len(set(state_hashes)) == 1:
-                log(f"STUCK: State unchanged 3x | hash={state_hash} | {len(elements)} elements")
+            # Check if stuck (same state for STUCK_THRESHOLD iterations)
+            if len(state_hashes) >= STUCK_THRESHOLD and len(set(state_hashes)) == 1:
+                log("")
+                log(f"{'!'*50}")
+                log(f"STUCK: State unchanged {STUCK_THRESHOLD}x | hash={state_hash} | {len(elements)} elements")
+                log(f"{'!'*50}")
                 break
 
             # Add previous action to overview memory
@@ -427,36 +499,63 @@ async def run_agent(base_url: str = "https://serene-frangipane-7fd25b.netlify.ap
 
             # Get fresh overview with memory
             content = await extract_structured_content(page)
-            overview = await analyze_overview(client, content, overview_messages)
 
-            # Log step header with timing context
+            # Log step header with spacing
+            log("")  # Blank line before step
             inp_count = sum(1 for e in elements if e['tag'] == 'inp')
             btn_count = sum(1 for e in elements if e['tag'] == 'btn')
-            state_indicator = "(changed)" if state_changed else f"(UNCHANGED {unchanged_count}/3)"
+            state_indicator = "(changed)" if state_changed else f"(UNCHANGED {unchanged_count}/{STUCK_THRESHOLD})"
+            log(f"{'='*50}")
             log(f"[Step {step+1}] {inp_count} inp, {btn_count} btn | {state_hash} {state_indicator}")
-            log(f"  Task: {overview[:80]}")
+
+            # Log DOM extraction results
+            hidden = content.get('hidden_content', [])
+            data_attrs = content.get('data_attrs', [])
+            limits_hit = content.get('limits_hit', [])
+
+            if hidden:
+                log(f"  Hidden: {hidden}")
+            if data_attrs:
+                log(f"  Data attrs: {data_attrs[:5]}{'...' if len(data_attrs) > 5 else ''}")
+            if limits_hit:
+                log(f"  ⚠ Limits hit: {limits_hit}")
+
+            overview = await analyze_overview(client, content, overview_messages)
+
+            # Log full overview (multi-line)
+            log(f"  Overview LLM:")
+            for line in overview.split('\n')[:10]:  # First 10 lines
+                if line.strip():
+                    log(f"    {line.strip()[:100]}")
 
             context_str = format_context(overview, elements)
 
-            # THINK
-            action = await llm_decide(client, messages, context_str)
+            # THINK - pass action memory and previous action/result for sequencing
+            action = await llm_decide(client, action_messages, context_str, last_action, last_result)
 
             if action.get("a") == "error":
                 log(f"  ⚠ LLM error, retrying...")
                 continue
 
+            # Show what element we're targeting
+            action_idx = action.get("n", 0)
+            if action_idx < len(elements):
+                el = elements[action_idx]
+                tag = el.get('role') or el['tag']
+                state = f" [{el['state']}]" if el.get('state') else ""
+                log(f"  Target: [{action_idx}] {tag} \"{el['text'][:40]}\"{state}")
+
             # ACT
             result = await execute(page, action, handles)
 
-            # Format action log (compact)
+            # Log execution result
             action_type = action.get("a", "?")
-            action_idx = action.get("n", "")
             action_val = action.get("v", "")
             step_time = time.time() - step_start
             if action_val:
-                log(f"  > {action_type}[{action_idx}] \"{action_val[:20]}\" -> {result} ({step_time:.1f}s)")
+                log(f"  Result: {action_type}[{action_idx}] \"{action_val[:30]}\" -> {result} ({step_time:.1f}s)")
             else:
-                log(f"  > {action_type}[{action_idx}] -> {result} ({step_time:.1f}s)")
+                log(f"  Result: {action_type}[{action_idx}] -> {result} ({step_time:.1f}s)")
 
             # Store for next iteration's memory
             last_action = action
