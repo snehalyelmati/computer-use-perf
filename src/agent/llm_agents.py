@@ -2,7 +2,7 @@ import json
 import re
 from groq import AsyncGroq
 import asyncio
-from .config import MODEL_NAME, ACTION_MODEL_NAME, FILTER_MODEL_NAME, ORACLE_MODEL, MAX_BATCH_SIZE
+from .config import MODEL_NAME, ACTION_MODEL_NAME, FILTER_MODEL_NAME, ORACLE_MODEL, MAX_BATCH_SIZE, REASONING_EFFORT
 from .element_utils import format_element_summary, format_elements_by_proximity
 from .logging_utils import log, log_verbose
 
@@ -22,7 +22,7 @@ def _extract_summary(text: str) -> str:
     Captures multi-line content (bullet lists, etc.) not just the first line.
     """
     lines = []
-    for label in ("GOAL", "DATA", "PROGRESS"):
+    for label in ("GOAL", "TASK", "DATA", "PROGRESS"):
         pattern = rf'^{label}:\s*(.*?)(?=^(?:GOAL|DATA|PROGRESS|NEXT):|\Z)'
         match = re.search(pattern, text, re.MULTILINE | re.IGNORECASE | re.DOTALL)
         if match:
@@ -130,6 +130,7 @@ Page text:
             ],
             max_completion_tokens=1500,
             temperature=0,
+            reasoning_effort=REASONING_EFFORT,
         )
         result = _strip_think_tags(response.choices[0].message.content)
 
@@ -139,16 +140,11 @@ Page text:
 
         log_verbose(f"=== Diagnosis Output ===\n{result}\n=== End Diagnosis Output ===")
 
-        new_summary = _extract_summary(result)
-        if new_summary:
-            log(f"  Diagnosis summary:")
-            for line in new_summary.split('\n'):
-                if line.strip():
-                    log(f"    {line.strip()}")
-            return new_summary
+        if result:
+            log(f"  Diagnosis: {result[:200]}..." if len(result) > 200 else f"  Diagnosis: {result}")
+            return result
 
-        # If extraction failed but we got a response, keep existing summary
-        log(f"  Diagnosis produced no parseable summary, keeping existing")
+        log(f"  Diagnosis produced empty response, keeping existing")
         return challenge_summary
     except Exception as e:
         log(f"  Diagnosis error: {e}")
@@ -168,6 +164,7 @@ async def extract_learning(client: AsyncGroq, challenge_summary: str) -> str:
             ],
             max_completion_tokens=600,
             temperature=0,
+            reasoning_effort=REASONING_EFFORT,
         )
         result = _strip_think_tags(response.choices[0].message.content)
         log(f"  Learning extracted: {result}")
@@ -257,13 +254,33 @@ def _compute_element_diff(prev_elements: list, elements: list) -> str:
     return "\n".join(parts)
 
 
+def _compute_text_diff(prev_text: list[str], curr_text: list[str]) -> str:
+    """Compute diff between previous and current page text, highlighting new lines."""
+    if not prev_text:
+        return ""
+
+    prev_set = set(prev_text)
+    new_lines = [line for line in curr_text if line not in prev_set]
+
+    if not new_lines:
+        return ""
+
+    # Limit to first 10 new lines to avoid noise
+    preview = new_lines[:10]
+    result = "*** New text appeared: " + " | ".join(preview)
+    if len(new_lines) > 10:
+        result += f" ... (+{len(new_lines) - 10} more)"
+    return result + " ***"
+
+
 async def analyze_overview(client: AsyncGroq, content: dict, elements: list, memory: list,
                            last_results: list[tuple[dict, str]] = None,
                            state_changed: bool = True, unchanged_count: int = 0,
                            challenge_summary: str = "",
                            agent_learnings: list[str] = None,
                            prev_elements: list = None,
-                           last_action_pos: tuple = None) -> tuple[str, str]:
+                           last_action_pos: tuple = None,
+                           prev_all_text: list[str] = None) -> tuple[str, str]:
     """Overview agent - analyzes full page with memory of previous actions.
 
     Args:
@@ -285,7 +302,7 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
     # Update system message with persistent challenge summary and learnings
     system_content = OVERVIEW_PROMPT
     if challenge_summary:
-        system_content += f"\n\nCurrent context:\n{challenge_summary}"
+        system_content += f"\n\nFailure analysis — use this to avoid repeating mistakes:\n{challenge_summary}"
     if agent_learnings:
         system_content += "\n\nLearnings from previous pages:\n" + "\n".join(f"- {l}" for l in agent_learnings)
     memory[0] = {"role": "system", "content": system_content}
@@ -336,6 +353,10 @@ Page content:
     diff_summary = _compute_element_diff(prev_elements or [], elements)
     if diff_summary:
         combined_content += diff_summary + "\n\n"
+    # Add text diff to highlight new text (feedback messages, errors, etc.)
+    text_diff = _compute_text_diff(prev_all_text or [], filtered_text)
+    if text_diff:
+        combined_content += text_diff + "\n\n"
     combined_content += f"Current page state:\n{page_content}\n\nWhat should we do next?"
 
     memory.append({
@@ -356,6 +377,7 @@ Page content:
             messages=memory,
             max_completion_tokens=800,
             temperature=0,
+            reasoning_effort=REASONING_EFFORT,
         )
         result = _strip_think_tags(response.choices[0].message.content)
 

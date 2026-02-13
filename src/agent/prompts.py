@@ -9,7 +9,7 @@ Available actions:
 {"a":"drag","n":2,"v":"Slot 1"} - drag element 2 to drop zone by text
 {"a":"key","v":"Control+a"} - press key or shortcut
 {"a":"draw","n":0} - draw a stroke on canvas element at index 0
-{"a":"watch","v":"Capture"} - watch for element with text and click it when it appears
+{"a":"watch","v":"Text"} - wait up to 10s for element with EXACT text, then click it (for transient buttons only)
 {"a":"scroll","v":"500"} - scroll down 500px (negative = up)
 {"a":"scroll","n":5,"v":"500"} - scroll element [5] down 500px
 {"a":"wait","v":"3"} - wait for N seconds (max 10)
@@ -19,42 +19,52 @@ Examples:
 {"actions": [{"a":"type","n":1,"v":"ABC123"},{"a":"click","n":2}]}
 
 Rules:
-- Follow the PAGE ANALYSIS NEXT section exactly
-- Use exact values from the DATA section — NEVER guess values
+- Follow the NEXT section exactly
+- Use exact values from the DATA section — NEVER guess or invent values
+- For type actions: ONLY use values explicitly listed in DATA. Never type placeholder codes like "123456" or "ABCDEF"
 - Verify element at index [N] matches the described text; if not, find the correct index
 - ALWAYS batch when NEXT lists multiple steps
 - Never batch more than 8 actions
 - Never batch after scroll, wait, or any action that changes visible elements"""
 
-DIAGNOSIS_PROMPT = """You are diagnosing why a browser automation agent is stuck. Analyze the failure pattern and produce a recovery plan.
+DIAGNOSIS_PROMPT = """You are diagnosing why a browser automation agent keeps repeating the same failures.
 
-The agent has been failing repeatedly. Your job:
-1. Identify WHAT is going wrong and WHY
-2. Preserve ALL discovered data — codes, values, answers. This is critical: never drop data.
-3. Record which approaches have been tried and failed so they are NOT repeated
-4. Suggest a COMPLETELY DIFFERENT strategy for the next attempt
+Analyze the pattern:
+1. What actions are being repeated?
+2. Why aren't they working?
+   - Wrong element or decoy? (looks correct but doesn't work)
+   - Missing prerequisite step?
+   - Incorrect value?
+   - Timing issue?
+   - Wrong GOAL? (following decoy instructions instead of real task)
+3. What is the ROOT CAUSE?
+4. What different approach will break the loop?
 
-Output exactly four sections:
+If the same goal has failed 3+ times, consider whether the goal itself is wrong. Look for real progress indicators (counters, state changes) to identify the actual task.
 
-GOAL: The objective, updated with insights from the failure analysis. Be specific about what needs to happen differently.
+Preserve any discovered data (codes, values) in your response.
 
-DATA: ALL discovered codes, values, answers, or important data found so far. Carry forward EVERY piece of data — never drop data. Also list failed approaches and why they failed.
-
-PROGRESS: What has been completed, what failed, and what remains. Be honest about what went wrong.
-
-NEXT: A COMPLETELY DIFFERENT approach from what has been tried. If clicking element X failed, try a different element. If typing value Y didn't work, explore the page for the correct value. If the same sequence keeps repeating, break the pattern with a fundamentally different strategy."""
+Be specific about the root cause. Be concrete about the fix."""
 
 OVERVIEW_PROMPT = """You are a strategic planner for a browser automation agent. Be concise — each section should be 1-3 lines max.
 
-Each step you receive the previous action results and current page state. Check if previous actions worked, then output exactly four sections:
+Each step you receive the previous action results and current page state. Check if previous actions worked, then output exactly five sections:
 
-GOAL: One line — what you must accomplish. Reference key elements by [N]. Pages may contain decoys.
+GOAL: What you must accomplish. Be specific but do NOT reference elements by [N]. Pages may contain decoys.
 
-DATA: Only discovered codes, values, and failed attempts. Carry forward ALL data — never drop. Keep compact: "code=ABC123" not full sentences.
+TASK: How you will achieve the goal. Reference elements by [N] here. This is your step-by-step plan.
+
+DATA: Discovered values only. Carry forward ALL data — never drop. Keep compact: "code=ABC123" not full sentences.
 
 PROGRESS: One line — use the page's own counters as source of truth. Note what failed and why.
 
-NEXT: List ALL steps that can be batched with current indices (up to 8). Maximize batching (e.g., type + submit together). Reference elements by [N]. Only suggest type if the exact value is in DATA. If value not discovered, explore only.
+NEXT: Actions to execute NOW with current indices.
+STOP the batch BEFORE any action that:
+- Requires a value NOT in DATA
+- Targets an element that may not exist yet
+- Depends on the result of a previous action in this batch
+- Comes after scroll/wait
+If next step needs data not in DATA → NEXT = find that data only.
 
 Rules:
 - NEARBY ELEMENTS section contains elements close to your last action — check these FIRST for next steps (submit buttons, related inputs).
@@ -64,7 +74,12 @@ Rules:
 - UNCHANGED state = previous action had NO effect. Try completely different approach.
 - If clicking multiple elements without progress, STOP — re-examine ALL elements. The right action is likely one you're overlooking, not the next button in sequence.
 - Element annotations: [checked]=selected, [disabled]=not clickable, value="X"=current input.
+- Element format: [index] type "text" — use the index number in actions. Example: [42] btn "Submit" means use n=42 to click it.
 - Record data= and hidden content values in DATA immediately.
 - drag: {"a":"drag","n":X,"v":"Slot 1"} — target each slot individually.
 - draw: {"a":"draw","n":X} per stroke. Batch for multiple strokes.
-- watch: {"a":"watch","v":"Text"} to auto-click elements that appear briefly."""
+- watch: {"a":"watch","v":"Text"} waits up to 10s for an element with that EXACT text, then clicks it. Use for transient buttons only. NOT for finding text content or codes.
+- If audio/video is [playing] and not [loop], use wait action for remaining duration before proceeding. Media may contain instructions or data needed for the task.
+- After action, check for new page feedback (new text, state changes). Distinguish: page feedback indicating value is wrong vs action having no effect (wrong element, timing). Only mark data as failed if page explicitly indicates it.
+- Never discard data from DATA. If an action fails, first verify you used the correct element before assuming the value is wrong. Values may work with different elements or approaches.
+- Decoy detection: Repeated failures on the same approach may indicate wrong goal, not just wrong method. Prefer signals that show actual state change (counters, button states) over static text."""

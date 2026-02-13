@@ -8,6 +8,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
     """
     selector = ', '.join([
         'button', 'input', 'textarea', 'select', 'a[href]', 'canvas',
+        'audio', 'video',
         '[onclick]', '[contenteditable]', '[tabindex]:not([tabindex="-1"])',
         '[role="button"]', '[role="radio"]', '[role="checkbox"]',
         '[role="tab"]', '[role="switch"]', '[role="menuitem"]',
@@ -108,8 +109,22 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 else if (tag === 'select') abbr = 'sel';
                 else if (tag === 'a') abbr = 'link';
                 else if (tag === 'canvas') abbr = 'canvas';
+                else if (tag === 'audio') abbr = 'audio';
+                else if (tag === 'video') abbr = 'video';
                 else if (role === 'tab') abbr = 'tab';
                 else if (role === 'switch') abbr = 'switch';
+
+                // Media element metadata
+                let mediaPlaying = false;
+                let mediaDuration = 0;
+                let mediaCurrentTime = 0;
+                let mediaLoop = false;
+                if (tag === 'audio' || tag === 'video') {
+                    mediaPlaying = !el.paused && !el.ended;
+                    mediaDuration = el.duration || 0;
+                    mediaCurrentTime = el.currentTime || 0;
+                    mediaLoop = el.loop || false;
+                }
 
                 // Detect scrollable container
                 const ov = window.getComputedStyle(el).overflowY || window.getComputedStyle(el).overflow;
@@ -124,6 +139,8 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                     state: state, disabled: disabled, href: href,
                     value: value, checked: checked, selected: selected,
                     name: name, dataValue: dataValue,
+                    mediaPlaying: mediaPlaying, mediaDuration: mediaDuration,
+                    mediaCurrentTime: mediaCurrentTime, mediaLoop: mediaLoop,
                     bbox: {
                         x: Math.round(rect.x + rect.width / 2),
                         y: Math.round(rect.y + rect.height / 2)
@@ -134,7 +151,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
             # Skip elements with no useful content for the LLM
             has_content = (metadata['text'] or metadata['value'] or metadata['name'] or
                            metadata['dataValue'] or metadata['href'])
-            is_core_interactive = metadata['tag'] in ('inp', 'txt', 'sel', 'canvas', 'scroll')
+            is_core_interactive = metadata['tag'] in ('inp', 'txt', 'sel', 'canvas', 'scroll', 'audio', 'video')
             has_semantic_role = metadata['role'] in ('button', 'radio', 'checkbox', 'tab', 'switch', 'menuitem', 'option', 'link', 'slider')
             if not has_content and not is_core_interactive and not has_semantic_role:
                 continue
@@ -176,6 +193,16 @@ def format_element_summary(elements: list, max_elements: int = None) -> str:
             state += " [checked]"
         if el.get('selected'):
             state += " [selected]"
+
+        # Media state for audio/video elements
+        if el.get('tag') in ('audio', 'video'):
+            if el.get('mediaLoop'):
+                state += " [loop]"
+            if el.get('mediaPlaying'):
+                remaining = el.get('mediaDuration', 0) - el.get('mediaCurrentTime', 0)
+                state += f" [playing, {int(remaining)}s remaining]"
+            else:
+                state += " [paused]"
 
         text = el["text"] if el["text"] else el["type"] or "?"
 

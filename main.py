@@ -64,6 +64,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         recent_action_sigs = []  # Track action signatures for repetition detection
         agent_learnings = []  # Persistent learnings across entire run
         prev_elements = []  # Previous step's elements for diff
+        prev_all_text = []  # Previous step's text for diff
         pending_learning_task = None
         last_action_pos = None  # (x, y) of last interacted element for proximity
 
@@ -91,6 +92,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                     consecutive_failures = 0
                     recent_action_sigs.clear()
                     prev_elements = []
+                    prev_all_text = []
                     last_action_pos = None  # Reset proximity - new challenge starts fresh
 
                 log(f"\n[Challenge {challenge}] {current_url}")
@@ -154,9 +156,10 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 client, content, elements, overview_messages,
                 last_results, state_changed, unchanged_count,
                 challenge_summary, agent_learnings, prev_elements,
-                last_action_pos
+                last_action_pos, prev_all_text
             )
             prev_elements = elements
+            prev_all_text = content.get('all_text', [])
 
             # Log full overview (multi-line)
             log(f"  Overview LLM:")
@@ -173,12 +176,12 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 log(f"  ⚠ LLM error, retrying...")
                 continue
 
-            # Compute action signature for repetition detection (semantic type, not index)
+            # Compute action signature for repetition detection (uses index for exact match)
             def _action_sig(a):
                 action_type = a.get('a', '?')
                 idx = a.get('n', 0)
                 if isinstance(idx, int) and 0 <= idx < len(elements):
-                    return f"{action_type}:{elements[idx]['tag']}"
+                    return f"{action_type}:{elements[idx]['tag']}:{idx}"
                 return f"{action_type}:{a.get('v', '?')}"
             sig = "|".join(_action_sig(a) for a in actions)
             recent_action_sigs.append(sig)
@@ -203,13 +206,6 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
 
             # ACT - execute batch with verification
             results = await execute_batch(page, actions, handles)
-
-            # Track position of LAST action with an element index (handles batching)
-            for action in reversed(actions):
-                idx = action.get('n')
-                if idx is not None and 0 <= idx < len(elements) and elements[idx].get('bbox'):
-                    last_action_pos = (elements[idx]['bbox']['x'], elements[idx]['bbox']['y'])
-                    break
 
             # Log each executed action result
             for action, result in results:
