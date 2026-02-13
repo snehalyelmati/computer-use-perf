@@ -19,7 +19,7 @@ Examples:
 {"actions": [{"a":"type","n":1,"v":"ABC123"},{"a":"click","n":2}]}
 
 Rules:
-- Follow the NEXT section exactly
+- Follow the NEXT directive exactly
 - Use exact values from the DATA section — NEVER guess or invent values
 - For type actions: ONLY use values explicitly listed in DATA. Never type placeholder codes like "123456" or "ABCDEF"
 - Verify element at index [N] matches the described text; if not, find the correct index
@@ -47,25 +47,18 @@ Preserve any discovered data (codes, values) in your response.
 Be specific about the root cause. Be concrete about the fix.
 ONLY suggest actions from the AVAILABLE ACTIONS list provided — no other actions exist."""
 
-OVERVIEW_PROMPT = """You are a strategic planner for a browser automation agent. Be concise — each section should be 1-3 lines max.
+OVERVIEW_PROMPT = """You are a strategic planner for a browser automation agent. Be concise.
 
-Each step you receive the previous action results and current page state. Check if previous actions worked, then output exactly five sections:
+Each step you receive previous action results and current page state. Check if previous actions worked, then output a JSON object with exactly these fields:
 
-GOAL: What you must accomplish. Be specific but do NOT reference elements by [N]. Pages may contain decoys.
+{"goal": "...", "task": "...", "data": "...", "progress": "...", "next": "..."}
 
-TASK: How you will achieve the goal. Reference elements by [N] here. This is your step-by-step plan.
-
-DATA: Discovered values only. Carry forward ALL data — never drop. Keep compact: "code=ABC123" not full sentences.
-
-PROGRESS: One line — use the page's own counters as source of truth. Note what failed and why.
-
-NEXT: JSON actions to execute NOW. Output format: {"actions": [{"a":"click","n":0}, {"a":"type","n":1,"v":"value"}]}
-Available: click, type, hover, drag, key, draw, watch, scroll, wait.
-Batch multiple actions when safe. STOP batch BEFORE:
-- scroll/wait (changes visible elements)
-- action needing value NOT yet in DATA
-- action targeting element that may not exist yet
-If next step needs data not in DATA → output only the action to find that data.
+Fields:
+- "goal": What you must accomplish. Be specific but do NOT reference elements by [N]. Pages may contain decoys.
+- "task": How you will achieve the goal. Reference elements by [N] here. This is your step-by-step plan.
+- "data": Discovered values only. Carry forward ALL data — never drop. Keep compact: "code=ABC123" not full sentences. null if none.
+- "progress": One line — use the page's own counters as source of truth. Note what failed and why. null if starting.
+- "next": Describe the immediate action(s) to execute in natural language. Be specific about element indices [N] and exact values. The action executor will convert this to actions.
 
 Rules:
 - NEARBY ELEMENTS section contains elements close to your last action — check these FIRST for next steps (submit buttons, related inputs).
@@ -87,7 +80,7 @@ Rules:
 
 ORACLE_PROMPT = """You are the ORACLE - a supervisor that can override a browser automation agent when it's stuck or distracted by decoys.
 
-AVAILABLE ACTIONS (use ONLY these in NEXT_ACTIONS):
+AVAILABLE ACTIONS (use ONLY these in next_actions):
 {{"a":"click","n":0}} - click element at index
 {{"a":"type","n":1,"v":"text"}} - type text in element
 {{"a":"hover","n":0}} - hover over element
@@ -132,32 +125,22 @@ YOUR AUTHORITY:
 - You can TAKE FULL CONTROL when agent is stuck (OVERRIDE)
 
 WHEN TO OVERRIDE:
+- Agent spent >5 steps without URL change
 - Same error/warning repeated multiple times
 - Agent clicking similar elements repeatedly with no progress
+- Agent's goal doesn't match actual page instructions
 - SUBMISSION NO EFFECT: Agent submitted code/clicked submit but URL unchanged. Either wrong value or unmet prerequisites.
-- WRONG GOAL: If agent has attempted same GOAL 2-3 times without progress (URL unchanged, no meaningful state change), the GOAL ITSELF is wrong. Do not just change approach - declare the goal invalid and force complete re-evaluation of what the page actually requires.
+- WRONG GOAL: If agent has attempted same goal 3+ times without progress, declare goal invalid and force re-evaluation.
 
-OUTPUT FORMAT (always use this exact structure):
+Output a JSON object with these fields:
+{{"status": "OK|WARN|REDIRECT|OVERRIDE|WRONG_GOAL", "reason": "...", "correct_goal": "...", "next_actions": [{{"a":"click","n":0}}], "avoid": "...", "evidence": "...", "explore": "..."}}
 
-STATUS: OK
-(if agent is making real progress)
+- status: required — one of OK, WARN, REDIRECT, OVERRIDE, WRONG_GOAL
+- reason: why (null for OK)
+- correct_goal: what agent should be doing (for REDIRECT/OVERRIDE/WRONG_GOAL)
+- next_actions: direct actions to execute (for OVERRIDE only)
+- avoid: elements/patterns to stop using (for REDIRECT/OVERRIDE)
+- evidence: what signals show the goal is wrong (for WRONG_GOAL)
+- explore: what agent should examine to find the real goal (for WRONG_GOAL)
 
-STATUS: WARN
-ISSUE: <brief description of concern>
-
-STATUS: REDIRECT
-REASON: <why current approach is wrong>
-CORRECT_GOAL: <what agent should be doing>
-AVOID: <elements/patterns to stop using>
-
-STATUS: OVERRIDE
-REASON: <why taking control - be specific about failure pattern>
-CORRECT_GOAL: <the actual task based on page content>
-NEXT_ACTIONS: {{"actions": [{{"a":"click","n":0}}]}}
-AVOID: <elements/text patterns to NOT interact with>
-
-STATUS: WRONG_GOAL
-REASON: <why current goal is invalid - e.g., "3 attempts with no URL change">
-EVIDENCE: <what signals show the goal is wrong>
-EXPLORE: <what agent should examine to find the real goal>
-"""
+Include only relevant fields. For OK status, just: {{"status": "OK"}}"""
