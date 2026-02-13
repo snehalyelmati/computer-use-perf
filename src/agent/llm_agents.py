@@ -212,11 +212,13 @@ async def evaluate_step(
             "correct_goal": None,
             "next_actions": None,
             "avoid": None,
+            "evidence": None,
+            "explore": None,
             "raw": text
         }
 
         # Extract STATUS
-        status_match = re.search(r'^STATUS:\s*(OK|WARN|REDIRECT|OVERRIDE)', text, re.MULTILINE | re.IGNORECASE)
+        status_match = re.search(r'^STATUS:\s*(OK|WARN|REDIRECT|OVERRIDE|WRONG_GOAL)', text, re.MULTILINE | re.IGNORECASE)
         if status_match:
             result["status"] = status_match.group(1).upper()
 
@@ -244,6 +246,16 @@ async def evaluate_step(
         avoid_match = re.search(r'^AVOID:\s*(.+?)(?=^[A-Z_]+:|\Z)', text, re.MULTILINE | re.DOTALL)
         if avoid_match:
             result["avoid"] = avoid_match.group(1).strip()
+
+        # Extract EVIDENCE (for WRONG_GOAL)
+        evidence_match = re.search(r'^EVIDENCE:\s*(.+?)(?=^[A-Z_]+:|\Z)', text, re.MULTILINE | re.DOTALL)
+        if evidence_match:
+            result["evidence"] = evidence_match.group(1).strip()
+
+        # Extract EXPLORE (for WRONG_GOAL)
+        explore_match = re.search(r'^EXPLORE:\s*(.+?)(?=^[A-Z_]+:|\Z)', text, re.MULTILINE | re.DOTALL)
+        if explore_match:
+            result["explore"] = explore_match.group(1).strip()
 
         return result
 
@@ -564,10 +576,16 @@ Page content:
     # Combine previous results with current page state into single user message
     combined_content = ""
     # Add Oracle directive if not OK
-    if oracle_verdict and oracle_verdict.get("status") in ("WARN", "REDIRECT", "OVERRIDE"):
+    if oracle_verdict and oracle_verdict.get("status") in ("WARN", "REDIRECT", "OVERRIDE", "WRONG_GOAL"):
         directive_parts = [f"ORACLE DIRECTIVE ({oracle_verdict['status']}):"]
         if oracle_verdict.get("reason"):
             directive_parts.append(f"Reason: {oracle_verdict['reason']}")
+        if oracle_verdict.get("status") == "WRONG_GOAL":
+            directive_parts.append("YOUR CURRENT GOAL IS INVALID. You must completely re-evaluate what this page requires.")
+            if oracle_verdict.get("evidence"):
+                directive_parts.append(f"Evidence: {oracle_verdict['evidence']}")
+            if oracle_verdict.get("explore"):
+                directive_parts.append(f"Explore: {oracle_verdict['explore']}")
         if oracle_verdict.get("correct_goal"):
             directive_parts.append(f"Correct Goal: {oracle_verdict['correct_goal']}")
         if oracle_verdict.get("avoid"):

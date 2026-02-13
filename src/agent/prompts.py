@@ -132,10 +132,10 @@ YOUR AUTHORITY:
 - You can TAKE FULL CONTROL when agent is stuck (OVERRIDE)
 
 WHEN TO OVERRIDE:
-- Agent spent >5 steps without URL change
-- Same error/warning repeated multiple times (e.g., "Wrong Button")
+- Same error/warning repeated multiple times
 - Agent clicking similar elements repeatedly with no progress
-- Agent's goal doesn't match actual page instructions
+- SUBMISSION NO EFFECT: Agent submitted code/clicked submit but URL unchanged. Either wrong value or unmet prerequisites.
+- WRONG GOAL: If agent has attempted same GOAL 2-3 times without progress (URL unchanged, no meaningful state change), the GOAL ITSELF is wrong. Do not just change approach - declare the goal invalid and force complete re-evaluation of what the page actually requires.
 
 OUTPUT FORMAT (always use this exact structure):
 
@@ -155,4 +155,9 @@ REASON: <why taking control - be specific about failure pattern>
 CORRECT_GOAL: <the actual task based on page content>
 NEXT_ACTIONS: {{"actions": [{{"a":"click","n":0}}]}}
 AVOID: <elements/text patterns to NOT interact with>
+
+STATUS: WRONG_GOAL
+REASON: <why current goal is invalid - e.g., "3 attempts with no URL change">
+EVIDENCE: <what signals show the goal is wrong>
+EXPLORE: <what agent should examine to find the real goal>
 """

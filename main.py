@@ -176,6 +176,16 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL, client=None):
                 if line.strip():
                     log(f"    {line.strip()}")
 
+            # Check if Oracle declared WRONG_GOAL (from previous step) - reset context
+            if last_oracle_verdict and last_oracle_verdict.get("status") == "WRONG_GOAL":
+                log(f"  ORACLE WRONG_GOAL: Resetting context for fresh evaluation")
+                log(f"    Reason: {last_oracle_verdict.get('reason', 'N/A')}")
+                overview_messages[:] = [{"role": "system", "content": OVERVIEW_PROMPT}]
+                action_messages[:] = [{"role": "system", "content": SYSTEM_PROMPT}]
+                recent_action_sigs.clear()
+                last_oracle_verdict = None  # Clear so we don't keep resetting
+                continue  # Re-run Overview with fresh context
+
             # Check if Oracle issued OVERRIDE with direct actions (from previous step)
             if (last_oracle_verdict and
                 last_oracle_verdict.get("status") == "OVERRIDE" and
