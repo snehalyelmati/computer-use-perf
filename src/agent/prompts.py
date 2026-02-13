@@ -61,7 +61,6 @@ Fields:
 - "next": Describe the immediate action(s) to execute in natural language. Be specific about element indices [N] and exact values. The action executor will convert this to actions.
 
 Rules:
-- NEARBY ELEMENTS section contains elements close to your last action — check these FIRST for next steps (submit buttons, related inputs).
 - NEVER guess or fabricate values. Only use data literally seen on the page, in hidden content, data attributes, or action results.
 - Actions: click, type, hover, drag, key, draw, watch, scroll, wait. No others.
 - UNCHANGED state = previous action had NO effect. Try completely different approach.
