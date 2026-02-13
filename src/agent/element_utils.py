@@ -273,21 +273,21 @@ def format_elements_by_proximity(elements: list, last_pos: tuple = None,
     return "\n".join(parts)
 
 
-def format_context(overview: str, elements: list) -> str:
+def format_context(goal: str, data: str | None, next_directive: str, elements: list) -> str:
     """Format the analysis and elements for the action LLM.
 
-    Note: Elements now have sequential indices (0, 1, 2...) that match
-    the element handles list, so we show them all without reordering.
+    Args:
+        goal: The current goal from overview
+        data: Discovered data values (may be None)
+        next_directive: Natural language description of next actions
+        elements: List of element metadata dicts
     """
-
     parts = []
-
-    # Overview from analysis
     parts.append("=== PAGE ANALYSIS ===")
-    parts.append(overview)
-
-    # Elements - show all with enriched info (role, state)
+    parts.append(f"GOAL: {goal}")
+    if data:
+        parts.append(f"DATA: {data}")
+    parts.append(f"NEXT: {next_directive}")
     parts.append("\n=== INTERACTIVE ELEMENTS ===")
     parts.append(format_element_summary(elements))
-
     return "\n".join(parts)

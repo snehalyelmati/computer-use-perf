@@ -11,16 +11,17 @@ from cerebras.cloud.sdk import AsyncCerebras
 from playwright.async_api import async_playwright
 
 from src.agent.action_executor import execute_batch
+from src.agent.llm_client import LLMClient
 from src.agent.config import DEFAULT_BASE_URL, LOG_DIR, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD, FAILURE_RESET_THRESHOLD, REPETITION_WINDOW
 from src.agent.providers import PROVIDER_MODELS
 from src.agent.content_extraction import extract_structured_content
 from src.agent.element_utils import extract_elements, format_context
-from src.agent.llm_agents import analyze_overview, llm_decide, extract_learning, diagnose_failure, evaluate_step, _compute_element_diff, _compute_text_diff, parse_actions_from_overview
+from src.agent.llm_agents import analyze_overview, llm_decide, extract_learning, diagnose_failure, evaluate_step, _compute_element_diff, _compute_text_diff
 from src.agent.logging_utils import log, log_verbose
 from src.agent.prompts import OVERVIEW_PROMPT, SYSTEM_PROMPT
 from src.agent.state_utils import compute_state_hash
 
-async def run_agent(base_url: str = DEFAULT_BASE_URL, client=None):
+async def run_agent(base_url: str = DEFAULT_BASE_URL, client: LLMClient | None = None):
     """Run the agent through all challenges."""
 
     if client is None:
@@ -67,10 +68,12 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL, client=None):
         recent_action_sigs = []  # Track action signatures for repetition detection
         learnings_file = f"{LOG_DIR}/learnings.txt"  # Save learnings to file for review
         prev_elements = []  # Previous step's elements for diff
-        prev_all_text = []  # Previous step's text for diff
+        prev_all_text = []  # Previous step's raw text for Oracle diff
+        prev_filtered_text = []  # Previous step's filtered text for Overview diff
         pending_learning_task = None
         last_action_pos = None  # (x, y) of last interacted element for proximity
         last_oracle_verdict = None  # Oracle feedback from previous step
+        oracle_history = []  # Recent non-OK Oracle verdicts for pattern detection
         challenge_step_count = 0  # Steps spent on current challenge
 
         for step in range(500):
@@ -99,8 +102,10 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL, client=None):
                     recent_action_sigs.clear()
                     prev_elements = []
                     prev_all_text = []
+                    prev_filtered_text = []
                     last_action_pos = None  # Reset proximity - new challenge starts fresh
                     last_oracle_verdict = None  # Reset oracle feedback
+                    oracle_history.clear()  # Reset oracle memory
                     challenge_step_count = 0  # Reset step counter for new challenge
 
                 log(f"\n[Challenge {challenge}] {current_url}")
@@ -160,52 +165,74 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL, client=None):
                     log(f"  Learning saved to {learnings_file}")
                 pending_learning_task = None
 
-            overview, challenge_summary = await analyze_overview(
+            # Compute diffs BEFORE updating prev_ state (for Oracle)
+            step_element_diff = _compute_element_diff(prev_elements, elements)
+            step_text_diff = _compute_text_diff(prev_all_text, content.get('all_text', []))
+
+            overview_resp, challenge_summary, last_filtered_text = await analyze_overview(
                 client, content, elements, overview_messages,
                 last_results, state_changed, unchanged_count,
                 challenge_summary, prev_elements,
                 last_action_pos, prev_all_text,
+                prev_filtered_text=prev_filtered_text,
                 oracle_verdict=last_oracle_verdict
             )
             prev_elements = elements
             prev_all_text = content.get('all_text', [])
+            prev_filtered_text = last_filtered_text
 
-            # Log full overview (multi-line)
+            # Log overview fields
             log(f"  Overview LLM:")
-            for line in overview.split('\n'):
-                if line.strip():
-                    log(f"    {line.strip()}")
+            log(f"    GOAL: {overview_resp.goal}")
+            if overview_resp.task:
+                log(f"    TASK: {overview_resp.task}")
+            if overview_resp.data:
+                log(f"    DATA: {overview_resp.data}")
+            if overview_resp.progress:
+                log(f"    PROGRESS: {overview_resp.progress}")
+            log(f"    NEXT: {overview_resp.next}")
 
             # Check if Oracle declared WRONG_GOAL (from previous step) - reset context
-            if last_oracle_verdict and last_oracle_verdict.get("status") == "WRONG_GOAL":
+            if last_oracle_verdict and last_oracle_verdict.status == "WRONG_GOAL":
                 log(f"  ORACLE WRONG_GOAL: Resetting context for fresh evaluation")
-                log(f"    Reason: {last_oracle_verdict.get('reason', 'N/A')}")
+                log(f"    Reason: {last_oracle_verdict.reason or 'N/A'}")
                 overview_messages[:] = [{"role": "system", "content": OVERVIEW_PROMPT}]
                 action_messages[:] = [{"role": "system", "content": SYSTEM_PROMPT}]
                 recent_action_sigs.clear()
+                oracle_history.clear()  # Reset oracle memory on goal reset
                 last_oracle_verdict = None  # Clear so we don't keep resetting
                 continue  # Re-run Overview with fresh context
 
-            # Check if Oracle issued OVERRIDE with direct actions (from previous step)
+            # Determine the directive and goal to use
+            action_goal = overview_resp.goal  # default
             if (last_oracle_verdict and
-                last_oracle_verdict.get("status") == "OVERRIDE" and
-                last_oracle_verdict.get("next_actions")):
-                actions = last_oracle_verdict["next_actions"]
-                log(f"  ORACLE OVERRIDE: Using Oracle's {len(actions)} action(s) directly")
-                log(f"    Reason: {last_oracle_verdict.get('reason', 'N/A')}")
+                last_oracle_verdict.status == "OVERRIDE" and
+                last_oracle_verdict.next_directive):
+                next_directive = last_oracle_verdict.next_directive
+                log(f"  ORACLE OVERRIDE: Using Oracle's directive")
+                log(f"    Directive: {next_directive}")
+            elif (last_oracle_verdict and
+                  last_oracle_verdict.status == "REDIRECT" and
+                  last_oracle_verdict.correct_goal):
+                next_directive = overview_resp.next
+                action_goal = last_oracle_verdict.correct_goal
+                log(f"  ORACLE REDIRECT: Correcting goal for Action LLM")
+                log(f"    Corrected goal: {action_goal}")
             else:
-                # TODO: Clean up Action LLM code path later once Overview JSON is stable
-                # Try to parse actions directly from Overview's NEXT section
-                actions = parse_actions_from_overview(overview)
-                if actions is None:
-                    # Fallback to Action LLM if parsing fails
-                    context_str = format_context(overview, elements)
-                    actions = await llm_decide(client, action_messages, context_str, last_results)
-                    if len(actions) == 1 and actions[0].get("a") == "error":
-                        log(f"  ⚠ LLM error, retrying...")
-                        continue
-                else:
-                    log(f"  Actions from Overview: {len(actions)} action(s)")
+                next_directive = overview_resp.next
+
+            # Always route through Action LLM
+            context_str = format_context(action_goal, overview_resp.data,
+                                         next_directive, elements)
+            actions = await llm_decide(client, action_messages, context_str, last_results)
+            if len(actions) == 1 and actions[0].get("a") == "error":
+                log(f"  ⚠ LLM error, retrying...")
+                continue
+
+            # Handle empty actions - skip execution, let next iteration reassess
+            if not actions:
+                log(f"  No actions from LLM — continuing")
+                continue
 
             # Compute action signature for repetition detection (uses index for exact match)
             def _action_sig(a):
@@ -254,21 +281,25 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL, client=None):
             else:
                 log(f"  Step time: {step_time:.1f}s ({len(results)} action{'s' if len(results) > 1 else ''})")
 
-            # EVALUATE - Oracle judges if we're on track
-            filtered_text = content.get('all_text', [])
-            element_diff = _compute_element_diff(prev_elements, elements)
-            text_diff = _compute_text_diff(prev_all_text, filtered_text)
+            # EVALUATE - Oracle judges if we're on track (uses pre-computed diffs)
             last_oracle_verdict = await evaluate_step(
                 client,
-                overview=overview,
+                overview=overview_resp,
                 actions=actions,
                 results=results,
                 content=content,
                 elements=elements,
-                element_diff=element_diff,
-                text_diff=text_diff,
+                element_diff=step_element_diff,
+                text_diff=step_text_diff,
                 challenge_step_count=challenge_step_count,
+                oracle_history=oracle_history,
             )
+
+            # Track non-OK verdicts for Oracle memory
+            if last_oracle_verdict.status != "OK":
+                oracle_history.append(last_oracle_verdict)
+                if len(oracle_history) > 5:
+                    oracle_history.pop(0)
 
             # Check per-challenge step budget
             from src.agent.config import CHALLENGE_STEP_BUDGET
@@ -307,8 +338,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL, client=None):
 
             # Store all executed results for next iteration's context
             if not results:
-                log("  No valid actions — waiting 3s")
-                await asyncio.sleep(3)
+                log("  No actions — continuing")
                 continue
             last_results = results
 

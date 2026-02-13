@@ -11,7 +11,7 @@ REPETITION_WINDOW = 2
 CHALLENGE_STEP_BUDGET = 10  # Force diagnosis after this many steps on same challenge
 MODEL_NAME = None  # Set by main.py from provider defaults / CLI
 ORACLE_MODEL = None
-REASONING_EFFORT = "none"
+REASONING_EFFORT = None  # None = use model default from REASONING_MODELS
 PROVIDER = "groq"  # groq | cerebras
 ACTION_MODEL_NAME = None
 FILTER_MODEL_NAME = None
