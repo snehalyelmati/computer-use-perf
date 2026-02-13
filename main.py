@@ -7,21 +7,24 @@ import asyncio
 import os
 import time
 from groq import AsyncGroq
+from cerebras.cloud.sdk import AsyncCerebras
 from playwright.async_api import async_playwright
 
 from src.agent.action_executor import execute_batch
 from src.agent.config import DEFAULT_BASE_URL, LOG_DIR, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD, FAILURE_RESET_THRESHOLD, REPETITION_WINDOW
+from src.agent.providers import PROVIDER_MODELS
 from src.agent.content_extraction import extract_structured_content
 from src.agent.element_utils import extract_elements, format_context
-from src.agent.llm_agents import analyze_overview, llm_decide, extract_learning, diagnose_failure
+from src.agent.llm_agents import analyze_overview, llm_decide, extract_learning, diagnose_failure, evaluate_step, _compute_element_diff, _compute_text_diff, parse_actions_from_overview
 from src.agent.logging_utils import log, log_verbose
 from src.agent.prompts import OVERVIEW_PROMPT, SYSTEM_PROMPT
 from src.agent.state_utils import compute_state_hash
 
-async def run_agent(base_url: str = DEFAULT_BASE_URL):
+async def run_agent(base_url: str = DEFAULT_BASE_URL, client=None):
     """Run the agent through all challenges."""
 
-    client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+    if client is None:
+        client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
@@ -62,13 +65,16 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         state_hashes = []  # Track last STUCK_THRESHOLD state hashes
         consecutive_failures = 0  # Track consecutive steps with failures
         recent_action_sigs = []  # Track action signatures for repetition detection
-        agent_learnings = []  # Persistent learnings across entire run
+        learnings_file = f"{LOG_DIR}/learnings.txt"  # Save learnings to file for review
         prev_elements = []  # Previous step's elements for diff
         prev_all_text = []  # Previous step's text for diff
         pending_learning_task = None
         last_action_pos = None  # (x, y) of last interacted element for proximity
+        last_oracle_verdict = None  # Oracle feedback from previous step
+        challenge_step_count = 0  # Steps spent on current challenge
 
         for step in range(500):
+            challenge_step_count += 1  # Increment at start of each step
             current_url = page.url
 
             # New challenge detected
@@ -94,6 +100,8 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                     prev_elements = []
                     prev_all_text = []
                     last_action_pos = None  # Reset proximity - new challenge starts fresh
+                    last_oracle_verdict = None  # Reset oracle feedback
+                    challenge_step_count = 0  # Reset step counter for new challenge
 
                 log(f"\n[Challenge {challenge}] {current_url}")
                 prev_url = current_url
@@ -143,20 +151,21 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             if data_attrs:
                 log(f"  Data attrs: {data_attrs}")
 
-            # Collect any completed learning
+            # Save any completed learning to file (for later review/prompt optimization)
             if pending_learning_task and pending_learning_task.done():
                 learning = pending_learning_task.result()
                 if learning:
-                    agent_learnings.append(learning)
-                    if len(agent_learnings) > 10:
-                        agent_learnings.pop(0)
+                    with open(learnings_file, "a") as f:
+                        f.write(f"{learning}\n")
+                    log(f"  Learning saved to {learnings_file}")
                 pending_learning_task = None
 
             overview, challenge_summary = await analyze_overview(
                 client, content, elements, overview_messages,
                 last_results, state_changed, unchanged_count,
-                challenge_summary, agent_learnings, prev_elements,
-                last_action_pos, prev_all_text
+                challenge_summary, prev_elements,
+                last_action_pos, prev_all_text,
+                oracle_verdict=last_oracle_verdict
             )
             prev_elements = elements
             prev_all_text = content.get('all_text', [])
@@ -167,14 +176,26 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 if line.strip():
                     log(f"    {line.strip()}")
 
-            context_str = format_context(overview, elements)
-
-            # THINK - pass action memory and previous results for sequencing
-            actions = await llm_decide(client, action_messages, context_str, last_results)
-
-            if len(actions) == 1 and actions[0].get("a") == "error":
-                log(f"  ⚠ LLM error, retrying...")
-                continue
+            # Check if Oracle issued OVERRIDE with direct actions (from previous step)
+            if (last_oracle_verdict and
+                last_oracle_verdict.get("status") == "OVERRIDE" and
+                last_oracle_verdict.get("next_actions")):
+                actions = last_oracle_verdict["next_actions"]
+                log(f"  ORACLE OVERRIDE: Using Oracle's {len(actions)} action(s) directly")
+                log(f"    Reason: {last_oracle_verdict.get('reason', 'N/A')}")
+            else:
+                # TODO: Clean up Action LLM code path later once Overview JSON is stable
+                # Try to parse actions directly from Overview's NEXT section
+                actions = parse_actions_from_overview(overview)
+                if actions is None:
+                    # Fallback to Action LLM if parsing fails
+                    context_str = format_context(overview, elements)
+                    actions = await llm_decide(client, action_messages, context_str, last_results)
+                    if len(actions) == 1 and actions[0].get("a") == "error":
+                        log(f"  ⚠ LLM error, retrying...")
+                        continue
+                else:
+                    log(f"  Actions from Overview: {len(actions)} action(s)")
 
             # Compute action signature for repetition detection (uses index for exact match)
             def _action_sig(a):
@@ -193,7 +214,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 log(f"  Repetition detected: {len(set(recent_action_sigs))} unique actions in last {REPETITION_WINDOW} steps — running diagnosis")
                 challenge_summary = await diagnose_failure(
                     client, challenge_summary, content, elements,
-                    last_results, "repetition", agent_learnings, recent_action_sigs
+                    last_results, "repetition", recent_action_sigs
                 )
                 overview_messages[:] = [{"role": "system", "content": OVERVIEW_PROMPT}]
                 action_messages[:] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -205,7 +226,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 log(f"  Batch: {len(actions)} actions")
 
             # ACT - execute batch with verification
-            results = await execute_batch(page, actions, handles)
+            results = await execute_batch(page, actions, handles, elements)
 
             # Log each executed action result
             for action, result in results:
@@ -223,6 +244,36 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
             else:
                 log(f"  Step time: {step_time:.1f}s ({len(results)} action{'s' if len(results) > 1 else ''})")
 
+            # EVALUATE - Oracle judges if we're on track
+            filtered_text = content.get('all_text', [])
+            element_diff = _compute_element_diff(prev_elements, elements)
+            text_diff = _compute_text_diff(prev_all_text, filtered_text)
+            last_oracle_verdict = await evaluate_step(
+                client,
+                overview=overview,
+                actions=actions,
+                results=results,
+                content=content,
+                elements=elements,
+                element_diff=element_diff,
+                text_diff=text_diff,
+                challenge_step_count=challenge_step_count,
+            )
+
+            # Check per-challenge step budget
+            from src.agent.config import CHALLENGE_STEP_BUDGET
+            if challenge_step_count >= CHALLENGE_STEP_BUDGET:
+                log(f"  Challenge step budget exceeded ({challenge_step_count} steps) — running diagnosis")
+                challenge_summary = await diagnose_failure(
+                    client, challenge_summary, content, elements,
+                    results, "step_budget_exceeded", recent_action_sigs
+                )
+                overview_messages[:] = [{"role": "system", "content": OVERVIEW_PROMPT}]
+                action_messages[:] = [{"role": "system", "content": SYSTEM_PROMPT}]
+                challenge_step_count = 0  # Reset budget
+                consecutive_failures = 0
+                recent_action_sigs.clear()
+
             # Track consecutive failures for context reset
             has_failure = any(
                 "verify failed" in r or "error" in r or "not found" in r or "unknown" in r
@@ -237,7 +288,7 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
                 log(f"  Context reset: {consecutive_failures} consecutive failures — running diagnosis")
                 challenge_summary = await diagnose_failure(
                     client, challenge_summary, content, elements,
-                    results, "consecutive_failures", agent_learnings, recent_action_sigs
+                    results, "consecutive_failures", recent_action_sigs
                 )
                 overview_messages[:] = [{"role": "system", "content": OVERVIEW_PROMPT}]
                 action_messages[:] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -264,8 +315,32 @@ async def run_agent(base_url: str = DEFAULT_BASE_URL):
         await browser.close()
 
 def main():
-    import sys
-    base_url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BASE_URL
+    import argparse
+    import src.agent.config as config
+
+    parser = argparse.ArgumentParser(description="Fast Browser Agent")
+    parser.add_argument("--url", default=config.DEFAULT_BASE_URL, help="Target URL")
+    parser.add_argument("--model", default=None, help="Overview/Oracle model name")
+    parser.add_argument("--action-model", default=None, help="Action model name")
+    parser.add_argument("--reasoning", default=None, choices=["none", "low", "medium", "high"], help="Reasoning effort (for models that support it)")
+    parser.add_argument("--provider", default=config.PROVIDER, choices=["groq", "cerebras"], help="LLM provider")
+    args = parser.parse_args()
+
+    # Set provider first, then resolve model defaults
+    config.PROVIDER = args.provider
+    defaults = PROVIDER_MODELS[config.PROVIDER]
+    config.MODEL_NAME = args.model or defaults["model"]
+    config.ORACLE_MODEL = args.model or defaults["oracle"]
+    config.ACTION_MODEL_NAME = args.action_model or defaults["action"]
+    config.FILTER_MODEL_NAME = defaults["filter"]
+    config.REASONING_EFFORT = args.reasoning
+    base_url = args.url
+
+    # Create LLM client based on provider
+    if config.PROVIDER == "cerebras":
+        client = AsyncCerebras()
+    else:
+        client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
 
     os.makedirs(LOG_DIR, exist_ok=True)
     with open(LOG_FILE, "w") as f:
@@ -283,9 +358,11 @@ def main():
     print("=" * 50)
     print("Fast Browser Agent")
     print(f"Target: {base_url}")
+    print(f"Provider: {config.PROVIDER}")
+    print(f"Model: {config.MODEL_NAME}")
     print("=" * 50)
 
-    asyncio.run(run_agent(base_url))
+    asyncio.run(run_agent(base_url, client))
 
 if __name__ == "__main__":
     main()

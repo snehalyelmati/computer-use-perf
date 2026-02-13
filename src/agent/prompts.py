@@ -12,7 +12,7 @@ Available actions:
 {"a":"watch","v":"Text"} - wait up to 10s for element with EXACT text, then click it (for transient buttons only)
 {"a":"scroll","v":"500"} - scroll down 500px (negative = up)
 {"a":"scroll","n":5,"v":"500"} - scroll element [5] down 500px
-{"a":"wait","v":"3"} - wait for N seconds (max 10)
+{"a":"wait","v":"3"} - wait N seconds (max 10, value is seconds not ms)
 
 Examples:
 {"actions": [{"a":"click","n":0}]}
@@ -44,7 +44,8 @@ If the same goal has failed 3+ times, consider whether the goal itself is wrong.
 
 Preserve any discovered data (codes, values) in your response.
 
-Be specific about the root cause. Be concrete about the fix."""
+Be specific about the root cause. Be concrete about the fix.
+ONLY suggest actions from the AVAILABLE ACTIONS list provided — no other actions exist."""
 
 OVERVIEW_PROMPT = """You are a strategic planner for a browser automation agent. Be concise — each section should be 1-3 lines max.
 
@@ -58,17 +59,16 @@ DATA: Discovered values only. Carry forward ALL data — never drop. Keep compac
 
 PROGRESS: One line — use the page's own counters as source of truth. Note what failed and why.
 
-NEXT: Actions to execute NOW with current indices.
-STOP the batch BEFORE any action that:
-- Requires a value NOT in DATA
-- Targets an element that may not exist yet
-- Depends on the result of a previous action in this batch
-- Comes after scroll/wait
-If next step needs data not in DATA → NEXT = find that data only.
+NEXT: JSON actions to execute NOW. Output format: {"actions": [{"a":"click","n":0}, {"a":"type","n":1,"v":"value"}]}
+Available: click, type, hover, drag, key, draw, watch, scroll, wait.
+Batch multiple actions when safe. STOP batch BEFORE:
+- scroll/wait (changes visible elements)
+- action needing value NOT yet in DATA
+- action targeting element that may not exist yet
+If next step needs data not in DATA → output only the action to find that data.
 
 Rules:
 - NEARBY ELEMENTS section contains elements close to your last action — check these FIRST for next steps (submit buttons, related inputs).
-- You direct the action agent, not perform tasks yourself.
 - NEVER guess or fabricate values. Only use data literally seen on the page, in hidden content, data attributes, or action results.
 - Actions: click, type, hover, drag, key, draw, watch, scroll, wait. No others.
 - UNCHANGED state = previous action had NO effect. Try completely different approach.
@@ -82,4 +82,77 @@ Rules:
 - If audio/video is [playing] and not [loop], use wait action for remaining duration before proceeding. Media may contain instructions or data needed for the task.
 - After action, check for new page feedback (new text, state changes). Distinguish: page feedback indicating value is wrong vs action having no effect (wrong element, timing). Only mark data as failed if page explicitly indicates it.
 - Never discard data from DATA. If an action fails, first verify you used the correct element before assuming the value is wrong. Values may work with different elements or approaches.
-- Decoy detection: Repeated failures on the same approach may indicate wrong goal, not just wrong method. Prefer signals that show actual state change (counters, button states) over static text."""
+- Decoy detection: Repeated failures on the same approach may indicate wrong goal, not just wrong method. Prefer signals that show actual state change (counters, button states) over static text.
+- ORACLE AUTHORITY: If ORACLE DIRECTIVE appears with REDIRECT or OVERRIDE status, you MUST follow its guidance. Use CORRECT_GOAL as your new GOAL and avoid elements/patterns listed in AVOID."""
+
+ORACLE_PROMPT = """You are the ORACLE - a supervisor that can override a browser automation agent when it's stuck or distracted by decoys.
+
+AVAILABLE ACTIONS (use ONLY these in NEXT_ACTIONS):
+{{"a":"click","n":0}} - click element at index
+{{"a":"type","n":1,"v":"text"}} - type text in element
+{{"a":"hover","n":0}} - hover over element
+{{"a":"scroll","v":"500"}} - scroll down 500px
+{{"a":"wait","v":"3"}} - wait N seconds (max 10)
+
+CHALLENGE CONTEXT:
+- Steps on this challenge: {challenge_step_count} (most complete in 1-4 steps)
+- Page feedback/warnings: {page_feedback}
+
+AGENT'S CLAIMED STATE:
+- GOAL: {goal}
+- TASK: {task}
+- DATA: {data}
+- PROGRESS: {progress}
+
+LAST ACTIONS AND RESULTS:
+{action_results}
+
+ACTUAL PAGE STATE:
+URL: {url}
+Title: {title}
+
+Interactive elements:
+{elements}
+
+Hidden content: {hidden_content}
+Data attributes: {data_attrs}
+
+Page text:
+{page_text}
+
+CHANGES FROM PREVIOUS STATE:
+- Progress indicators: {progress_indicators}
+- Element changes: {state_changes}
+- New text: {new_text}
+
+YOUR AUTHORITY:
+- You can let the agent continue (OK)
+- You can warn about issues (WARN)
+- You can redirect the approach (REDIRECT)
+- You can TAKE FULL CONTROL when agent is stuck (OVERRIDE)
+
+WHEN TO OVERRIDE:
+- Agent spent >5 steps without URL change
+- Same error/warning repeated multiple times (e.g., "Wrong Button")
+- Agent clicking similar elements repeatedly with no progress
+- Agent's goal doesn't match actual page instructions
+
+OUTPUT FORMAT (always use this exact structure):
+
+STATUS: OK
+(if agent is making real progress)
+
+STATUS: WARN
+ISSUE: <brief description of concern>
+
+STATUS: REDIRECT
+REASON: <why current approach is wrong>
+CORRECT_GOAL: <what agent should be doing>
+AVOID: <elements/patterns to stop using>
+
+STATUS: OVERRIDE
+REASON: <why taking control - be specific about failure pattern>
+CORRECT_GOAL: <the actual task based on page content>
+NEXT_ACTIONS: {{"actions": [{{"a":"click","n":0}}]}}
+AVOID: <elements/text patterns to NOT interact with>
+"""

@@ -4,18 +4,26 @@ import re
 from playwright.async_api import Page
 from .config import ACTION_DELAY
 
-async def execute(page: Page, action: dict, handles: list) -> str:
+async def execute(page: Page, action: dict, handles: list, elements: list = None) -> str:
     """Execute action on page using stored element handles.
 
     Args:
         page: Playwright page
         action: Action dict from LLM (e.g., {"a": "click", "n": 0})
         handles: List of ElementHandles from extract_elements()
+        elements: List of element dicts for context in result messages
     """
 
     action_type = action.get("a", "error")
     index = action.get("n", 0)
     value = action.get("v", "")
+
+    # Get element label for context in results
+    def _el_label(idx):
+        if elements and 0 <= idx < len(elements):
+            text = (elements[idx].get('text') or '')[:25].strip()
+            return f'"{text}"' if text else ""
+        return ""
 
     if action_type in ("done", "error"):
         return action_type
@@ -28,14 +36,16 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                 except Exception:
                     await handles[index].click(force=True, timeout=2000)
                 await asyncio.sleep(ACTION_DELAY)  # Allow page to react
-                return f"clicked [{index}]"
+                label = _el_label(index)
+                return f"clicked [{index}] {label}".strip()
             return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "type":
             if index < len(handles):
                 await handles[index].fill(str(value), force=True, timeout=2000)
                 await asyncio.sleep(ACTION_DELAY)  # Allow form to register
-                return f"typed '{value}'"
+                label = _el_label(index)
+                return f"typed '{value}' into [{index}] {label}".strip()
             return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "drag":
@@ -80,7 +90,8 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                     await handles[index].dispatch_event("mouseenter")
                     await handles[index].dispatch_event("mouseover")
                 await asyncio.sleep(ACTION_DELAY)  # Allow hover effects to appear
-                return f"hovered [{index}]"
+                label = _el_label(index)
+                return f"hovered [{index}] {label}".strip()
             return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "draw":
@@ -121,7 +132,8 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                     });
                 }''', handles[index])
                 await asyncio.sleep(ACTION_DELAY)
-                return f"drew stroke on canvas [{index}]"
+                label = _el_label(index)
+                return f"drew stroke on [{index}] {label}".strip()
             return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "key":
@@ -136,9 +148,10 @@ async def execute(page: Page, action: dict, handles: list) -> str:
                 amount = 500
             if "n" in action and index < len(handles):
                 await handles[index].evaluate(f"el => el.scrollBy(0, {amount})")
-                return f"scrolled [{index}] {amount}px"
+                label = _el_label(index)
+                return f"scrolled [{index}] {label} {amount}px".strip()
             await page.evaluate(f"window.scrollBy(0, {amount})")
-            return f"scrolled {amount}px"
+            return f"scrolled page {amount}px"
 
         elif action_type == "watch":
             text = str(value)
@@ -251,7 +264,7 @@ async def _verify_action(page: Page, action: dict, handles: list, result: str) -
     return None
 
 
-async def execute_batch(page: Page, actions: list[dict], handles: list) -> list[tuple[dict, str]]:
+async def execute_batch(page: Page, actions: list[dict], handles: list, elements: list = None) -> list[tuple[dict, str]]:
     """Execute a batch of actions sequentially with verification.
 
     Stops on error or verification failure so the main loop can re-observe.
@@ -269,7 +282,7 @@ async def execute_batch(page: Page, actions: list[dict], handles: list) -> list[
             results.append((action, action_type))
             break
 
-        result = await execute(page, action, handles)
+        result = await execute(page, action, handles, elements)
         results.append((action, result))
 
         # Stop batch on execution error

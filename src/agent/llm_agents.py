@@ -2,7 +2,8 @@ import json
 import re
 from groq import AsyncGroq
 import asyncio
-from .config import MODEL_NAME, ACTION_MODEL_NAME, FILTER_MODEL_NAME, ORACLE_MODEL, MAX_BATCH_SIZE, REASONING_EFFORT
+from . import config
+from .config import MAX_BATCH_SIZE
 from .element_utils import format_element_summary, format_elements_by_proximity
 from .logging_utils import log, log_verbose
 
@@ -31,6 +32,56 @@ def _extract_summary(text: str) -> str:
                 lines.append(f"{label}: {content}")
     return "\n".join(lines) if lines else ""
 
+
+def parse_actions_from_overview(overview: str) -> list[dict] | None:
+    """Extract JSON actions from NEXT section of overview output.
+
+    Returns list of action dicts if parsing succeeds, None otherwise.
+    """
+    # Find NEXT section
+    next_match = re.search(r'^NEXT:\s*(.+?)(?=^[A-Z]+:|\Z)', overview, re.MULTILINE | re.DOTALL | re.IGNORECASE)
+    if not next_match:
+        log("  [parse_actions] No NEXT section found")
+        return None
+
+    next_content = next_match.group(1).strip()
+
+    # Try to find JSON object in NEXT content
+    # Look for {"actions": [...]} pattern
+    json_match = re.search(r'\{[^{}]*"actions"\s*:\s*\[[^\]]*\][^{}]*\}', next_content, re.DOTALL)
+    if not json_match:
+        # Try simpler pattern - just find any JSON object
+        json_match = re.search(r'\{.*\}', next_content, re.DOTALL)
+
+    if not json_match:
+        log(f"  [parse_actions] No JSON found in NEXT: {next_content[:100]}")
+        return None
+
+    json_str = json_match.group(0)
+
+    try:
+        parsed = json.loads(json_str)
+
+        # Handle {"actions": [...]} format
+        if isinstance(parsed, dict) and "actions" in parsed:
+            actions = parsed["actions"]
+            if isinstance(actions, list) and len(actions) > 0:
+                # Validate each action has required 'a' field
+                valid_actions = [a for a in actions if isinstance(a, dict) and "a" in a]
+                if valid_actions:
+                    return valid_actions[:MAX_BATCH_SIZE]
+
+        # Handle single action {"a": "click", "n": 0}
+        if isinstance(parsed, dict) and "a" in parsed:
+            return [parsed]
+
+        log(f"  [parse_actions] Invalid action format: {json_str[:100]}")
+        return None
+
+    except json.JSONDecodeError as e:
+        log(f"  [parse_actions] JSON parse error: {e}")
+        return None
+
 async def filter_page_content(client: AsyncGroq, all_text: list[str]) -> list[str]:
     """Filter filler text (lorem ipsum, section headers, repeated patterns) using a small LLM."""
     if len(all_text) <= 30:
@@ -41,7 +92,7 @@ async def filter_page_content(client: AsyncGroq, all_text: list[str]) -> list[st
     async def _filter_chunk(chunk: list[str]) -> list[str]:
         numbered = "\n".join(f"{i+1}. {line}" for i, line in enumerate(chunk))
         response = await client.chat.completions.create(
-            model=FILTER_MODEL_NAME,
+            model=config.FILTER_MODEL_NAME,
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": numbered},
@@ -67,9 +118,173 @@ async def filter_page_content(client: AsyncGroq, all_text: list[str]) -> list[st
         log(f"  Filter error (returning unfiltered): {e}")
         return all_text
 
+def _extract_progress_indicators(all_text: list[str]) -> list[str]:
+    """Find progress patterns like 'Step 2/6', '3 of 5', 'Progress: 50%'."""
+    patterns = [
+        r'\d+\s*/\s*\d+',           # 2/6, 3 / 5
+        r'\d+\s+of\s+\d+',          # 3 of 5
+        r'step\s*\d+',              # step 2, Step 3
+        r'progress[:\s]+\d+%?',     # Progress: 50%
+        r'challenge\s*\d+',         # Challenge 5
+    ]
+    indicators = []
+    for text in all_text[:50]:
+        for pattern in patterns:
+            if re.search(pattern, text.lower()):
+                indicators.append(text.strip())
+                break
+    return indicators[:5]
+
+
+def _extract_feedback_text(all_text: list[str]) -> list[str]:
+    """Extract error/warning/feedback lines from page text."""
+    keywords = ['wrong', 'error', 'failed', 'invalid', 'try again', 'incorrect', 'warning']
+    feedback = []
+    for line in all_text:
+        if any(kw in line.lower() for kw in keywords):
+            feedback.append(line.strip())
+    return feedback[:10]
+
+
+async def evaluate_step(
+    client: AsyncGroq,
+    overview: str,           # Full overview output with GOAL/TASK/DATA/PROGRESS
+    actions: list[dict],     # Actions that were executed
+    results: list[tuple],    # (action, result_string) tuples
+    content: dict,           # Page content
+    elements: list,          # Current elements
+    element_diff: str,       # From _compute_element_diff()
+    text_diff: str,          # From _compute_text_diff()
+    challenge_step_count: int = 0,  # Steps spent on current challenge
+) -> dict:
+    """Oracle evaluation of step progress. Returns structured dict with status and directives."""
+    from .prompts import ORACLE_PROMPT
+
+    # Parse GOAL/TASK/DATA/PROGRESS sections from overview
+    def _extract_section(text: str, label: str) -> str:
+        pattern = rf'^{label}:\s*(.*?)(?=^(?:GOAL|TASK|DATA|PROGRESS|NEXT):|\Z)'
+        match = re.search(pattern, text, re.MULTILINE | re.IGNORECASE | re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    goal = _extract_section(overview, "GOAL")
+    task = _extract_section(overview, "TASK")
+    data = _extract_section(overview, "DATA")
+    progress = _extract_section(overview, "PROGRESS")
+
+    # Format action results
+    action_results = _format_results(results) if results else "No actions executed"
+
+    # Extract page content for Oracle context
+    all_text = content.get('all_text', [])
+    hidden = content.get('hidden_content', [])
+    data_attrs = content.get('data_attrs', [])
+    progress_indicators = _extract_progress_indicators(all_text)
+    page_feedback = _extract_feedback_text(all_text)
+
+    # Format elements summary (compact version)
+    el_summary = format_element_summary(elements)
+
+    # Build the Oracle prompt with full page context
+    prompt = ORACLE_PROMPT.format(
+        challenge_step_count=challenge_step_count,
+        page_feedback='\n'.join(page_feedback) if page_feedback else 'none',
+        goal=goal or "(not specified)",
+        task=task or "(not specified)",
+        data=data or "(none)",
+        progress=progress or "(none)",
+        action_results=action_results,
+        url=content.get('url', '?'),
+        title=content.get('title', '?'),
+        elements=el_summary,
+        hidden_content=', '.join(hidden) if hidden else 'none',
+        data_attrs=', '.join(data_attrs) if data_attrs else 'none',
+        page_text='\n'.join(all_text),  # Full page text
+        progress_indicators=", ".join(progress_indicators) if progress_indicators else "none found",
+        state_changes=element_diff if element_diff else "none detected",
+        new_text=text_diff if text_diff else "none",
+    )
+
+    def _parse_oracle_output(text: str) -> dict:
+        """Parse structured Oracle output into dict."""
+        result = {
+            "status": "OK",
+            "reason": None,
+            "correct_goal": None,
+            "next_actions": None,
+            "avoid": None,
+            "raw": text
+        }
+
+        # Extract STATUS
+        status_match = re.search(r'^STATUS:\s*(OK|WARN|REDIRECT|OVERRIDE)', text, re.MULTILINE | re.IGNORECASE)
+        if status_match:
+            result["status"] = status_match.group(1).upper()
+
+        # Extract REASON/ISSUE
+        reason_match = re.search(r'^(?:REASON|ISSUE):\s*(.+?)(?=^[A-Z_]+:|\Z)', text, re.MULTILINE | re.DOTALL)
+        if reason_match:
+            result["reason"] = reason_match.group(1).strip()
+
+        # Extract CORRECT_GOAL
+        goal_match = re.search(r'^CORRECT_GOAL:\s*(.+?)(?=^[A-Z_]+:|\Z)', text, re.MULTILINE | re.DOTALL)
+        if goal_match:
+            result["correct_goal"] = goal_match.group(1).strip()
+
+        # Extract NEXT_ACTIONS - look for JSON
+        actions_match = re.search(r'^NEXT_ACTIONS:\s*(\{.*\})', text, re.MULTILINE | re.DOTALL)
+        if actions_match:
+            try:
+                actions_json = json.loads(actions_match.group(1))
+                if isinstance(actions_json, dict) and "actions" in actions_json:
+                    result["next_actions"] = actions_json["actions"][:MAX_BATCH_SIZE]
+            except json.JSONDecodeError:
+                pass
+
+        # Extract AVOID
+        avoid_match = re.search(r'^AVOID:\s*(.+?)(?=^[A-Z_]+:|\Z)', text, re.MULTILINE | re.DOTALL)
+        if avoid_match:
+            result["avoid"] = avoid_match.group(1).strip()
+
+        return result
+
+    try:
+        kwargs = dict(
+            model=config.ORACLE_MODEL,
+            messages=[
+                {"role": "system", "content": "You are the ORACLE supervisor. Output structured directives. Be decisive."},
+                {"role": "user", "content": prompt},
+            ],
+            max_completion_tokens=500,  # More tokens for OVERRIDE with actions
+            temperature=0,
+        )
+        if config.REASONING_EFFORT:
+            kwargs["reasoning_effort"] = config.REASONING_EFFORT
+        response = await client.chat.completions.create(**kwargs)
+        result = _strip_think_tags(response.choices[0].message.content)
+
+        usage = response.usage
+        if usage:
+            log(f"  Oracle LLM ({usage.prompt_tokens} prompt + {usage.completion_tokens} completion tokens)")
+
+        if result:
+            log_verbose(f"=== Oracle Output ===\n{result}\n=== End Oracle Output ===")
+            parsed = _parse_oracle_output(result)
+            # Log status and reason
+            status_msg = f"  Oracle: {parsed['status']}"
+            if parsed['reason']:
+                status_msg += f" - {parsed['reason'][:60]}{'...' if len(parsed['reason']) > 60 else ''}"
+            log(status_msg)
+            return parsed
+
+        return {"status": "OK", "reason": None, "correct_goal": None, "next_actions": None, "avoid": None, "raw": ""}
+    except Exception as e:
+        log(f"  Oracle error: {e}")
+        return {"status": "OK", "reason": None, "correct_goal": None, "next_actions": None, "avoid": None, "raw": ""}
+
+
 async def diagnose_failure(client: AsyncGroq, challenge_summary: str, content: dict,
                            elements: list, last_results: list[tuple[dict, str]],
-                           trigger: str, agent_learnings: list[str] = None,
+                           trigger: str,
                            recent_action_sigs: list[str] = None) -> str:
     """Run a diagnostic LLM call before resetting conversation memory.
 
@@ -78,7 +293,7 @@ async def diagnose_failure(client: AsyncGroq, challenge_summary: str, content: d
 
     Returns an updated challenge_summary in GOAL/DATA/PROGRESS format.
     """
-    from .prompts import DIAGNOSIS_PROMPT, OVERVIEW_PROMPT
+    from .prompts import DIAGNOSIS_PROMPT, SYSTEM_PROMPT
 
     try:
         # Build comprehensive context for diagnosis
@@ -109,29 +324,28 @@ Data attributes: {', '.join(data_attrs) if data_attrs else 'none'}
 Page text:
 {chr(10).join(all_text[:80])}""")
 
-        if agent_learnings:
-            parts.append("AGENT LEARNINGS:\n" + "\n".join(f"- {l}" for l in agent_learnings))
-
         if recent_action_sigs:
             parts.append(f"RECENT ACTION PATTERN: {' -> '.join(recent_action_sigs)}")
 
-        parts.append(f"AVAILABLE ACTIONS REFERENCE:\n{OVERVIEW_PROMPT}")
+        parts.append(f"AVAILABLE ACTIONS (only these):\n{SYSTEM_PROMPT}")
 
         user_message = "\n\n".join(parts)
 
         log(f"  Running diagnosis ({trigger})...")
         log_verbose(f"=== Diagnosis Input ===\n{user_message}\n=== End Diagnosis Input ===")
 
-        response = await client.chat.completions.create(
-            model=ORACLE_MODEL,
+        kwargs = dict(
+            model=config.ORACLE_MODEL,
             messages=[
                 {"role": "system", "content": DIAGNOSIS_PROMPT},
                 {"role": "user", "content": user_message},
             ],
             max_completion_tokens=1500,
             temperature=0,
-            reasoning_effort=REASONING_EFFORT,
         )
+        if config.REASONING_EFFORT:
+            kwargs["reasoning_effort"] = config.REASONING_EFFORT
+        response = await client.chat.completions.create(**kwargs)
         result = _strip_think_tags(response.choices[0].message.content)
 
         usage = response.usage
@@ -156,16 +370,18 @@ async def extract_learning(client: AsyncGroq, challenge_summary: str) -> str:
     if not challenge_summary:
         return ""
     try:
-        response = await client.chat.completions.create(
-            model=MODEL_NAME,
+        kwargs = dict(
+            model=config.MODEL_NAME,
             messages=[
                 {"role": "system", "content": "Given this interaction summary, extract a general strategy lesson about navigating web pages. NEVER include specific codes, values, URLs, or data from this interaction — only reusable strategies. One sentence max."},
                 {"role": "user", "content": challenge_summary},
             ],
             max_completion_tokens=600,
             temperature=0,
-            reasoning_effort=REASONING_EFFORT,
         )
+        if config.REASONING_EFFORT:
+            kwargs["reasoning_effort"] = config.REASONING_EFFORT
+        response = await client.chat.completions.create(**kwargs)
         result = _strip_think_tags(response.choices[0].message.content)
         log(f"  Learning extracted: {result}")
         return result
@@ -175,7 +391,7 @@ async def extract_learning(client: AsyncGroq, challenge_summary: str) -> str:
 
 
 def _format_results(last_results: list[tuple[dict, str]]) -> str:
-    """Format batch results into a human-readable summary."""
+    """Format batch results into a human-readable summary with success/failure indicators."""
     if not last_results:
         return ""
     lines = []
@@ -185,7 +401,10 @@ def _format_results(last_results: list[tuple[dict, str]]) -> str:
             action_summary += f"[{action['n']}]"
         if 'v' in action:
             action_summary += f" \"{action['v']}\""
-        lines.append(f"  {action_summary} -> {result}")
+        # Add success/failure indicator
+        is_failure = any(x in result.lower() for x in ("error", "not found", "failed", "timeout", "unknown"))
+        indicator = "FAILED" if is_failure else "OK"
+        lines.append(f"  {action_summary} -> {result} [{indicator}]")
     return "Previous actions:\n" + "\n".join(lines)
 
 
@@ -277,10 +496,10 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
                            last_results: list[tuple[dict, str]] = None,
                            state_changed: bool = True, unchanged_count: int = 0,
                            challenge_summary: str = "",
-                           agent_learnings: list[str] = None,
                            prev_elements: list = None,
                            last_action_pos: tuple = None,
-                           prev_all_text: list[str] = None) -> tuple[str, str]:
+                           prev_all_text: list[str] = None,
+                           oracle_verdict: dict = None) -> tuple[str, str]:
     """Overview agent - analyzes full page with memory of previous actions.
 
     Args:
@@ -299,12 +518,10 @@ async def analyze_overview(client: AsyncGroq, content: dict, elements: list, mem
     """
     from .prompts import OVERVIEW_PROMPT
 
-    # Update system message with persistent challenge summary and learnings
+    # Update system message with persistent challenge summary
     system_content = OVERVIEW_PROMPT
     if challenge_summary:
         system_content += f"\n\nFailure analysis — use this to avoid repeating mistakes:\n{challenge_summary}"
-    if agent_learnings:
-        system_content += "\n\nLearnings from previous pages:\n" + "\n".join(f"- {l}" for l in agent_learnings)
     memory[0] = {"role": "system", "content": system_content}
 
     # Build structured content (replaces noisy full_text dump)
@@ -346,9 +563,19 @@ Page content:
 
     # Combine previous results with current page state into single user message
     combined_content = ""
+    # Add Oracle directive if not OK
+    if oracle_verdict and oracle_verdict.get("status") in ("WARN", "REDIRECT", "OVERRIDE"):
+        directive_parts = [f"ORACLE DIRECTIVE ({oracle_verdict['status']}):"]
+        if oracle_verdict.get("reason"):
+            directive_parts.append(f"Reason: {oracle_verdict['reason']}")
+        if oracle_verdict.get("correct_goal"):
+            directive_parts.append(f"Correct Goal: {oracle_verdict['correct_goal']}")
+        if oracle_verdict.get("avoid"):
+            directive_parts.append(f"AVOID: {oracle_verdict['avoid']}")
+        combined_content = "\n".join(directive_parts) + "\n\n"
     results_summary = _format_results(last_results or [])
     if results_summary:
-        combined_content = results_summary + "\n\n"
+        combined_content += results_summary + "\n\n"
     # Add element state diff
     diff_summary = _compute_element_diff(prev_elements or [], elements)
     if diff_summary:
@@ -372,13 +599,15 @@ Page content:
         memory[:] = [memory[0]] + memory[-16:]
 
     try:
-        response = await client.chat.completions.create(
-            model=MODEL_NAME,
+        kwargs = dict(
+            model=config.MODEL_NAME,
             messages=memory,
             max_completion_tokens=800,
             temperature=0,
-            reasoning_effort=REASONING_EFFORT,
         )
+        if config.REASONING_EFFORT:
+            kwargs["reasoning_effort"] = config.REASONING_EFFORT
+        response = await client.chat.completions.create(**kwargs)
         result = _strip_think_tags(response.choices[0].message.content)
 
         # Log token usage
@@ -442,7 +671,7 @@ async def llm_decide(client: AsyncGroq, messages: list, context: str, last_resul
 
     try:
         response = await client.chat.completions.create(
-            model=ACTION_MODEL_NAME,
+            model=config.ACTION_MODEL_NAME,
             messages=messages,
             max_completion_tokens=350,
             temperature=0,
