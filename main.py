@@ -10,7 +10,7 @@ from groq import AsyncGroq
 from playwright.async_api import async_playwright
 
 from src.agent.action_executor import execute_batch
-from src.agent.config import DEFAULT_BASE_URL, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD, FAILURE_RESET_THRESHOLD, REPETITION_WINDOW
+from src.agent.config import DEFAULT_BASE_URL, LOG_DIR, LOG_FILE, VERBOSE_LOG_FILE, STUCK_THRESHOLD, FAILURE_RESET_THRESHOLD, REPETITION_WINDOW
 from src.agent.content_extraction import extract_structured_content
 from src.agent.element_utils import extract_elements, format_context
 from src.agent.llm_agents import analyze_overview, llm_decide, extract_learning, diagnose_failure
@@ -267,11 +267,18 @@ def main():
     import sys
     base_url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BASE_URL
 
-    os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
     with open(LOG_FILE, "w") as f:
         f.write(f"=== Started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
     with open(VERBOSE_LOG_FILE, "w") as f:
         f.write(f"=== Started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+
+    # Symlink latest logs for easy access
+    for src, link in [(LOG_FILE, f"{LOG_DIR}/agent.log"),
+                      (VERBOSE_LOG_FILE, f"{LOG_DIR}/agent_verbose.log")]:
+        if os.path.islink(link):
+            os.remove(link)
+        os.symlink(os.path.basename(src), link)
 
     print("=" * 50)
     print("Fast Browser Agent")

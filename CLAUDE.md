@@ -28,4 +28,6 @@ A fast computer use agent — the goal is to use computers better than humans. P
 
 - Entry point: `main.py`
 - Core modules live in `src/agent/`
-- Runtime artifacts live in `logs/`
+- Runtime artifacts live in `logs/<YYYY-MM-DD>/` with timestamped files per run
+  - `agent_HHMMSS.log` / `agent_verbose_HHMMSS.log` — per-run logs
+  - `agent.log` / `agent_verbose.log` — symlinks to latest run

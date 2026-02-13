@@ -1,5 +1,10 @@
-LOG_FILE = "logs/agent.log"
-VERBOSE_LOG_FILE = "logs/agent_verbose.log"
+from datetime import datetime
+
+_now = datetime.now()
+LOG_DIR = f"logs/{_now.strftime('%Y-%m-%d')}"
+_run_ts = _now.strftime('%H%M%S')
+LOG_FILE = f"{LOG_DIR}/agent_{_run_ts}.log"
+VERBOSE_LOG_FILE = f"{LOG_DIR}/agent_verbose_{_run_ts}.log"
 STUCK_THRESHOLD = 5
 FAILURE_RESET_THRESHOLD = 3
 REPETITION_WINDOW = 2
