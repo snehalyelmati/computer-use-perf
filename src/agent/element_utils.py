@@ -1,5 +1,8 @@
 from playwright.async_api import Page
 
+from . import config
+from .text_budget import select_lines_for_budget
+
 
 async def extract_elements(page: Page) -> tuple[list, list]:
     """Extract interactive elements with indices and return element handles.
@@ -333,7 +336,11 @@ def format_elements_by_proximity(
 
 
 def format_context(
-    goal: str, data: str | None, next_directive: str, elements: list
+    goal: str,
+    objective: str | None,
+    data: str | None,
+    next_directive: str,
+    elements: list,
 ) -> str:
     """Format the analysis and elements for the action LLM.
 
@@ -346,9 +353,38 @@ def format_context(
     parts = []
     parts.append("=== PAGE ANALYSIS ===")
     parts.append(f"GOAL: {goal}")
+    if objective:
+        parts.append(f"OBJECTIVE: {objective}")
     if data:
         parts.append(f"DATA: {data}")
     parts.append(f"NEXT: {next_directive}")
     parts.append("\n=== INTERACTIVE ELEMENTS ===")
-    parts.append(format_element_summary(elements))
+
+    # Budget the element list for the Action model.
+    full = format_element_summary(elements)
+
+    def _score_el_line(line: str) -> int:
+        s = (line or "").lower()
+        score = 0
+        if " inp " in s or " txt " in s or " sel " in s or "textbox" in s:
+            score += 50
+        if " btn " in s or "role=button" in s:
+            score += 25
+        if ' data="' in s or ' value="' in s:
+            score += 30
+        if "disabled" in s:
+            score += 5
+        return score
+
+    kept = select_lines_for_budget(
+        full.splitlines(),
+        max_chars=config.ELEMENT_SUMMARY_BUDGET_CHARS,
+        score_fn=_score_el_line,
+    )
+    if kept:
+        parts.append("\n".join(kept))
+    elif config.ELEMENT_SUMMARY_BUDGET_CHARS <= 0:
+        parts.append("[elements omitted due to budget]")
+    else:
+        parts.append(full)
     return "\n".join(parts)

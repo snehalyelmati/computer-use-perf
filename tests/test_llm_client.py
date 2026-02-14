@@ -23,11 +23,8 @@ class TestOracleResponse:
         r = OracleResponse()
         assert r.status == "OK"
         assert r.reason is None
-        assert r.correct_goal is None
         assert r.next_directive is None
         assert r.avoid is None
-        assert r.evidence is None
-        assert r.explore is None
 
     def test_valid_full(self):
         r = OracleResponse.model_validate_json(
@@ -35,7 +32,6 @@ class TestOracleResponse:
                 {
                     "status": "OVERRIDE",
                     "reason": "Agent stuck clicking same button",
-                    "correct_goal": "Fill in the form",
                     "next_directive": "Click the submit button.",
                     "avoid": "btn Submit",
                 }
@@ -63,25 +59,30 @@ class TestOracleResponse:
 
 
 class TestOverviewResponse:
-    def test_requires_goal_and_next(self):
+    def test_requires_objective_and_next(self):
         with pytest.raises(ValidationError):
-            OverviewResponse.model_validate_json('{"goal": "Do something"}')
+            OverviewResponse.model_validate_json('{"objective": "Do something"}')
         with pytest.raises(ValidationError):
             OverviewResponse.model_validate_json('{"next": "Click button"}')
+
+    def test_backwards_compat_goal_maps_to_objective(self):
+        r = OverviewResponse.model_validate_json(
+            '{"goal": "Enter the code", "next": "Click"}'
+        )
+        assert r.objective == "Enter the code"
 
     def test_valid(self):
         r = OverviewResponse.model_validate_json(
             json.dumps(
                 {
-                    "goal": "Enter the code",
-                    "task": "Type code into [1] and click [2]",
+                    "objective": "Enter the code",
                     "data": "code=ABC123",
                     "progress": "Step 1/3",
                     "next": "Type ABC123 into element [1], then click Submit [2]",
                 }
             )
         )
-        assert r.goal == "Enter the code"
+        assert r.objective == "Enter the code"
         assert r.next == "Type ABC123 into element [1], then click Submit [2]"
         assert r.data == "code=ABC123"
 
@@ -198,6 +199,75 @@ async def test_complete_returns_model_instance():
     assert isinstance(result, OracleResponse)
     assert result.status == "WARN"
     assert result.reason == "stuck"
+
+
+@pytest.mark.asyncio
+async def test_complete_cerebras_disable_reasoning_and_reasoning_fallback():
+    """Cerebras can return content=None with JSON in reasoning; parse must still work."""
+
+    from src.agent.schemas import OracleResponse
+
+    client = MagicMock()
+
+    async def _create(**kwargs):
+        # For qwen-3-32b on Cerebras, we disable reasoning by default.
+        assert kwargs.get("disable_reasoning") is True
+        assert "response_format" not in kwargs  # qwen-3-32b doesn't support json_object
+
+        mock_resp = MagicMock()
+        mock_msg = MagicMock(content=None, reasoning='{"status": "OK"}')
+        mock_resp.choices = [MagicMock(message=mock_msg)]
+        mock_resp.usage = MagicMock(
+            prompt_tokens=10,
+            completion_tokens=5,
+            prompt_tokens_details=MagicMock(cached_tokens=2),
+        )
+        return mock_resp
+
+    client.chat.completions.create = AsyncMock(side_effect=_create)
+
+    with patch("src.agent.llm_client._detect_provider", return_value="cerebras"):
+        result, usage = await complete(
+            client,
+            model="qwen-3-32b",
+            messages=[{"role": "user", "content": "q"}],
+            max_completion_tokens=100,
+            response_model=OracleResponse,
+        )
+    assert isinstance(result, OracleResponse)
+    assert result.status == "OK"
+    assert usage.prompt_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_complete_cerebras_does_not_send_disable_reasoning_when_unsupported():
+    """Some Cerebras models reject disable_reasoning - never send it for those."""
+
+    from src.agent.schemas import ActionResponse
+
+    client = MagicMock()
+
+    async def _create(**kwargs):
+        assert "disable_reasoning" not in kwargs
+        assert kwargs.get("response_format") == {"type": "json_object"}
+
+        mock_resp = MagicMock()
+        mock_msg = MagicMock(content='{"actions": []}', reasoning=None)
+        mock_resp.choices = [MagicMock(message=mock_msg)]
+        mock_resp.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+        return mock_resp
+
+    client.chat.completions.create = AsyncMock(side_effect=_create)
+
+    with patch("src.agent.llm_client._detect_provider", return_value="cerebras"):
+        result, _usage = await complete(
+            client,
+            model="llama3.1-8b",
+            messages=[{"role": "user", "content": "q"}],
+            max_completion_tokens=100,
+            response_model=ActionResponse,
+        )
+    assert isinstance(result, ActionResponse)
 
 
 @pytest.mark.asyncio
@@ -373,7 +443,7 @@ async def test_evaluate_step_returns_oracle_response():
     from src.agent.llm_agents import evaluate_step
 
     overview = OverviewResponse(
-        goal="Click the button",
+        objective="Click the button",
         next="Click [0]",
         data="code=123",
         progress="Step 1/3",
@@ -387,6 +457,7 @@ async def test_evaluate_step_returns_oracle_response():
         )
         result = await evaluate_step(
             client=MagicMock(),
+            goal="Solve the current page task",
             overview=overview,
             actions=[{"a": "click", "n": 0}],
             results=[({"a": "click", "n": 0}, "OK clicked")],
@@ -410,7 +481,7 @@ async def test_analyze_overview_returns_overview_response():
     from src.agent.llm_agents import analyze_overview
 
     overview_resp = OverviewResponse(
-        goal="Enter the code",
+        objective="Enter the code",
         next="Type into [1]",
         data="code=XYZ",
         progress="Starting",
@@ -439,10 +510,11 @@ async def test_analyze_overview_returns_overview_response():
             },
             elements=[],
             memory=memory,
+            goal="Solve the current page task",
         )
     assert isinstance(result, OverviewResponse)
-    assert result.goal == "Enter the code"
-    assert "GOAL: Enter the code" in summary
+    assert result.objective == "Enter the code"
+    assert "OBJECTIVE: Enter the code" in summary
     assert filtered == ["some text"]
 
 

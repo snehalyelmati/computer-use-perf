@@ -30,10 +30,13 @@ HIDDEN_CONTENT_BUDGET_CHARS = 4000
 DATA_ATTRS_BUDGET_CHARS = 4000
 MODEL_NAME = None  # Set by main.py from provider defaults / CLI
 ORACLE_MODEL = None
-REASONING_EFFORT = None  # None = use model default from REASONING_MODELS
-PROVIDER = "groq"  # groq | cerebras
+REASONING_EFFORT = None  # None = use per-model default (see src/agent/providers.py)
+PROVIDER = "cerebras"  # groq | cerebras
 ACTION_MODEL_NAME = None
 FILTER_MODEL_NAME = None
 MAX_BATCH_SIZE = 8
 ACTION_DELAY = 0.075
 DEFAULT_BASE_URL = "https://serene-frangipane-7fd25b.netlify.app"
+
+# Fixed, immutable goal for Challenge Mode (one challenge at a time).
+CHALLENGE_GOAL = "Solve the current challenge by completing any prerequisites required to move to the next challenge."

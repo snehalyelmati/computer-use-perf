@@ -16,5 +16,11 @@ wheels/
 logs/
 *.log
 
+# Local debug artifacts
+debug_extraction_data.json
+debug_extraction_data*.json
+debug_challenge.html
+test_page.html
+
 # Claude Code internals
 .claude/

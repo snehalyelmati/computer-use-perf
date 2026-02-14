@@ -28,6 +28,7 @@ async def filter_page_content(client: LLMClient, all_text: list[str]) -> list[st
                 {"role": "user", "content": numbered},
             ],
             max_completion_tokens=1000,
+            call_type="filter",
         )
         result = content or ""
         return [line.strip() for line in result.splitlines() if line.strip()]
@@ -97,6 +98,7 @@ def _extract_feedback_text(all_text: list[str]) -> list[str]:
 
 async def evaluate_step(
     client: LLMClient,
+    goal: str,
     overview: OverviewResponse,
     actions: list[dict],  # Actions that were executed
     results: list[tuple],  # (action, result_string) tuples
@@ -110,8 +112,7 @@ async def evaluate_step(
     """Oracle evaluation of step progress. Returns OracleResponse."""
     from .prompts import ORACLE_PROMPT
 
-    goal = overview.goal
-    task = overview.task or "(not specified)"
+    objective = overview.objective or "(not specified)"
     data = overview.data or "(none)"
     progress = overview.progress or "(none)"
 
@@ -191,7 +192,7 @@ async def evaluate_step(
         challenge_step_count=challenge_step_count,
         page_feedback="\n".join(feedback_lines) if feedback_lines else "none",
         goal=goal or "(not specified)",
-        task=task,
+        objective=objective,
         data=data,
         progress=progress,
         action_results=action_results,
@@ -225,6 +226,7 @@ async def evaluate_step(
             max_completion_tokens=1000,
             reasoning_effort=config.REASONING_EFFORT,
             response_model=OracleResponse,
+            call_type="oracle",
         )
 
         if usage:
@@ -245,7 +247,7 @@ async def evaluate_step(
         return response
     except Exception as e:
         log(f"  Oracle error: {e}")
-        return OracleResponse()
+        return OracleResponse(status="WARN", reason=f"Oracle error: {str(e)[:200]}")
 
 
 async def diagnose_failure(
@@ -267,7 +269,7 @@ async def diagnose_failure(
 
     Returns an updated challenge_summary in GOAL/DATA/PROGRESS format.
     """
-    from .prompts import DIAGNOSIS_PROMPT, SYSTEM_PROMPT
+    from .prompts import DIAGNOSIS_PROMPT
 
     try:
         # Build comprehensive context for diagnosis
@@ -325,7 +327,9 @@ Page text:
                 + "\n".join(f"- {a}" for a in failed_attempts)
             )
 
-        parts.append(f"AVAILABLE ACTIONS (only these):\n{SYSTEM_PROMPT}")
+        parts.append(
+            "ALLOWED ACTION VERBS: click, type, hover, scroll, wait, drag, draw, watch, key"
+        )
 
         user_message = "\n\n".join(parts)
 
@@ -343,6 +347,7 @@ Page text:
             ],
             max_completion_tokens=3000,
             reasoning_effort=config.REASONING_EFFORT,
+            call_type="diagnosis",
         )
         result = content_text or ""
 
@@ -388,6 +393,7 @@ async def extract_learning(client: LLMClient, challenge_summary: str) -> str:
             max_completion_tokens=400,
             reasoning_effort=config.REASONING_EFFORT,
             response_model=LearningResponse,
+            call_type="learning",
         )
         log(f"  Learning extracted: {response.learning}")
         return response.learning
@@ -527,6 +533,7 @@ async def analyze_overview(
     content: dict,
     elements: list,
     memory: list,
+    goal: str | None = None,
     last_results: list[tuple[dict, str]] | None = None,
     state_changed: bool = True,
     unchanged_count: int = 0,
@@ -625,6 +632,27 @@ Page content:
     # Combine previous results with current page state into single user message
     combined_content = ""
 
+    fixed_goal = goal or getattr(config, "CHALLENGE_GOAL", "")
+    if fixed_goal:
+        combined_content += f"FIXED GOAL:\n{fixed_goal}\n\n"
+
+    # Add Oracle directive (placed near the top, right after fixed goal).
+    if oracle_verdict and oracle_verdict.status in (
+        "WARN",
+        "OVERRIDE",
+        "WRONG_GOAL",
+    ):
+        directive_parts = [f"ORACLE DIRECTIVE ({oracle_verdict.status}):"]
+        if oracle_verdict.reason:
+            directive_parts.append(f"Reason: {oracle_verdict.reason}")
+        if oracle_verdict.status == "WRONG_GOAL":
+            directive_parts.append(
+                "Your current objective/interpretation is invalid. Re-read the page and re-evaluate what is required."
+            )
+        if oracle_verdict.avoid:
+            directive_parts.append(f"AVOID: {oracle_verdict.avoid}")
+        combined_content += "\n".join(directive_parts) + "\n\n"
+
     if grounding_note:
         combined_content += f"GROUNDING NOTE:\n{grounding_note.strip()}\n\n"
 
@@ -636,31 +664,6 @@ Page content:
         if kept:
             combined_content += "PREVIOUSLY TRIED (avoid repeating exact patterns):\n"
             combined_content += "\n".join(f"- {a}" for a in kept) + "\n\n"
-    # Add Oracle directive if not OK
-    if oracle_verdict and oracle_verdict.status in (
-        "WARN",
-        "REDIRECT",
-        "OVERRIDE",
-        "WRONG_GOAL",
-    ):
-        directive_parts = [f"ORACLE DIRECTIVE ({oracle_verdict.status}):"]
-        if oracle_verdict.reason:
-            directive_parts.append(f"Reason: {oracle_verdict.reason}")
-        if oracle_verdict.status == "WRONG_GOAL":
-            directive_parts.append(
-                "YOUR CURRENT GOAL IS INVALID. You must completely re-evaluate what this page requires."
-            )
-            if oracle_verdict.evidence:
-                directive_parts.append(f"Evidence: {oracle_verdict.evidence}")
-            if oracle_verdict.explore:
-                directive_parts.append(f"Explore: {oracle_verdict.explore}")
-        if oracle_verdict.correct_goal:
-            directive_parts.append(f"Correct Goal: {oracle_verdict.correct_goal}")
-        if oracle_verdict.avoid:
-            directive_parts.append(f"AVOID: {oracle_verdict.avoid}")
-        directive_text = "\n".join(directive_parts) + "\n\n"
-        # Keep directive at the top without discarding earlier context blocks.
-        combined_content = directive_text + combined_content
     results_summary = _format_results(last_results or [])
     if results_summary:
         combined_content += results_summary + "\n\n"
@@ -705,6 +708,7 @@ Page content:
             max_completion_tokens=1400,
             reasoning_effort=config.REASONING_EFFORT,
             response_model=OverviewResponse,
+            call_type="overview",
         )
 
         if usage:
@@ -720,10 +724,10 @@ Page content:
             }
         )
 
-        # Reconstruct challenge_summary from fields
+        # Reconstruct challenge_summary from fields (persists across memory truncation)
         parts = []
-        if response.goal:
-            parts.append(f"GOAL: {response.goal}")
+        if response.objective:
+            parts.append(f"OBJECTIVE: {response.objective}")
         if response.data:
             parts.append(f"DATA: {response.data}")
         if response.progress:
@@ -736,7 +740,8 @@ Page content:
     except Exception as e:
         log(f"Overview agent error: {e}")
         fallback = OverviewResponse(
-            goal="Complete the page task", next="Interact with elements"
+            objective="Make progress toward completing the current page task",
+            next="Click or scroll to discover required values",
         )
         return (fallback, challenge_summary, filtered_text)
 
@@ -789,6 +794,7 @@ async def llm_decide(
             messages=messages,
             max_completion_tokens=700,
             response_model=ActionResponse,
+            call_type="action",
         )
     except RuntimeError:
         raise
