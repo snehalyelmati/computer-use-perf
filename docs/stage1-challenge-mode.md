@@ -8,6 +8,17 @@ This stage intentionally keeps orchestration deterministic in code (no LLM orche
 
 - `GOAL` (fixed, immutable): The top-level instruction provided by the system/caller. The agent must not change this.
 - `OBJECTIVE` (page-specific): A one-line restatement of what the current page requires to be considered solved. This can change each page and is derived from page text/state.
+- `NEXT` (intent): Human-readable description of what should happen next. Used for logging and supervision.
+- `TASK` (execution): A strict, index-based DSL that is translated into executable actions.
+
+`TASK` DSL (one step per line):
+
+- `click <index>`
+- `type <index> <data_key>`
+- `scroll page <pixels>` / `scroll <index> <pixels>`
+- `wait <seconds>`
+- `key <keyspec>`
+- `watch <substring_or_data_key>`
 
 In Challenge Mode:
 
@@ -19,12 +30,19 @@ In Challenge Mode:
 
 - Challenge Mode run loop (URL change => challenge boundary)
 - Fixed per-challenge `GOAL`
-- Per-step `OBJECTIVE`/`page_task` extracted by the Overview LLM
-- Oracle supervision that can override *actions* (but does not change the fixed `GOAL`)
+- Per-step `OBJECTIVE` extracted by the Overview LLM
+- Per-step `TASK` DSL produced by the Overview LLM (translated by the Action LLM, then executed)
+- Oracle supervision (does not change the fixed `GOAL`; provides guidance to the planner)
 - Run statistics:
   - Total runtime + per-challenge runtime
   - Token usage by call type/model
   - Token cost (uses dummy pricing table; update later)
+
+## Computation Policy
+
+- The planner should not attempt complex computation/decoding.
+- If a page explicitly asks for arithmetic and shows an expression, it should be recorded as `expr=<expression>` in `DATA`.
+- The runner computes `answer=<result>` and makes it available for subsequent steps.
 
 ## Runtime Artifacts
 

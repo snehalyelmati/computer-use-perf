@@ -1,6 +1,7 @@
 import asyncio
 import random
 import re
+import time
 from playwright.async_api import Page
 from .config import ACTION_DELAY
 
@@ -31,9 +32,24 @@ async def execute(
     if action_type in ("done", "error"):
         return action_type
 
+    async def _is_disabled(idx: int) -> bool:
+        if idx >= len(handles):
+            return True
+        try:
+            return bool(
+                await handles[idx].evaluate(
+                    "el => !!el.disabled || el.getAttribute('aria-disabled') === 'true'"
+                )
+            )
+        except Exception:
+            return False
+
     try:
         if action_type == "click":
             if index < len(handles):
+                if await _is_disabled(index):
+                    label = _el_label(index)
+                    return f"verify failed: element [{index}] {label} disabled".strip()
                 try:
                     await handles[index].dispatch_event("click")
                 except Exception:
@@ -158,12 +174,43 @@ async def execute(
                 amount = int(value)
             except (ValueError, TypeError):
                 amount = 500
+
+            async def _page_scroll(delta: int) -> str:
+                # If we are at the top, avoid a no-op "scroll up".
+                try:
+                    y = await page.evaluate("window.scrollY")
+                except Exception:
+                    y = 0
+                if delta < 0 and (y is None or float(y) <= 1.0):
+                    delta = abs(delta)
+                await page.evaluate(f"window.scrollBy(0, {delta})")
+                return f"scrolled page {delta}px"
+
             if "n" in action and index < len(handles):
-                await handles[index].evaluate(f"el => el.scrollBy(0, {amount})")
-                label = _el_label(index)
-                return f"scrolled [{index}] {label} {amount}px".strip()
-            await page.evaluate(f"window.scrollBy(0, {amount})")
-            return f"scrolled page {amount}px"
+                # Only scroll element containers that are actually scrollable.
+                try:
+                    is_scrollable = await handles[index].evaluate(
+                        "el => el && el.scrollHeight > el.clientHeight + 10"
+                    )
+                except Exception:
+                    is_scrollable = False
+
+                if is_scrollable:
+                    try:
+                        top = await handles[index].evaluate("el => el.scrollTop")
+                    except Exception:
+                        top = 0
+                    delta = amount
+                    if delta < 0 and (top is None or float(top) <= 1.0):
+                        delta = abs(delta)
+                    await handles[index].evaluate(f"el => el.scrollBy(0, {delta})")
+                    label = _el_label(index)
+                    return f"scrolled [{index}] {label} {delta}px".strip()
+
+                # Fallback: scroll the page when the indexed element isn't scrollable.
+                return await _page_scroll(amount)
+
+            return await _page_scroll(amount)
 
         elif action_type == "watch":
             text = str(value)
@@ -171,6 +218,13 @@ async def execute(
                 """(text) => {
                 return new Promise((resolve) => {
                     const skip = new Set(['SCRIPT','STYLE','NOSCRIPT','META','LINK','HEAD']);
+                    const isDisabled = (el) => {
+                        try {
+                            return !!el.disabled || el.getAttribute('aria-disabled') === 'true';
+                        } catch (e) {
+                            return false;
+                        }
+                    };
                     // Check if element already exists
                     const find = () => {
                         const all = document.querySelectorAll('*');
@@ -183,6 +237,10 @@ async def execute(
                     };
                     const existing = find();
                     if (existing) {
+                        if (isDisabled(existing)) {
+                            resolve("disabled");
+                            return;
+                        }
                         existing.click();
                         resolve("found");
                         return;
@@ -194,6 +252,10 @@ async def execute(
                         if (el) {
                             observer.disconnect();
                             clearTimeout(timeout);
+                            if (isDisabled(el)) {
+                                resolve("disabled");
+                                return;
+                            }
                             setTimeout(() => { el.click(); resolve("found"); }, 50);
                         }
                     });
@@ -204,6 +266,8 @@ async def execute(
             )
             if result == "found":
                 return f"watched and clicked '{text}'"
+            if result == "disabled":
+                return f"verify failed: watched element '{text}' disabled"
             return f"watch timeout: '{text}' not found"
 
         elif action_type == "wait":
@@ -309,8 +373,20 @@ async def execute_batch(
     """
     results = []
 
-    for action in actions:
+    async def _wait_for_url_change(from_url: str, timeout_s: float) -> bool:
+        if page.url != from_url:
+            return True
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+            if page.url != from_url:
+                return True
+        return page.url != from_url
+
+    for i, action in enumerate(actions):
         action_type = action.get("a", "error")
+
+        pre_action_url = page.url
 
         # Stop on terminal actions
         if action_type in ("done", "error"):
@@ -321,8 +397,23 @@ async def execute_batch(
         results.append((action, result))
 
         # Stop batch on execution error
-        if result.startswith("error") or "not found" in result:
+        low = (result or "").lower()
+        if (
+            low.startswith("error")
+            or "not found" in low
+            or low.startswith("verify failed")
+        ):
             break
+
+        # If a click/key triggered navigation, stop executing further actions.
+        if action_type in ("click", "key"):
+            if page.url != pre_action_url:
+                results[-1] = (action, f"{result} (navigated)")
+                break
+            if i < len(actions) - 1:
+                if await _wait_for_url_change(pre_action_url, timeout_s=0.35):
+                    results[-1] = (action, f"{result} (navigated)")
+                    break
 
         # Verify action succeeded
         verify_err = await _verify_action(page, action, handles, result)

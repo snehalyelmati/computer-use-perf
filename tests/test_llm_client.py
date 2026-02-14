@@ -59,15 +59,23 @@ class TestOracleResponse:
 
 
 class TestOverviewResponse:
-    def test_requires_objective_and_next(self):
+    def test_requires_objective_next_and_task(self):
         with pytest.raises(ValidationError):
-            OverviewResponse.model_validate_json('{"objective": "Do something"}')
+            OverviewResponse.model_validate_json(
+                '{"objective": "Do something", "next": "Click"}'
+            )
         with pytest.raises(ValidationError):
-            OverviewResponse.model_validate_json('{"next": "Click button"}')
+            OverviewResponse.model_validate_json(
+                '{"next": "Click button", "task": "click 0"}'
+            )
+        with pytest.raises(ValidationError):
+            OverviewResponse.model_validate_json(
+                '{"objective": "Do something", "task": "click 0"}'
+            )
 
     def test_backwards_compat_goal_maps_to_objective(self):
         r = OverviewResponse.model_validate_json(
-            '{"goal": "Enter the code", "next": "Click"}'
+            '{"goal": "Enter the code", "next": "Click", "task": "click 0"}'
         )
         assert r.objective == "Enter the code"
 
@@ -79,12 +87,14 @@ class TestOverviewResponse:
                     "data": "code=ABC123",
                     "progress": "Step 1/3",
                     "next": "Type ABC123 into element [1], then click Submit [2]",
+                    "task": "type 1 code\nclick 2",
                 }
             )
         )
         assert r.objective == "Enter the code"
         assert r.next == "Type ABC123 into element [1], then click Submit [2]"
         assert r.data == "code=ABC123"
+        assert "type" in r.task
 
 
 class TestActionResponse:
@@ -445,6 +455,7 @@ async def test_evaluate_step_returns_oracle_response():
     overview = OverviewResponse(
         objective="Click the button",
         next="Click [0]",
+        task="click 0",
         data="code=123",
         progress="Step 1/3",
     )
@@ -483,6 +494,7 @@ async def test_analyze_overview_returns_overview_response():
     overview_resp = OverviewResponse(
         objective="Enter the code",
         next="Type into [1]",
+        task="type 1 code",
         data="code=XYZ",
         progress="Starting",
     )

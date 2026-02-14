@@ -56,8 +56,8 @@ class OracleResponse(BaseModel):
 class OverviewResponse(BaseModel):
     # Page-specific objective derived from page text/state.
     objective: str = Field(min_length=1)
-    # Optional extra plan text (kept for debugging/backward compatibility).
-    task: str | None = None
+    # Executable plan for this step (TASK DSL).
+    task: str = Field(min_length=1)
     data: str | None = None
     progress: str | None = None
     next: str = Field(min_length=1)

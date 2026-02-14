@@ -29,7 +29,6 @@ from src.agent.element_utils import extract_elements, format_context
 from src.agent.llm_agents import (
     analyze_overview,
     llm_decide,
-    extract_learning,
     diagnose_failure,
     evaluate_step,
     _compute_element_diff,
@@ -39,9 +38,7 @@ from src.agent.logging_utils import log
 from src.agent.prompts import OVERVIEW_PROMPT, SYSTEM_PROMPT
 from src.agent.state_utils import compute_state_hash
 from src.agent.grounding import (
-    ground_data_to_observed,
     scrub_values,
-    update_observed_values,
 )
 
 from src.agent.stats import StatsCollector, write_run_stats
@@ -65,8 +62,10 @@ async def run_agent(
         else:
             client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
 
-    # Ensure global stats hook is scoped to this run only.
+    # Ensure stats hook is scoped to this run only.
     set_stats_collector(stats)
+
+    stats_written = False
 
     try:
         async with async_playwright() as p:
@@ -104,33 +103,31 @@ async def run_agent(
             prev_url = ""
             current_goal = CHALLENGE_GOAL
 
-            # Challenge-level memory for both LLMs
-            action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            # Challenge-level memory for the Overview + Action LLMs
             overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT}]
+            action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             challenge_start = time.time()
             last_results: list[tuple[dict, str]] = []
             challenge_summary = ""
             state_hashes: list[str] = []
             consecutive_failures = 0
             recent_action_sigs: list[str] = []
-            learnings_file = f"{LOG_DIR}/learnings.txt"
             prev_elements: list[dict] = []
             prev_all_text: list[str] = []
             prev_filtered_text: list[str] = []
-            pending_learning_task = None
             last_action_pos = None
             last_oracle_verdict = None
             oracle_history: list = []
             failed_attempts: list[str] = []
             consecutive_override_count = 0
             challenge_step_count = 0
-            observed_values: set[str] = set()
             grounding_note = ""
 
             # Oracle evaluation uses the *next* observed state to judge the previous step.
             last_overview_for_oracle = None
             last_actions_for_oracle: list[dict] | None = None
             last_results_for_oracle: list[tuple[dict, str]] | None = None
+            last_url_for_oracle: str | None = None
 
             def _record_failed_attempt(
                 trigger: str, recent_sigs: list[str], results_list
@@ -168,11 +165,18 @@ async def run_agent(
             stop_reason: str | None = None
 
             for step in range(max_steps):
-                challenge_step_count += 1
-                current_url = page.url
+                # OBSERVE - fresh every step
+                elements, handles = await extract_elements(page)
+                step_start = time.time()
 
-                # New challenge detected (Challenge Mode boundary)
-                if current_url != prev_url:
+                # Extract structured content early so the URL used for boundary checks,
+                # hashing, Oracle, and Overview is consistent for this iteration.
+                # Navigation can occur between loop iterations.
+                content = await extract_structured_content(page)
+                observed_url = content.get("url", page.url)
+
+                # New challenge detected (Challenge Mode boundary) using observed URL.
+                if observed_url != prev_url:
                     if prev_url:
                         elapsed = time.time() - challenge_start
                         log(f"Challenge {challenge} complete ({elapsed:.1f}s)")
@@ -186,55 +190,53 @@ async def run_agent(
                         ):
                             log(f"Reached max_challenges={max_challenges} - stopping")
                             stop_reason = f"max_challenges={max_challenges}"
+                            # Prevent cross-boundary Oracle evaluation in the finalizer.
+                            last_overview_for_oracle = None
+                            last_actions_for_oracle = None
+                            last_results_for_oracle = None
+                            last_url_for_oracle = None
                             break
 
                         challenge += 1
                         challenge_start = time.time()
 
-                        # Fire async learning extraction before clearing memory
-                        if challenge_summary:
-                            pending_learning_task = asyncio.create_task(
-                                extract_learning(client, challenge_summary)
-                            )
+                    # Entering a new challenge page: reset per-challenge state.
+                    overview_messages = [{"role": "system", "content": OVERVIEW_PROMPT}]
+                    action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                    state_hashes.clear()
+                    last_results = []
+                    challenge_summary = ""
+                    consecutive_failures = 0
+                    recent_action_sigs.clear()
+                    prev_elements = []
+                    prev_all_text = []
+                    prev_filtered_text = []
+                    last_action_pos = None
+                    last_oracle_verdict = None
+                    oracle_history.clear()
+                    failed_attempts.clear()
+                    consecutive_override_count = 0
+                    challenge_step_count = 0
+                    grounding_note = ""
 
-                        # Clear both LLM memories on new challenge
-                        action_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-                        overview_messages = [
-                            {"role": "system", "content": OVERVIEW_PROMPT}
-                        ]
-                        state_hashes.clear()
-                        last_results = []
-                        challenge_summary = ""
-                        consecutive_failures = 0
-                        recent_action_sigs.clear()
-                        prev_elements = []
-                        prev_all_text = []
-                        prev_filtered_text = []
-                        last_action_pos = None
-                        last_oracle_verdict = None
-                        oracle_history.clear()
-                        failed_attempts.clear()
-                        consecutive_override_count = 0
-                        challenge_step_count = 0
-                        observed_values.clear()
-                        grounding_note = ""
-                        last_overview_for_oracle = None
-                        last_actions_for_oracle = None
-                        last_results_for_oracle = None
+                    # Do NOT Oracle-evaluate across a boundary; the page state is different.
+                    last_overview_for_oracle = None
+                    last_actions_for_oracle = None
+                    last_results_for_oracle = None
+                    last_url_for_oracle = None
 
-                    log(f"\n[Challenge {challenge}] {current_url}")
+                    log(f"\n[Challenge {challenge}] {observed_url}")
                     current_goal = CHALLENGE_GOAL
                     log(f"  Fixed GOAL: {current_goal}")
                     if stats is not None:
-                        stats.start_challenge(challenge, current_url)
-                    prev_url = current_url
+                        stats.start_challenge(challenge, observed_url)
+                    prev_url = observed_url
 
+                # Count this iteration as a step within the current challenge.
+                challenge_step_count += 1
+                current_url = observed_url
                 if stats is not None:
                     stats.increment_step()
-
-                # OBSERVE - fresh every step
-                elements, handles = await extract_elements(page)
-                step_start = time.time()
 
                 # State-based stuck detection
                 state_hash = compute_state_hash(current_url, elements)
@@ -255,7 +257,6 @@ async def run_agent(
                     log(f"{'!' * 50}")
 
                     # Diagnose and reset per-challenge context, then keep going.
-                    content = await extract_structured_content(page)
                     _record_failed_attempt(
                         "stuck_state_hash", recent_action_sigs, last_results
                     )
@@ -284,22 +285,11 @@ async def run_agent(
                     prev_filtered_text = []
                     last_action_pos = None
                     grounding_note = ""
-                    observed_values.clear()
                     last_overview_for_oracle = None
                     last_actions_for_oracle = None
                     last_results_for_oracle = None
+                    last_url_for_oracle = None
                     continue
-
-                # Get fresh overview with memory
-                content = await extract_structured_content(page)
-
-                # Update grounding set from page-observed content
-                update_observed_values(
-                    observed_values,
-                    content.get("all_text", []),
-                    content.get("hidden_content", []),
-                    content.get("data_attrs", []),
-                )
 
                 # Log step header with spacing
                 log("")
@@ -325,15 +315,6 @@ async def run_agent(
                     log(f"  Hidden: {hidden}")
                 if data_attrs:
                     log(f"  Data attrs: {data_attrs}")
-
-                # Save any completed learning to file
-                if pending_learning_task and pending_learning_task.done():
-                    learning = pending_learning_task.result()
-                    if learning:
-                        with open(learnings_file, "a") as f:
-                            f.write(f"{learning}\n")
-                        log(f"  Learning saved to {learnings_file}")
-                    pending_learning_task = None
 
                 # Compute diffs (for Oracle)
                 step_element_diff = _compute_element_diff(prev_elements, elements)
@@ -405,6 +386,7 @@ async def run_agent(
                         last_overview_for_oracle = None
                         last_actions_for_oracle = None
                         last_results_for_oracle = None
+                        last_url_for_oracle = None
                         state_hashes.clear()
                         continue
 
@@ -431,6 +413,7 @@ async def run_agent(
                         last_overview_for_oracle = None
                         last_actions_for_oracle = None
                         last_results_for_oracle = None
+                        last_url_for_oracle = None
                         state_hashes.clear()
                         continue
 
@@ -458,15 +441,6 @@ async def run_agent(
                 )
 
                 grounding_note = ""
-                grounding = ground_data_to_observed(overview_resp.data, observed_values)
-                if grounding.dropped_pairs:
-                    grounding_note = "Dropped ungrounded DATA entries: " + ", ".join(
-                        grounding.dropped_pairs
-                    )
-                if grounding.data != overview_resp.data:
-                    overview_resp = overview_resp.model_copy(
-                        update={"data": grounding.data}
-                    )
 
                 prev_elements = elements
                 prev_all_text = content.get("all_text", [])
@@ -474,49 +448,48 @@ async def run_agent(
 
                 log("  Overview LLM:")
                 log(f"    OBJECTIVE: {overview_resp.objective}")
-                if overview_resp.task:
-                    log(f"    TASK: {overview_resp.task}")
+                log(f"    TASK: {overview_resp.task}")
                 if overview_resp.data:
                     log(f"    DATA: {overview_resp.data}")
                 if overview_resp.progress:
                     log(f"    PROGRESS: {overview_resp.progress}")
                 log(f"    NEXT: {overview_resp.next}")
 
-                action_goal = current_goal
-                if (
-                    last_oracle_verdict
-                    and last_oracle_verdict.status == "OVERRIDE"
-                    and last_oracle_verdict.next_directive
-                ):
-                    next_directive = last_oracle_verdict.next_directive
-                    log("  ORACLE OVERRIDE: Using Oracle's directive")
-                    log(f"    Directive: {next_directive}")
-                else:
-                    next_directive = overview_resp.next
-
+                # Action LLM: translate TASK DSL into executable actions.
+                task_text = (overview_resp.task or "").strip()
+                next_text = (overview_resp.next or "").strip()
+                directive = (
+                    f"{next_text}\n\nTASK:\n{task_text}" if task_text else next_text
+                )
                 context_str = format_context(
-                    action_goal,
+                    current_goal,
                     overview_resp.objective,
                     overview_resp.data,
-                    next_directive,
+                    directive,
                     elements,
                 )
+
                 actions = await llm_decide(
-                    client, action_messages, context_str, last_results
+                    client,
+                    action_messages,
+                    context_str,
+                    last_results,
                 )
 
                 if len(actions) == 1 and actions[0].get("a") == "error":
-                    log("  WARN LLM error, retrying...")
+                    log("  WARN Action LLM error, retrying...")
                     last_overview_for_oracle = None
                     last_actions_for_oracle = None
                     last_results_for_oracle = None
+                    last_url_for_oracle = None
                     continue
 
                 if not actions:
-                    log("  No actions from LLM - continuing")
+                    log("  No actions from Action LLM - continuing")
                     last_overview_for_oracle = None
                     last_actions_for_oracle = None
                     last_results_for_oracle = None
+                    last_url_for_oracle = None
                     continue
 
                 def _action_sig(a: dict) -> str:
@@ -531,8 +504,12 @@ async def run_agent(
                 if len(recent_action_sigs) > REPETITION_WINDOW:
                     recent_action_sigs.pop(0)
 
+                # Step-count fix: only treat repetition as a problem when the
+                # page state is not changing. Repeating actions on a changing
+                # page is often required (e.g., click N times).
                 if (
-                    len(recent_action_sigs) >= REPETITION_WINDOW
+                    not state_changed
+                    and len(recent_action_sigs) >= REPETITION_WINDOW
                     and len(set(recent_action_sigs)) == 1
                 ):
                     log(
@@ -560,27 +537,41 @@ async def run_agent(
                     last_overview_for_oracle = None
                     last_actions_for_oracle = None
                     last_results_for_oracle = None
+                    last_url_for_oracle = None
                     continue
 
                 if len(actions) > 1:
                     log(f"  Batch: {len(actions)} actions")
 
-                grounded_actions: list[dict] = []
+                # Drop/repair actions with invalid indices to avoid wasted steps.
+                sanitized: list[dict] = []
                 for a in actions:
-                    if a.get("a") in ("type", "watch") and a.get("v") is not None:
-                        v = str(a.get("v"))
-                        if v and v not in observed_values:
-                            log(
-                                f"  Dropping ungrounded action value for {a.get('a')}[{a.get('n', '?')}]"
-                            )
+                    at = a.get("a")
+                    if "n" in a:
+                        n = a.get("n")
+                        if not isinstance(n, int) or n < 0 or n >= len(elements):
+                            if at == "scroll":
+                                aa = dict(a)
+                                aa.pop("n", None)
+                                sanitized.append(aa)
+                                continue
+                            log(f"  Dropping invalid index for {at}[{n}]")
                             continue
-                    grounded_actions.append(a)
-                actions = grounded_actions
+                    if at == "drag" and "t" in a:
+                        t = a.get("t")
+                        if not isinstance(t, int) or t < 0 or t >= len(elements):
+                            aa = dict(a)
+                            aa.pop("t", None)
+                            sanitized.append(aa)
+                            continue
+                    sanitized.append(a)
+                actions = sanitized
                 if not actions:
-                    log("  All actions dropped by grounding - continuing")
+                    log("  All actions dropped after index sanitization - continuing")
                     last_overview_for_oracle = None
                     last_actions_for_oracle = None
                     last_results_for_oracle = None
+                    last_url_for_oracle = None
                     continue
 
                 results = await execute_batch(page, actions, handles, elements)
@@ -610,6 +601,7 @@ async def run_agent(
                 last_overview_for_oracle = overview_resp
                 last_actions_for_oracle = actions
                 last_results_for_oracle = results
+                last_url_for_oracle = current_url
 
                 from src.agent.config import CHALLENGE_STEP_BUDGET
 
@@ -689,27 +681,31 @@ async def run_agent(
             if (
                 last_overview_for_oracle is not None
                 and last_results_for_oracle is not None
+                and last_url_for_oracle is not None
             ):
                 try:
                     final_elements, _final_handles = await extract_elements(page)
                     final_content = await extract_structured_content(page)
-                    final_el_diff = _compute_element_diff(prev_elements, final_elements)
-                    final_text_diff = _compute_text_diff(
-                        prev_all_text, final_content.get("all_text", [])
-                    )
-                    _ = await evaluate_step(
-                        client=client,
-                        goal=current_goal,
-                        overview=last_overview_for_oracle,
-                        actions=last_actions_for_oracle or [],
-                        results=last_results_for_oracle,
-                        content=final_content,
-                        elements=final_elements,
-                        element_diff=final_el_diff,
-                        text_diff=final_text_diff,
-                        challenge_step_count=max(0, challenge_step_count - 1),
-                        oracle_history=oracle_history,
-                    )
+                    if final_content.get("url") == last_url_for_oracle:
+                        final_el_diff = _compute_element_diff(
+                            prev_elements, final_elements
+                        )
+                        final_text_diff = _compute_text_diff(
+                            prev_all_text, final_content.get("all_text", [])
+                        )
+                        _ = await evaluate_step(
+                            client=client,
+                            goal=current_goal,
+                            overview=last_overview_for_oracle,
+                            actions=last_actions_for_oracle or [],
+                            results=last_results_for_oracle,
+                            content=final_content,
+                            elements=final_elements,
+                            element_diff=final_el_diff,
+                            text_diff=final_text_diff,
+                            challenge_step_count=max(0, challenge_step_count - 1),
+                            oracle_history=oracle_history,
+                        )
                 except Exception:
                     pass
 
@@ -729,11 +725,20 @@ async def run_agent(
                 stats.end_challenge(completed=False, reason=stop_reason)
                 stats.end_run()
                 json_path, md_path = write_run_stats(log_dir=LOG_DIR, stats=stats)
+                stats_written = True
                 log(f"Run stats: {json_path}")
                 log(f"Run stats: {md_path}")
 
             await browser.close()
     finally:
+        # Best-effort stats flush on interrupts/exceptions.
+        try:
+            if stats is not None and not stats_written:
+                stats.end_challenge(completed=False, reason="interrupted")
+                stats.end_run()
+                write_run_stats(log_dir=LOG_DIR, stats=stats)
+        except Exception:
+            pass
         set_stats_collector(None)
 
 

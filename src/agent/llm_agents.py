@@ -649,6 +649,8 @@ Page content:
             directive_parts.append(
                 "Your current objective/interpretation is invalid. Re-read the page and re-evaluate what is required."
             )
+        if oracle_verdict.next_directive:
+            directive_parts.append(f"Directive: {oracle_verdict.next_directive}")
         if oracle_verdict.avoid:
             directive_parts.append(f"AVOID: {oracle_verdict.avoid}")
         combined_content += "\n".join(directive_parts) + "\n\n"
@@ -742,6 +744,7 @@ Page content:
         fallback = OverviewResponse(
             objective="Make progress toward completing the current page task",
             next="Click or scroll to discover required values",
+            task="scroll 500",
         )
         return (fallback, challenge_summary, filtered_text)
 

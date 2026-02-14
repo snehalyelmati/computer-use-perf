@@ -7,7 +7,7 @@ LOG_FILE = f"{LOG_DIR}/agent_{_run_ts}.log"
 VERBOSE_LOG_FILE = f"{LOG_DIR}/agent_verbose_{_run_ts}.log"
 STUCK_THRESHOLD = 5
 FAILURE_RESET_THRESHOLD = 3
-REPETITION_WINDOW = 2
+REPETITION_WINDOW = 3
 CHALLENGE_STEP_BUDGET = 10  # Force diagnosis after this many steps on same challenge
 MAX_FAILED_APPROACHES = 5  # Max entries in failed-attempt memory
 ORACLE_OVERRIDE_CIRCUIT_BREAKER = (
@@ -37,6 +37,9 @@ FILTER_MODEL_NAME = None
 MAX_BATCH_SIZE = 8
 ACTION_DELAY = 0.075
 DEFAULT_BASE_URL = "https://serene-frangipane-7fd25b.netlify.app"
+
+# Stage 1: disable cross-challenge learnings (enable later with orchestrator).
+ENABLE_LEARNINGS = False
 
 # Fixed, immutable goal for Challenge Mode (one challenge at a time).
 CHALLENGE_GOAL = "Solve the current challenge by completing any prerequisites required to move to the next challenge."
