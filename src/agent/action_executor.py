@@ -4,7 +4,10 @@ import re
 from playwright.async_api import Page
 from .config import ACTION_DELAY
 
-async def execute(page: Page, action: dict, handles: list, elements: list = None) -> str:
+
+async def execute(
+    page: Page, action: dict, handles: list, elements: list[dict] | None = None
+) -> str:
     """Execute action on page using stored element handles.
 
     Args:
@@ -21,7 +24,7 @@ async def execute(page: Page, action: dict, handles: list, elements: list = None
     # Get element label for context in results
     def _el_label(idx):
         if elements and 0 <= idx < len(elements):
-            text = (elements[idx].get('text') or '')[:25].strip()
+            text = (elements[idx].get("text") or "").strip()
             return f'"{text}"' if text else ""
         return ""
 
@@ -55,28 +58,34 @@ async def execute(page: Page, action: dict, handles: list, elements: list = None
                 # Find drop target: by element index or by text content
                 dst = None
                 if target_text:
-                    dst = await page.evaluate_handle('''(text) => {
+                    dst = await page.evaluate_handle(
+                        """(text) => {
                         const all = document.querySelectorAll('*');
                         for (const el of all) {
                             if (el.children.length === 0 && el.textContent.trim() === text) return el;
                         }
                         return null;
-                    }''', target_text)
-                    if await dst.evaluate('el => el === null'):
+                    }""",
+                        target_text,
+                    )
+                    if await dst.evaluate("el => el === null"):
                         dst = None
                 if dst is None and target < len(handles):
                     dst = handles[target]
                 if dst is None:
                     return f"drop target not found"
                 # Use JS DataTransfer events to bypass overlays
-                await page.evaluate('''([src, dst]) => {
+                await page.evaluate(
+                    """([src, dst]) => {
                     const dt = new DataTransfer();
                     src.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
                     dst.dispatchEvent(new DragEvent('dragenter', {bubbles: true, dataTransfer: dt}));
                     dst.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
                     dst.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
                     src.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
-                }''', [handles[index], dst])
+                }""",
+                    [handles[index], dst],
+                )
                 await asyncio.sleep(ACTION_DELAY)
                 label = target_text or f"[{target}]"
                 return f"dragged [{index}] to {label}"
@@ -99,7 +108,8 @@ async def execute(page: Page, action: dict, handles: list, elements: list = None
                 # Dispatch mouse events directly on the canvas element via JS
                 # to bypass any overlay that would intercept page.mouse events.
                 # Uses button/buttons props and rAF timing for reliable registration.
-                await page.evaluate('''(canvas) => {
+                await page.evaluate(
+                    """(canvas) => {
                     return new Promise(resolve => {
                         const rect = canvas.getBoundingClientRect();
                         const m = 10;
@@ -130,7 +140,9 @@ async def execute(page: Page, action: dict, handles: list, elements: list = None
                         };
                         requestAnimationFrame(next);
                     });
-                }''', handles[index])
+                }""",
+                    handles[index],
+                )
                 await asyncio.sleep(ACTION_DELAY)
                 label = _el_label(index)
                 return f"drew stroke on [{index}] {label}".strip()
@@ -155,7 +167,8 @@ async def execute(page: Page, action: dict, handles: list, elements: list = None
 
         elif action_type == "watch":
             text = str(value)
-            result = await page.evaluate('''(text) => {
+            result = await page.evaluate(
+                """(text) => {
                 return new Promise((resolve) => {
                     const skip = new Set(['SCRIPT','STYLE','NOSCRIPT','META','LINK','HEAD']);
                     // Check if element already exists
@@ -186,13 +199,15 @@ async def execute(page: Page, action: dict, handles: list, elements: list = None
                     });
                     observer.observe(document.body, {childList: true, subtree: true, attributes: true, characterData: true});
                 });
-            }''', text)
+            }""",
+                text,
+            )
             if result == "found":
                 return f"watched and clicked '{text}'"
             return f"watch timeout: '{text}' not found"
 
         elif action_type == "wait":
-            match = re.search(r'[\d.]+', str(value)) if value else None
+            match = re.search(r"[\d.]+", str(value)) if value else None
             seconds = min(float(match.group()) if match else 1, 10)
             await asyncio.sleep(seconds)
             return "waited"
@@ -203,7 +218,9 @@ async def execute(page: Page, action: dict, handles: list, elements: list = None
     return f"unknown: {action_type}"
 
 
-async def _verify_action(page: Page, action: dict, handles: list, result: str) -> str | None:
+async def _verify_action(
+    page: Page, action: dict, handles: list, result: str
+) -> str | None:
     """Verify an action succeeded. Returns None if OK, or an error string."""
     action_type = action.get("a", "")
     index = action.get("n", 0)
@@ -213,6 +230,16 @@ async def _verify_action(page: Page, action: dict, handles: list, result: str) -
         if action_type == "type" and index < len(handles):
             actual = await handles[index].input_value(timeout=1000)
             if actual.lower() != str(value).lower():
+                val_str = str(value)
+                if (
+                    len(actual) < len(val_str)
+                    and val_str.lower().startswith(actual.lower())
+                    and len(actual) > 0
+                ):
+                    return (
+                        f"verify failed: field only accepted {len(actual)} chars "
+                        f"(maxlength?) - expected '{value}', got '{actual}'"
+                    )
                 return f"verify failed: expected '{value}', got '{actual}'"
 
         elif action_type == "click" and index < len(handles):
@@ -225,36 +252,42 @@ async def _verify_action(page: Page, action: dict, handles: list, result: str) -
         elif action_type == "drag" and index < len(handles):
             # Check if source element moved (parent changed or detached)
             try:
-                src_moved = await handles[index].evaluate('''el => {
+                src_moved = await handles[index].evaluate("""el => {
                     return !el.isConnected || el.offsetParent === null
                         || el.style.display === 'none' || el.style.visibility === 'hidden';
-                }''')
+                }""")
                 if not src_moved:
-                    # Source still in place — auto-retry drag once
+                    # Source still in place - auto-retry drag once
                     target = action.get("t", 0)
                     target_text = str(value or "")
                     dst = None
                     if target_text:
-                        dst = await page.evaluate_handle('''(text) => {
+                        dst = await page.evaluate_handle(
+                            """(text) => {
                             const all = document.querySelectorAll('*');
                             for (const el of all) {
                                 if (el.children.length === 0 && el.textContent.trim() === text) return el;
                             }
                             return null;
-                        }''', target_text)
-                        if await dst.evaluate('el => el === null'):
+                        }""",
+                            target_text,
+                        )
+                        if await dst.evaluate("el => el === null"):
                             dst = None
                     if dst is None and target < len(handles):
                         dst = handles[target]
                     if dst is not None:
-                        await page.evaluate('''([src, dst]) => {
+                        await page.evaluate(
+                            """([src, dst]) => {
                             const dt = new DataTransfer();
                             src.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
                             dst.dispatchEvent(new DragEvent('dragenter', {bubbles: true, dataTransfer: dt}));
                             dst.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
                             dst.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
                             src.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
-                        }''', [handles[index], dst])
+                        }""",
+                            [handles[index], dst],
+                        )
                         await asyncio.sleep(ACTION_DELAY)
             except Exception:
                 pass  # Element detached = drag succeeded
@@ -264,7 +297,9 @@ async def _verify_action(page: Page, action: dict, handles: list, result: str) -
     return None
 
 
-async def execute_batch(page: Page, actions: list[dict], handles: list, elements: list = None) -> list[tuple[dict, str]]:
+async def execute_batch(
+    page: Page, actions: list[dict], handles: list, elements: list[dict] | None = None
+) -> list[tuple[dict, str]]:
     """Execute a batch of actions sequentially with verification.
 
     Stops on error or verification failure so the main loop can re-observe.

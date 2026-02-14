@@ -1,25 +1,44 @@
 from playwright.async_api import Page
 
+
 async def extract_elements(page: Page) -> tuple[list, list]:
     """Extract interactive elements with indices and return element handles.
 
     Returns:
         tuple: (metadata_list, element_handles) where indices match between both
     """
-    selector = ', '.join([
-        'button', 'input', 'textarea', 'select', 'a[href]', 'canvas',
-        'audio', 'video',
-        '[onclick]', '[contenteditable]', '[tabindex]:not([tabindex="-1"])',
-        '[role="button"]', '[role="radio"]', '[role="checkbox"]',
-        '[role="tab"]', '[role="switch"]', '[role="menuitem"]',
-        '[role="option"]', '[role="link"]', '[role="slider"]',
-        '[draggable="true"]', '[ondrop]', '[ondragover]'
-    ])
+    selector = ", ".join(
+        [
+            "button",
+            "input",
+            "textarea",
+            "select",
+            "a[href]",
+            "canvas",
+            "audio",
+            "video",
+            "[onclick]",
+            "[contenteditable]",
+            '[tabindex]:not([tabindex="-1"])',
+            '[role="button"]',
+            '[role="radio"]',
+            '[role="checkbox"]',
+            '[role="tab"]',
+            '[role="switch"]',
+            '[role="menuitem"]',
+            '[role="option"]',
+            '[role="link"]',
+            '[role="slider"]',
+            '[draggable="true"]',
+            "[ondrop]",
+            "[ondragover]",
+        ]
+    )
     selector_handles = await page.query_selector_all(selector)
 
     # Second pass: find all elements with cursor:pointer computed style
-    # Skip containers that wrap interactive children — the child is already captured
-    cursor_handles = await page.evaluate_handle('''() => {
+    # Skip containers that wrap interactive children - the child is already captured
+    cursor_handles = await page.evaluate_handle("""() => {
         const all = document.querySelectorAll('*');
         const results = [];
         for (const el of all) {
@@ -30,15 +49,15 @@ async def extract_elements(page: Page) -> tuple[list, list]:
             }
         }
         return results;
-    }''')
-    cursor_count = await cursor_handles.evaluate('els => els.length')
+    }""")
+    cursor_count = await cursor_handles.evaluate("els => els.length")
     cursor_list = []
     for i in range(cursor_count):
-        handle = await cursor_handles.evaluate_handle(f'els => els[{i}]')
+        handle = await cursor_handles.evaluate_handle(f"els => els[{i}]")
         cursor_list.append(handle.as_element())
 
     # Third pass: find scrollable containers (overflow: auto/scroll with hidden content)
-    scroll_handles = await page.evaluate_handle('''() => {
+    scroll_handles = await page.evaluate_handle("""() => {
         const results = [];
         for (const el of document.querySelectorAll('*')) {
             const style = window.getComputedStyle(el);
@@ -48,11 +67,11 @@ async def extract_elements(page: Page) -> tuple[list, list]:
             }
         }
         return results;
-    }''')
-    scroll_count = await scroll_handles.evaluate('els => els.length')
+    }""")
+    scroll_count = await scroll_handles.evaluate("els => els.length")
     scroll_list = []
     for i in range(scroll_count):
-        handle = await scroll_handles.evaluate_handle(f'els => els[{i}]')
+        handle = await scroll_handles.evaluate_handle(f"els => els[{i}]")
         scroll_list.append(handle.as_element())
 
     # Dedup: combine all lists, skip duplicates
@@ -61,7 +80,9 @@ async def extract_elements(page: Page) -> tuple[list, list]:
     for handle in selector_handles + cursor_list + scroll_list:
         if handle is None:
             continue
-        uid = await handle.evaluate('el => el.uniqueId || (el.uniqueId = Math.random().toString(36))')
+        uid = await handle.evaluate(
+            "el => el.uniqueId || (el.uniqueId = Math.random().toString(36))"
+        )
         if uid not in seen:
             seen.add(uid)
             handles.append(handle)
@@ -75,7 +96,7 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 continue
 
             # Extract metadata from element including role, state, and values
-            metadata = await handle.evaluate('''el => {
+            metadata = await handle.evaluate("""el => {
                 const tag = el.tagName.toLowerCase();
                 const type = el.type || '';
 
@@ -146,18 +167,41 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                         y: Math.round(rect.y + rect.height / 2)
                     }
                 };
-            }''')
+            }""")
 
             # Skip elements with no useful content for the LLM
-            has_content = (metadata['text'] or metadata['value'] or metadata['name'] or
-                           metadata['dataValue'] or metadata['href'])
-            is_core_interactive = metadata['tag'] in ('inp', 'txt', 'sel', 'canvas', 'scroll', 'audio', 'video')
-            has_semantic_role = metadata['role'] in ('button', 'radio', 'checkbox', 'tab', 'switch', 'menuitem', 'option', 'link', 'slider')
+            has_content = (
+                metadata["text"]
+                or metadata["value"]
+                or metadata["name"]
+                or metadata["dataValue"]
+                or metadata["href"]
+            )
+            is_core_interactive = metadata["tag"] in (
+                "inp",
+                "txt",
+                "sel",
+                "canvas",
+                "scroll",
+                "audio",
+                "video",
+            )
+            has_semantic_role = metadata["role"] in (
+                "button",
+                "radio",
+                "checkbox",
+                "tab",
+                "switch",
+                "menuitem",
+                "option",
+                "link",
+                "slider",
+            )
             if not has_content and not is_core_interactive and not has_semantic_role:
                 continue
 
             # Assign sequential index that matches position in visible_handles
-            metadata['index'] = len(elements)
+            metadata["index"] = len(elements)
             elements.append(metadata)
             visible_handles.append(handle)
 
@@ -167,7 +211,8 @@ async def extract_elements(page: Page) -> tuple[list, list]:
 
     return elements, visible_handles
 
-def format_element_summary(elements: list, max_elements: int = None) -> str:
+
+def format_element_summary(elements: list, max_elements: int | None = None) -> str:
     """Format elements with rich annotations (state, checked, disabled, value, dataValue, name).
 
     Used by both overview and action LLMs for consistent element representation.
@@ -176,30 +221,35 @@ def format_element_summary(elements: list, max_elements: int = None) -> str:
         elements: List of element metadata dicts from extract_elements()
         max_elements: If set, truncate to this many elements and append count of remaining
     """
-    subset = elements[:max_elements] if max_elements else elements
+    if max_elements is None:
+        subset = elements
+    elif max_elements <= 0:
+        subset = []
+    else:
+        subset = elements[:max_elements]
     el_strs = []
 
     for el in subset:
         # Use role if available, otherwise tag
-        tag = el.get('role') or el['tag']
+        tag = el.get("role") or el["tag"]
 
         # Build state string with new metadata
         state = ""
-        if el.get('state'):
+        if el.get("state"):
             state = f" [{el['state']}]"
-        if el.get('disabled'):
+        if el.get("disabled"):
             state += " [disabled]"
-        if el.get('checked'):
+        if el.get("checked"):
             state += " [checked]"
-        if el.get('selected'):
+        if el.get("selected"):
             state += " [selected]"
 
         # Media state for audio/video elements
-        if el.get('tag') in ('audio', 'video'):
-            if el.get('mediaLoop'):
+        if el.get("tag") in ("audio", "video"):
+            if el.get("mediaLoop"):
                 state += " [loop]"
-            if el.get('mediaPlaying'):
-                remaining = el.get('mediaDuration', 0) - el.get('mediaCurrentTime', 0)
+            if el.get("mediaPlaying"):
+                remaining = el.get("mediaDuration", 0) - el.get("mediaCurrentTime", 0)
                 state += f" [playing, {int(remaining)}s remaining]"
             else:
                 state += " [paused]"
@@ -208,24 +258,30 @@ def format_element_summary(elements: list, max_elements: int = None) -> str:
 
         # Show current value for inputs and radio/checkbox (helps LLM know state and identify correct options)
         value_info = ""
-        if el.get('value') and (el['tag'] == 'inp' or el.get('role') in ('radio', 'checkbox')):
-            value_info = f" value=\"{el['value']}\""
+        if el.get("value") and (
+            el["tag"] == "inp" or el.get("role") in ("radio", "checkbox")
+        ):
+            value_info = f' value="{el["value"]}"'
 
         # Show data-value/data-code if present (might contain answer)
-        if el.get('dataValue'):
-            value_info += f" data=\"{el['dataValue']}\""
+        if el.get("dataValue"):
+            value_info += f' data="{el["dataValue"]}"'
 
         # Show name/id for form field identification
         name_info = ""
-        if el.get('name'):
+        if el.get("name"):
             name_info = f" ({el['name']})"
 
         # Include href for links
-        href = el.get('href', '')
-        if href and href != '#':
-            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info} -> {href}{state}")
+        href = el.get("href", "")
+        if href and href != "#":
+            el_strs.append(
+                f'[{el["index"]}] {tag} "{text}"{name_info} -> {href}{state}'
+            )
         else:
-            el_strs.append(f"[{el['index']}] {tag} \"{text}\"{name_info}{value_info}{state}")
+            el_strs.append(
+                f'[{el["index"]}] {tag} "{text}"{name_info}{value_info}{state}'
+            )
 
     if max_elements and len(elements) > max_elements:
         el_strs.append(f"... and {len(elements) - max_elements} more elements")
@@ -233,8 +289,11 @@ def format_element_summary(elements: list, max_elements: int = None) -> str:
     return "\n".join(el_strs)
 
 
-def format_elements_by_proximity(elements: list, last_pos: tuple = None,
-                                  proximity_threshold: int = 200) -> str:
+def format_elements_by_proximity(
+    elements: list,
+    last_pos: tuple[int, int] | None = None,
+    proximity_threshold: int = 200,
+) -> str:
     """Format elements separated into Nearby and Other sections.
 
     Args:
@@ -246,10 +305,10 @@ def format_elements_by_proximity(elements: list, last_pos: tuple = None,
         return format_element_summary(elements)
 
     def distance(el):
-        bbox = el.get('bbox')
+        bbox = el.get("bbox")
         if not bbox:
-            return float('inf')
-        return ((bbox['x'] - last_pos[0])**2 + (bbox['y'] - last_pos[1])**2) ** 0.5
+            return float("inf")
+        return ((bbox["x"] - last_pos[0]) ** 2 + (bbox["y"] - last_pos[1]) ** 2) ** 0.5
 
     nearby = []
     other = []
@@ -273,7 +332,9 @@ def format_elements_by_proximity(elements: list, last_pos: tuple = None,
     return "\n".join(parts)
 
 
-def format_context(goal: str, data: str | None, next_directive: str, elements: list) -> str:
+def format_context(
+    goal: str, data: str | None, next_directive: str, elements: list
+) -> str:
     """Format the analysis and elements for the action LLM.
 
     Args:

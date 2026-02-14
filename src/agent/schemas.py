@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class OracleResponse(BaseModel):
@@ -13,6 +13,30 @@ class OracleResponse(BaseModel):
     avoid: str | None = None
     evidence: str | None = None
     explore: str | None = None
+
+    _STATUS_ALIASES: ClassVar[dict[str, str]] = {
+        "SUBMISSION_NO_EFFECT": "WARN", "WAIT": "OK", "STUCK": "OVERRIDE",
+        "RETRY": "WARN", "ERROR": "WARN", "FAIL": "WARN", "FAILURE": "WARN",
+        "PROGRESS": "OK", "SUCCESS": "OK", "DONE": "OK",
+    }
+    _VALID_STATUSES: ClassVar[set[str]] = {"OK", "WARN", "REDIRECT", "OVERRIDE", "WRONG_GOAL"}
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, v):
+        if isinstance(v, str):
+            v = v.upper().strip()
+            if v in cls._VALID_STATUSES:
+                return v
+            return cls._STATUS_ALIASES.get(v, "WARN")
+        return v
+
+    @field_validator("avoid", mode="before")
+    @classmethod
+    def coerce_avoid_list(cls, v):
+        if isinstance(v, list):
+            return ", ".join(str(item) for item in v)
+        return v
 
 
 class OverviewResponse(BaseModel):
