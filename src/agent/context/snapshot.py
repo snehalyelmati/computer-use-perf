@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import re
+from urllib.parse import urlparse
 from typing import Any, Iterable, Sequence
 
 from playwright.async_api import CDPSession, Page
@@ -33,6 +35,8 @@ INTERACTIVE_TAGS = {
     "OPTION",
     "IFRAME",
 }
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 @dataclass
@@ -74,6 +78,10 @@ def build_stable_id(parts: dict[str, Any]) -> str:
     payload = json.dumps(parts, sort_keys=True, ensure_ascii=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return f"el_{digest[:12]}"
+
+def _tokenize(text: str) -> set[str]:
+    tokens = {match.group(0) for match in _TOKEN_RE.finditer(text.lower())}
+    return {token for token in tokens if len(token) >= 2}
 
 def _normalize_text(value: str | None) -> str | None:
     if not value:
@@ -207,6 +215,82 @@ def _stable_id_payload(
         "frame_url": frame_url or "",
     }
 
+def element_text_blob(element: ElementSnapshot) -> str:
+    parts: list[str] = []
+    for value in [element.role, element.name, element.text, element.node_name]:
+        if value:
+            parts.append(str(value))
+    attrs = element.attributes or {}
+    for key in [
+        "id",
+        "name",
+        "type",
+        "placeholder",
+        "aria-label",
+        "title",
+        "alt",
+        "href",
+        "value",
+    ]:
+        if value := attrs.get(key):
+            parts.append(str(value))
+    return " ".join(parts)
+
+def _hostname(url: str | None) -> str:
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    return parsed.hostname or ""
+
+def rank_elements(
+    elements: Sequence[ElementSnapshot],
+    *,
+    query: str,
+    page_url: str,
+) -> list[ElementSnapshot]:
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        return list(elements)
+
+    page_host = _hostname(page_url)
+    scored: list[tuple[float, str, ElementSnapshot]] = []
+    max_score = 0.0
+    for element in elements:
+        blob_tokens = _tokenize(element_text_blob(element))
+        overlap = float(len(query_tokens & blob_tokens))
+        score = overlap
+
+        node_name = (element.node_name or "").upper()
+        if node_name == "IFRAME":
+            score *= 0.6
+
+        frame_host = _hostname(element.frame_url)
+        if page_host and frame_host and frame_host != page_host:
+            score *= 0.7
+
+        max_score = max(max_score, score)
+        scored.append((score, element.stable_id, element))
+
+    if max_score <= 0.0:
+        return list(elements)
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in scored]
+
+def search_elements(
+    elements: Sequence[ElementSnapshot],
+    *,
+    query: str,
+    limit: int,
+    page_url: str,
+) -> list[ElementSnapshot]:
+    ranked = rank_elements(elements, query=query, page_url=page_url)
+    if limit <= 0:
+        return []
+    return list(ranked)[:limit]
+
 def unique_stable_id(stable_id: str, counts: dict[str, int]) -> str:
     count = counts.get(stable_id, 0)
     counts[stable_id] = count + 1
@@ -331,7 +415,12 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
     return PageSnapshot(url=page.url, title=title, elements=elements, raw_text=raw_text)
 
 
-def format_snapshot_for_llm(snapshot: PageSnapshot, *, max_elements: int = 60) -> str:
+def format_snapshot_for_llm(
+    snapshot: PageSnapshot,
+    *,
+    max_elements: int = 60,
+    query: str | None = None,
+) -> str:
     """Format a snapshot into a compact, LLM-friendly text representation."""
 
     lines: list[str] = []
@@ -341,7 +430,26 @@ def format_snapshot_for_llm(snapshot: PageSnapshot, *, max_elements: int = 60) -
         lines.append(f"Title: {title}")
     lines.append("")
     lines.append(f"Interactive elements (showing up to {max_elements}):")
-    for element in list(snapshot.elements)[:max_elements]:
+
+    elements = list(snapshot.elements)
+    if query:
+        elements = rank_elements(elements, query=query, page_url=snapshot.url)
+        lines.append("Elements are sorted by predicted relevance to the goal.")
+
+    elements = elements[:max_elements]
+
+    def _label_key(el: ElementSnapshot) -> tuple[str, str, str, str]:
+        def norm(value: str | None) -> str:
+            return " ".join((value or "").lower().split())
+
+        return (norm(el.role), norm(el.name), norm(el.text), norm(el.node_name))
+
+    label_counts: dict[tuple[str, str, str, str], int] = {}
+    for element in elements:
+        key = _label_key(element)
+        label_counts[key] = label_counts.get(key, 0) + 1
+
+    for element in elements:
         role = (element.role or "").strip()
         name = (element.name or "").strip()
         text = (element.text or "").strip()
@@ -376,5 +484,10 @@ def format_snapshot_for_llm(snapshot: PageSnapshot, *, max_elements: int = 60) -
             frame_name = element.frame_name or ""
             frame_url = element.frame_url or ""
             frame_hint = f" [frame: {frame_name} {frame_url}]".strip()
-        lines.append(f"- {element.stable_id}: {label}{(' ' + frame_hint) if frame_hint else ''}")
+        bbox_hint = ""
+        if label_counts.get(_label_key(element), 0) > 1 and element.bounding_box:
+            x, y, w, h = element.bounding_box
+            bbox_hint = f" bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}"
+        hints = f"{(' ' + frame_hint) if frame_hint else ''}{bbox_hint}"
+        lines.append(f"- {element.stable_id}: {label}{hints}")
     return "\n".join(lines).strip()

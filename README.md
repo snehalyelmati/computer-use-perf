@@ -33,7 +33,7 @@ flowchart LR
 - Set `OPENROUTER_API_KEY` for OpenRouter access
 
 ## Run
-- `uv run main.py --url <target> --goal "<task>" [--headless] [--log-level INFO] [--no-metrics]`
+- `uv run main.py --url <target> --goal "<task>" [--headless] [--max-elements 60] [--stuck-threshold 2] [--no-decoy-guard] [--log-level INFO] [--no-metrics]`
 
 ### Outputs
 - Logs: `logs/agent.log`
@@ -61,6 +61,7 @@ This project is a general-purpose browser agent built around a clear separation 
 - OpenRouter is used as an OpenAI-compatible endpoint.
 - Models (Groq, Cerebras, OpenAI, etc.) are selected via model names.
 - Structured outputs are enforced via JSON schema when supported.
+- Default model: `moonshotai/kimi-k2-0905:exacto` (see `src/agent/config.py`).
 
 ### Execution Environment
 
@@ -94,6 +95,7 @@ sequenceDiagram
 The agent uses semantic tools that reference stable element IDs:
 
 - `click_element(element_id: str)`
+- `find_elements(query: str, limit: int = 8)`
 - `type_text(element_id: str, text: str)`
 - `drag_and_drop(source_id: str, target_id: str)`
 - `select_all()`, `copy_selection()`, `paste()`
@@ -125,6 +127,8 @@ The agent uses semantic tools that reference stable element IDs:
 - Avoid hardcoding site-specific selectors or strings.
 - Pass stable element IDs, never raw selectors, to the LLM.
 - Keep tools generic and reusable across websites.
+- When the page appears unchanged for multiple steps, the agent forces recovery behavior (do not repeat the previous click; shortlist candidates via `find_elements`, read text, or try alternatives).
+- Optional decoy click guard blocks repeated stuck clicks and suggests alternative stable IDs (disable with `--no-decoy-guard`).
 
 ## Roadmap
 

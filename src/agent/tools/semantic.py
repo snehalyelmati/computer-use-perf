@@ -28,6 +28,8 @@ class ToolContext:
     element_index: ElementIndex
     frame_sessions: dict[str, CDPSession] = field(default_factory=dict)
     active_frame_id: str | None = None
+    last_tool: str | None = None
+    last_element_id: str | None = None
 
 
 def build_tool_context(
@@ -197,6 +199,8 @@ def _active_frame_error(element: ElementSnapshot | None, context: ToolContext) -
 
 
 async def click_element(element_id: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "click_element"
+    context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
         return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
@@ -229,6 +233,8 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
 
 
 async def type_text(element_id: str, text: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "type_text"
+    context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
         return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
@@ -265,6 +271,8 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
 
 
 async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "drag_and_drop"
+    context.last_element_id = None
     source = _resolve_element(source_id, context)
     target = _resolve_element(target_id, context)
     if not source or not source.backend_node_id:
@@ -317,6 +325,8 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
 
 
 async def select_all(context: ToolContext) -> ToolResult:
+    context.last_tool = "select_all"
+    context.last_element_id = None
     try:
         await context.page.keyboard.press("ControlOrMeta+A")
     except Exception as exc:  # pragma: no cover - runtime safety
@@ -325,6 +335,8 @@ async def select_all(context: ToolContext) -> ToolResult:
 
 
 async def copy_selection(context: ToolContext) -> ToolResult:
+    context.last_tool = "copy_selection"
+    context.last_element_id = None
     try:
         await context.page.keyboard.press("ControlOrMeta+C")
     except Exception as exc:  # pragma: no cover - runtime safety
@@ -333,6 +345,8 @@ async def copy_selection(context: ToolContext) -> ToolResult:
 
 
 async def paste(context: ToolContext) -> ToolResult:
+    context.last_tool = "paste"
+    context.last_element_id = None
     try:
         await context.page.keyboard.press("ControlOrMeta+V")
     except Exception as exc:  # pragma: no cover - runtime safety
@@ -341,6 +355,8 @@ async def paste(context: ToolContext) -> ToolResult:
 
 
 async def read_element_text(element_id: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "read_element_text"
+    context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
         return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
@@ -370,6 +386,8 @@ async def read_element_text(element_id: str, context: ToolContext) -> ToolResult
 
 
 async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "switch_to_iframe"
+    context.last_element_id = iframe_id
     element = _resolve_element(iframe_id, context)
     if not element:
         return ToolResult(ok=False, message=f"Unknown iframe id: {iframe_id}")
@@ -380,11 +398,15 @@ async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
 
 
 async def switch_to_main_frame(context: ToolContext) -> ToolResult:
+    context.last_tool = "switch_to_main_frame"
+    context.last_element_id = None
     context.active_frame_id = None
     return ToolResult(ok=True, message="Switched to main frame")
 
 
 async def navigate_to(url: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "navigate_to"
+    context.last_element_id = None
     try:
         await context.page.goto(url)
     except Exception as exc:  # pragma: no cover - runtime safety
@@ -393,6 +415,8 @@ async def navigate_to(url: str, context: ToolContext) -> ToolResult:
 
 
 async def take_screenshot(context: ToolContext) -> ToolResult:
+    context.last_tool = "take_screenshot"
+    context.last_element_id = None
     try:
         await context.page.screenshot(full_page=True)
     except Exception as exc:  # pragma: no cover - runtime safety
@@ -401,6 +425,8 @@ async def take_screenshot(context: ToolContext) -> ToolResult:
 
 
 async def execute_js(code: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "execute_js"
+    context.last_element_id = None
     try:
         await context.page.evaluate(code)
     except Exception as exc:  # pragma: no cover - runtime safety
@@ -409,6 +435,8 @@ async def execute_js(code: str, context: ToolContext) -> ToolResult:
 
 
 async def press_key_combination(keys: list[str], context: ToolContext) -> ToolResult:
+    context.last_tool = "press_key_combination"
+    context.last_element_id = None
     try:
         await context.page.keyboard.press("+".join(keys))
     except Exception as exc:  # pragma: no cover - runtime safety

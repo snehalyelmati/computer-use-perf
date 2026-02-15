@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import hashlib
 import logging
 from pathlib import Path
 import time
@@ -16,9 +17,11 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 from src.agent.browser.session import close_browser, launch_browser
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.snapshot import (
+    ElementSnapshot,
     build_element_index,
     capture_snapshot,
     format_snapshot_for_llm,
+    search_elements,
 )
 from src.agent.metrics import (
     MetricsRecorder,
@@ -27,8 +30,8 @@ from src.agent.metrics import (
     usage_stats_from_result,
     write_run_summary,
 )
-from src.agent.models.actions import OrchestratorDecision, StepOutput, ToolExecutionResult
-from src.agent.prompts.system import ORCHESTRATOR_PROMPT, STEP_PROMPT, SYSTEM_PROMPT
+from src.agent.models.actions import ClickGuardDecision, OrchestratorDecision, StepOutput, ToolExecutionResult
+from src.agent.prompts.system import CLICK_GUARD_PROMPT, ORCHESTRATOR_PROMPT, STEP_PROMPT, SYSTEM_PROMPT
 from src.agent.tools import semantic
 
 logger = logging.getLogger(__name__)
@@ -40,6 +43,10 @@ class AgentState:
     active_frame_id: str | None = None
     memory: list[str] = field(default_factory=list)
     last_summary: str | None = None
+    last_snapshot_digest: str | None = None
+    no_progress_steps: int = 0
+    last_tool: str | None = None
+    last_element_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,14 @@ class WorkerDeps:
     tool_context: semantic.ToolContext
     metrics: MetricsRecorder
     step: int
+    overall_goal: str
+    worker_goal: str
+    recent_memory: tuple[str, ...]
+    no_progress_steps: int
+    stuck_threshold: int
+    decoy_guard_enabled: bool
+    prior_tool: str | None
+    prior_element_id: str | None
 
 
 def _setup_logging(log_dir: str, *, level: str = "INFO") -> None:
@@ -107,6 +122,11 @@ def _format_memory(memory: list[str], *, limit: int = 10) -> str:
     lines = [f"{idx + 1}. {item}" for idx, item in enumerate(recent)]
     return "\n".join(lines)
 
+def _snapshot_digest(url: str, title: str | None, elements: list[ElementSnapshot]) -> str:
+    ids = [element.stable_id for element in elements[:80]]
+    material = "\n".join([url, title or "", *ids])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
 
 def build_orchestrator_agent(model: OpenRouterModel, *, model_settings: dict[str, Any]) -> Agent[None, OrchestratorDecision]:
     return Agent(
@@ -117,10 +137,20 @@ def build_orchestrator_agent(model: OpenRouterModel, *, model_settings: dict[str
         retries=1,
     )
 
+def build_click_guard_agent(model: OpenRouterModel, *, model_settings: dict[str, Any]) -> Agent[None, ClickGuardDecision]:
+    return Agent(
+        model,
+        output_type=ClickGuardDecision,
+        system_prompt=(SYSTEM_PROMPT, CLICK_GUARD_PROMPT),
+        model_settings=model_settings,
+        retries=1,
+    )
+
 
 def build_browser_worker_agent(
     model: OpenRouterModel, *, model_settings: dict[str, Any]
 ) -> Agent[WorkerDeps, StepOutput]:
+    click_guard = build_click_guard_agent(model, model_settings=model_settings)
     agent: Agent[WorkerDeps, StepOutput] = Agent(
         model,
         deps_type=WorkerDeps,
@@ -130,27 +160,158 @@ def build_browser_worker_agent(
         retries=1,
     )
 
+    def _format_element_brief(element: ElementSnapshot) -> str:
+        role = (element.role or "").strip()
+        name = (element.name or "").strip()
+        text = (element.text or "").strip()
+        tag = (element.node_name or "").strip()
+        attrs = element.attributes or {}
+        important_attrs = {
+            key: attrs.get(key)
+            for key in [
+                "id",
+                "name",
+                "type",
+                "placeholder",
+                "aria-label",
+                "title",
+                "alt",
+                "href",
+                "value",
+            ]
+            if attrs.get(key)
+        }
+        attr_str = (
+            " ".join(f'{key}="{value}"' for key, value in important_attrs.items())
+            if important_attrs
+            else ""
+        )
+        label_parts = [part for part in [role, name, text, tag] if part]
+        label = " | ".join(label_parts) if label_parts else "element"
+        if attr_str:
+            label = f"{label} ({attr_str})"
+        bbox_hint = ""
+        if element.bounding_box:
+            x, y, w, h = element.bounding_box
+            bbox_hint = f" bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}"
+        frame_hint = ""
+        if element.frame_name or element.frame_url:
+            frame_name = element.frame_name or ""
+            frame_url = element.frame_url or ""
+            frame_hint = f" frame={frame_name or frame_url}".strip()
+        hints = f"{bbox_hint}{(' ' + frame_hint) if frame_hint else ''}"
+        return f"{element.stable_id}: {label}{hints}"
+
     @agent.tool(name="click_element")
     async def click_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
         start = time.perf_counter()
+        if (
+            ctx.deps.decoy_guard_enabled
+            and ctx.deps.no_progress_steps >= ctx.deps.stuck_threshold
+            and ctx.deps.prior_tool == "click_element"
+            and ctx.deps.prior_element_id == element_id
+        ):
+            page_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+            all_elements = list(ctx.deps.tool_context.element_index.elements.values())
+            candidates = search_elements(all_elements, query=ctx.deps.worker_goal, limit=8, page_url=page_url)
+            candidate_ids = {element.stable_id for element in candidates}
+
+            chosen = ctx.deps.tool_context.element_index.elements.get(element_id)
+            chosen_line = _format_element_brief(chosen) if chosen else f"{element_id}: (unknown)"
+            candidate_lines = "\n".join(_format_element_brief(element) for element in candidates) if candidates else "None."
+            memory_text = "\n".join(f"- {item}" for item in ctx.deps.recent_memory) if ctx.deps.recent_memory else "None."
+            guard_prompt = (
+                f"Overall goal: {ctx.deps.overall_goal}\n"
+                f"Worker goal: {ctx.deps.worker_goal}\n"
+                f"Progress: no_progress_steps={ctx.deps.no_progress_steps} "
+                f"(stuck_threshold={ctx.deps.stuck_threshold}) "
+                f"prior_tool={ctx.deps.prior_tool or 'None'} "
+                f"prior_element_id={ctx.deps.prior_element_id or 'None'}\n\n"
+                f"Recent memory:\n{memory_text}\n\n"
+                f"Chosen click:\n{chosen_line}\n\n"
+                f"Alternative candidates:\n{candidate_lines}\n"
+            )
+            guard_result = await click_guard.run(guard_prompt)
+            decision = guard_result.output
+            alternatives = [
+                alt for alt in (decision.alternatives or []) if alt in candidate_ids and alt != element_id
+            ][:5]
+            if not decision.allow and alternatives:
+                ctx.deps.tool_context.last_tool = "click_element"
+                ctx.deps.tool_context.last_element_id = element_id
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                logger.debug(
+                    "tool=%s step=%s ok=%s element_id=%s duration_ms=%s",
+                    "click_element",
+                    ctx.deps.step,
+                    False,
+                    element_id,
+                    duration_ms,
+                )
+                ctx.deps.metrics.emit(
+                    "tool_call",
+                    step=ctx.deps.step,
+                    tool="click_element",
+                    ok=False,
+                    duration_ms=duration_ms,
+                    element_id=element_id,
+                )
+                alt_str = ", ".join(alternatives)
+                return ToolExecutionResult(
+                    ok=False,
+                    message=f"Click blocked by decoy guard: {decision.rationale}. Try: {alt_str}",
+                )
+
         result = await semantic.click_element(element_id, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
         logger.debug(
             "tool=%s step=%s ok=%s element_id=%s duration_ms=%s",
             "click_element",
             ctx.deps.step,
             result.ok,
             element_id,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="click_element",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
             element_id=element_id,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
+
+    @agent.tool(name="find_elements")
+    async def find_elements(ctx: RunContext[WorkerDeps], query: str, limit: int = 8) -> ToolExecutionResult:
+        start = time.perf_counter()
+        limit = max(1, min(int(limit), 20))
+        page_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        elements = list(ctx.deps.tool_context.element_index.elements.values())
+        matches = search_elements(elements, query=query, limit=limit, page_url=page_url)
+        message = "No matches."
+        if matches:
+            message = "\n".join(_format_element_brief(element) for element in matches)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.debug(
+            "tool=%s step=%s ok=%s query_len=%s limit=%s duration_ms=%s",
+            "find_elements",
+            ctx.deps.step,
+            True,
+            len(query or ""),
+            limit,
+            duration_ms,
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="find_elements",
+            ok=True,
+            duration_ms=duration_ms,
+            query_len=len(query or ""),
+            limit=limit,
+        )
+        return ToolExecutionResult(ok=True, message=message)
 
     @agent.tool(name="type_text")
     async def type_text(ctx: RunContext[WorkerDeps], element_id: str, text: str) -> ToolExecutionResult:
@@ -488,20 +649,47 @@ class BrowserAgent:
                     len(snapshot.elements),
                     snapshot.url,
                 )
+                snapshot_digest = _snapshot_digest(snapshot.url, snapshot.title, list(snapshot.elements))
+                if self.state.last_snapshot_digest == snapshot_digest:
+                    self.state.no_progress_steps += 1
+                else:
+                    self.state.no_progress_steps = 0
+                self.state.last_snapshot_digest = snapshot_digest
+
                 element_index = build_element_index(snapshot)
                 tool_context = semantic.build_tool_context(
                     session,
                     element_index,
                     active_frame_id=self.state.active_frame_id,
                 )
-                deps = WorkerDeps(tool_context=tool_context, metrics=metrics, step=self.state.step)
-                snapshot_text = format_snapshot_for_llm(snapshot, max_elements=self.agent_config.max_elements)
+                snapshot_text_orchestrator = format_snapshot_for_llm(
+                    snapshot,
+                    max_elements=self.agent_config.max_elements,
+                    query=self.agent_config.goal,
+                )
 
                 memory_text = _format_memory(self.state.memory, limit=self.agent_config.memory_steps)
+                progress_text = (
+                    "Progress: "
+                    f"no_progress_steps={self.state.no_progress_steps} "
+                    f"(stuck_threshold={self.agent_config.stuck_threshold}) "
+                    f"last_tool={self.state.last_tool or 'None'} "
+                    f"last_element_id={self.state.last_element_id or 'None'}"
+                )
+                stuck_hint = ""
+                if self.state.no_progress_steps >= self.agent_config.stuck_threshold:
+                    stuck_hint = (
+                        "\n\nSTUCK RECOVERY: The page snapshot appears unchanged for multiple steps. "
+                        "Do NOT repeat the previous action; instead, explore alternatives by reading element text, "
+                        "shortlisting candidates (find_elements), switching frames, navigating, or using a different "
+                        "candidate with the same label but a different bbox/frame."
+                    )
                 orchestrator_prompt = (
                     f"Overall goal: {self.agent_config.goal}\n\n"
+                    f"{progress_text}\n\n"
                     f"Memory (recent):\n{memory_text}\n\n"
-                    f"Page snapshot:\n{snapshot_text}\n"
+                    f"Page snapshot:\n{snapshot_text_orchestrator}\n"
+                    f"{stuck_hint}"
                 )
                 orchestrator_started = time.perf_counter()
                 decision_result = await orchestrator.run(orchestrator_prompt)
@@ -546,12 +734,32 @@ class BrowserAgent:
                     )
                     break
 
+                snapshot_text_worker = format_snapshot_for_llm(
+                    snapshot,
+                    max_elements=self.agent_config.max_elements,
+                    query=decision.worker_goal,
+                )
+                deps = WorkerDeps(
+                    tool_context=tool_context,
+                    metrics=metrics,
+                    step=self.state.step,
+                    overall_goal=self.agent_config.goal,
+                    worker_goal=decision.worker_goal,
+                    recent_memory=tuple(self.state.memory[-self.agent_config.memory_steps :]),
+                    no_progress_steps=self.state.no_progress_steps,
+                    stuck_threshold=self.agent_config.stuck_threshold,
+                    decoy_guard_enabled=self.agent_config.decoy_guard_enabled,
+                    prior_tool=self.state.last_tool,
+                    prior_element_id=self.state.last_element_id,
+                )
                 worker_prompt = (
                     STEP_PROMPT.format(goal=decision.worker_goal)
                     + "\n\n"
                     + f"Overall goal: {self.agent_config.goal}\n\n"
+                    + f"{progress_text}\n\n"
                     + f"Memory (recent):\n{memory_text}\n\n"
-                    + f"Page snapshot:\n{snapshot_text}\n"
+                    + f"Page snapshot:\n{snapshot_text_worker}\n"
+                    + (stuck_hint + "\n" if stuck_hint else "")
                 )
                 worker_started = time.perf_counter()
                 with browser_worker.sequential_tool_calls():
@@ -579,6 +787,8 @@ class BrowserAgent:
                 self.state.active_frame_id = tool_context.active_frame_id
                 self.state.last_summary = step_output.summary
                 self.state.memory.append(step_output.summary)
+                self.state.last_tool = tool_context.last_tool
+                self.state.last_element_id = tool_context.last_element_id
                 logger.info(
                     "Step %s worker duration_ms=%s in_tokens=%s out_tokens=%s cost_usd=%s done=%s summary=%s",
                     self.state.step,
@@ -596,8 +806,9 @@ class BrowserAgent:
                     duration_ms=int((time.perf_counter() - step_started) * 1000),
                 )
                 if step_output.done:
-                    logger.info("Done (worker).")
-                    break
+                    logger.info(
+                        "Worker reported done=true (delegated goal complete); continuing until orchestrator done=true."
+                    )
         finally:
             await close_browser(session)
             run_duration_ms = int((time.perf_counter() - run_started) * 1000)

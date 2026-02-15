@@ -14,7 +14,7 @@ class LLMConfig:
 
     provider: ModelProvider = "openrouter"
     base_url: str = "https://openrouter.ai/api/v1"
-    model: str = "openai/gpt-4o-mini"
+    model: str = "moonshotai/kimi-k2-0905:exacto"
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     api_key_env: str = "OPENROUTER_API_KEY"
     timeout_seconds: int = 60
@@ -40,5 +40,7 @@ class AgentConfig:
     log_dir: str = "logs"
     max_elements: int = 60
     memory_steps: int = 10
+    stuck_threshold: int = 2
+    decoy_guard_enabled: bool = True
     log_level: str = "INFO"
     metrics_enabled: bool = True

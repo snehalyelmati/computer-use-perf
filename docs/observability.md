@@ -21,7 +21,7 @@ Event types:
 - `run_start`: `target_url`, `goal`, `max_steps`, `model`
 - `snapshot`: `step`, `duration_ms`, `url`, `title`, `elements`
 - `agent_call`: `step`, `agent` (`orchestrator` or `browser_worker`), `duration_ms`, token fields (`input_tokens`, `output_tokens`, `requests`, `tool_calls`), and cost fields when available (`cost_usd`, `upstream_inference_cost_usd`)
-- `tool_call`: `step`, `tool`, `ok`, `duration_ms` plus safe tool metadata (e.g. `element_id`, `text_len`, `code_len`)
+- `tool_call`: `step`, `tool`, `ok`, `duration_ms` plus safe tool metadata (e.g. `element_id`, `text_len`, `code_len`, `query_len`, `limit`)
 - `step_end`: `step`, `done`, `duration_ms`
 - `run_end`: `duration_ms`
 
@@ -35,4 +35,3 @@ Event types:
 - Total run summary: `cat logs/run_summary.json`
 - Count events by type: `jq -r '.event' logs/metrics.jsonl | sort | uniq -c`
 - Sum durations (rough): `jq -s 'map(select(.duration_ms != null) | .duration_ms) | add' logs/metrics.jsonl`
-

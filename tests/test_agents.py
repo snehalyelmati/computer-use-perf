@@ -47,7 +47,19 @@ async def test_browser_worker_registers_semantic_tools() -> None:
         active_frame_id=None,
     )
     metrics = MetricsRecorder(log_dir="/tmp", run_id="test", enabled=False)
-    deps = WorkerDeps(tool_context=tool_context, metrics=metrics, step=1)
+    deps = WorkerDeps(
+        tool_context=tool_context,
+        metrics=metrics,
+        step=1,
+        overall_goal="test overall",
+        worker_goal="test worker",
+        recent_memory=(),
+        no_progress_steps=0,
+        stuck_threshold=2,
+        decoy_guard_enabled=True,
+        prior_tool=None,
+        prior_element_id=None,
+    )
     result = await agent.run("goal: test\nsnapshot: none", deps=deps)
     assert result.output.summary == "noop"
 
@@ -56,6 +68,7 @@ async def test_browser_worker_registers_semantic_tools() -> None:
     tool_names = {t.name for t in params.function_tools}
     assert {
         "click_element",
+        "find_elements",
         "type_text",
         "drag_and_drop",
         "select_all",

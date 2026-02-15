@@ -46,3 +46,14 @@ class OrchestratorDecision(BaseModel):
         None,
         description="Optional brief rationale for why this next goal was chosen",
     )
+
+
+class ClickGuardDecision(BaseModel):
+    """Structured output returned by the click guard to block repeated decoy clicks."""
+
+    allow: bool = Field(..., description="Allow the requested click if true; otherwise block it")
+    rationale: str = Field(..., description="Brief explanation for the decision")
+    alternatives: list[str] = Field(
+        default_factory=list,
+        description="Suggested alternative stable element ids to try instead",
+    )
