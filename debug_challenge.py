@@ -146,6 +146,7 @@ async def run_debug(challenge_url: str):
                 CHALLENGE_GOAL,
                 overview_resp.objective,
                 overview_resp.data,
+                overview_resp.task,
                 overview_resp.next,
                 elements,
             )

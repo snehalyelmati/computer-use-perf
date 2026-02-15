@@ -25,7 +25,7 @@ from src.agent.config import (
 from src.agent.llm_client import set_stats_collector
 from src.agent.providers import PROVIDER_MODELS
 from src.agent.content_extraction import extract_structured_content
-from src.agent.element_utils import extract_elements, format_context
+from src.agent.element_utils import extract_elements
 from src.agent.llm_agents import (
     analyze_overview,
     llm_decide,
@@ -455,25 +455,24 @@ async def run_agent(
                     log(f"    PROGRESS: {overview_resp.progress}")
                 log(f"    NEXT: {overview_resp.next}")
 
-                # Action LLM: translate TASK DSL into executable actions.
+                # Action LLM: compile TASK DSL into executable actions.
                 task_text = (overview_resp.task or "").strip()
-                next_text = (overview_resp.next or "").strip()
-                directive = (
-                    f"{next_text}\n\nTASK:\n{task_text}" if task_text else next_text
-                )
-                context_str = format_context(
-                    current_goal,
-                    overview_resp.objective,
-                    overview_resp.data,
-                    directive,
-                    elements,
-                )
+
+                # Keep Action LLM stateless (compiler-style): do not accumulate history
+                # or pass step history that might encourage rewriting the TASK.
+                action_messages[:] = action_messages[:1]
+                ctx_parts: list[str] = []
+                if overview_resp.data:
+                    ctx_parts.append(f"DATA: {overview_resp.data}")
+                ctx_parts.append("TASK:")
+                ctx_parts.append(task_text)
+                context_str = "\n".join(ctx_parts).strip()
 
                 actions = await llm_decide(
                     client,
                     action_messages,
                     context_str,
-                    last_results,
+                    None,
                 )
 
                 if len(actions) == 1 and actions[0].get("a") == "error":
@@ -749,6 +748,7 @@ def main():
     parser = argparse.ArgumentParser(description="Fast Browser Agent")
     parser.add_argument("--url", default=config.DEFAULT_BASE_URL, help="Target URL")
     parser.add_argument("--model", default=None, help="Overview/Oracle model name")
+    parser.add_argument("--oracle-model", default=None, help="Oracle model name")
     parser.add_argument("--action-model", default=None, help="Action model name")
     parser.add_argument(
         "--reasoning",
@@ -780,7 +780,7 @@ def main():
     config.PROVIDER = args.provider
     defaults = PROVIDER_MODELS[config.PROVIDER]
     config.MODEL_NAME = args.model or defaults["model"]
-    config.ORACLE_MODEL = args.model or defaults["oracle"]
+    config.ORACLE_MODEL = args.oracle_model or args.model or defaults["oracle"]
     config.ACTION_MODEL_NAME = args.action_model or defaults["action"]
     config.FILTER_MODEL_NAME = defaults["filter"]
     config.REASONING_EFFORT = args.reasoning
