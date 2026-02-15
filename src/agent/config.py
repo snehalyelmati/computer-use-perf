@@ -40,3 +40,5 @@ class AgentConfig:
     log_dir: str = "logs"
     max_elements: int = 60
     memory_steps: int = 10
+    log_level: str = "INFO"
+    metrics_enabled: bool = True

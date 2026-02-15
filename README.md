@@ -25,7 +25,7 @@ flowchart LR
     CDP -->|Context Snapshot| ORCH
     CDP -->|Context Snapshot| WORK
     ORCH -->|Delegated Goal| WORK
-    WORK -->|Semantic Tool Calls (stable ids)| PW
+    WORK -->|"Semantic Tool Calls (stable ids)"| PW
 ```
 
 ## Setup
@@ -33,7 +33,13 @@ flowchart LR
 - Set `OPENROUTER_API_KEY` for OpenRouter access
 
 ## Run
-- `uv run main.py --url <target> --goal "<task>" [--headless]`
+- `uv run main.py --url <target> --goal "<task>" [--headless] [--log-level INFO] [--no-metrics]`
+
+### Outputs
+- Logs: `logs/agent.log`
+- Metrics (JSONL): `logs/metrics.jsonl` (timings, token usage, and OpenRouter cost when available)
+- Run summary: `logs/run_summary.json`
+- Details: `docs/observability.md`
 
 ## Architecture
 

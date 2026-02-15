@@ -12,6 +12,12 @@ A general-purpose browser agent. Python 3.14, managed with [uv](https://docs.ast
 - `uv run main.py --url <target> --goal "<task>"` — run the agent
 - `uv add <package>` — add a dependency
 
+## Observability
+
+- Logs: `logs/agent.log`
+- Metrics: `logs/metrics.jsonl` (disable with `--no-metrics`)
+- Run summary: `logs/run_summary.json`
+
 ## Dependencies
 
 - **pydantic-ai** — agent orchestration + structured outputs

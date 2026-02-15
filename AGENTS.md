@@ -16,6 +16,10 @@ Common Commands:
 - `uv run main.py --url <target> --goal "<task>"` - run the agent
 - `uv add <package>` - add a dependency
 
+Observability:
+- Logs: `logs/agent.log`
+- Metrics: `logs/metrics.jsonl` (disable via `--no-metrics`)
+
 Dependencies:
 - `pydantic-ai` - agent orchestration + structured output
 - `openai` - OpenAI-compatible client for OpenRouter

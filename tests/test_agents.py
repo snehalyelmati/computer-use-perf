@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 from src.agent.context.snapshot import ElementIndex
 from src.agent.core.agent import build_browser_worker_agent, build_orchestrator_agent, WorkerDeps
+from src.agent.metrics import MetricsRecorder
 from src.agent.models.actions import OrchestratorDecision, StepOutput
 from src.agent.tools.semantic import ToolContext
 
@@ -45,7 +46,8 @@ async def test_browser_worker_registers_semantic_tools() -> None:
         frame_sessions={},
         active_frame_id=None,
     )
-    deps = WorkerDeps(tool_context=tool_context)
+    metrics = MetricsRecorder(log_dir="/tmp", run_id="test", enabled=False)
+    deps = WorkerDeps(tool_context=tool_context, metrics=metrics, step=1)
     result = await agent.run("goal: test\nsnapshot: none", deps=deps)
     assert result.output.summary == "noop"
 

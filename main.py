@@ -23,6 +23,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run browser in headless mode",
     )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        help="Logging level (e.g. DEBUG, INFO, WARNING)",
+    )
+    parser.add_argument(
+        "--no-metrics",
+        action="store_true",
+        help="Disable JSONL metrics output",
+    )
     return parser
 
 
@@ -30,7 +40,13 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    agent_config = AgentConfig(target_url=args.target_url, goal=args.goal, max_steps=args.max_steps)
+    agent_config = AgentConfig(
+        target_url=args.target_url,
+        goal=args.goal,
+        max_steps=args.max_steps,
+        log_level=str(args.log_level),
+        metrics_enabled=not bool(args.no_metrics),
+    )
     llm_config = LLMConfig()
     browser_config = BrowserConfig(headless=bool(args.headless))
 
