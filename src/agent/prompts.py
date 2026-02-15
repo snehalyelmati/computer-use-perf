@@ -9,7 +9,7 @@ Allowed actions (use only these):
 - click:  {"a":"click","n":INDEX}
 - type:   {"a":"type","n":INDEX,"v":"TEXT"}
 - hover:  {"a":"hover","n":INDEX}
-- drag:   {"a":"drag","n":SRC_INDEX,"v":"TARGET_TEXT"} (optional "t" for target index)
+- drag:   {"a":"drag","n":SRC_INDEX,"v":"TARGET_TEXT"}
 - key:    {"a":"key","v":"Control+a"}
 - draw:   {"a":"draw","n":INDEX}
 - watch:  {"a":"watch","v":"SUBSTRING"} (wait up to 10s for a leaf element containing SUBSTRING, then click it)
@@ -24,14 +24,21 @@ TASK DSL (one step per line):
 - wait <seconds>
 - key <keyspec>
 - watch <substring_or_data_key>
-- drag <src_index> <dst_index|data_key>
+- drag <src_index> <target_text_or_data_key>
 - draw <index>
 
 Rules:
 - Translate TASK lines 1:1 in order.
 - Do not add, remove, reorder, or substitute steps.
+- Copy literals exactly. Do not rewrite numbers/labels/quoted strings.
+- Do not insert waits unless TASK explicitly includes a wait step.
 - For type, resolve <data_key> from DATA key=value pairs.
 - For watch, you may provide a substring directly, or a DATA key that resolves to a non-numeric substring.
+- For drag:
+  - Emit {"a":"drag","n":src,"v":target_text} where target_text is the visible label of the drop zone.
+  - If the TASK target is a DATA key, resolve it and use the resolved text as v.
+  - If the target contains spaces, treat everything after <src_index> as the target text (strip surrounding quotes).
+  - Keep the target_text EXACTLY as written in TASK (do not substitute Slot numbers).
 - If a TASK line is invalid, omit that action (do not improvise).
 - If TASK conflicts with NEXT, follow TASK (NEXT is intent-only)."""
 
@@ -62,6 +69,7 @@ Definitions:
 - data: space-separated key=value pairs.
   - Allowed sources: observed page values (text/hidden content/data attributes/action results) and user-provided literals from the fixed goal/context.
   - Do NOT invent values or use placeholders like "undefined".
+  - Only include keys when the value is explicitly available; omit unknown values entirely.
   - Computation guardrail: do NOT attempt complex computation/decoding/transforms.
     If the page explicitly asks for arithmetic and shows an expression, record it as expr=<expression> exactly.
     The runner may compute answer=<result> and add it to DATA.
@@ -78,16 +86,20 @@ TASK DSL (one step per line):
 - wait <seconds>
 - key <keyspec>
 - watch <substring_or_data_key>
-- drag <src_index> <dst_index|data_key>
+- drag <src_index> <dst_index|target_text_or_data_key>
 - draw <index>
 
 TASK rules:
 - TASK is what will be executed. Make it feasible.
 - For type, use DATA keys, not literal values. Example: data has code=AB12CD then task uses: type 15 code
 - For watch, use a substring directly (e.g. watch Continue) or a DATA key that resolves to a non-numeric substring.
+- For drag, prefer drop targets by visible label text (quote if it contains spaces), not destination indices.
+- When filling multiple drop zones, use different draggable pieces (different indices). Dragging the same piece repeatedly usually just moves it.
+- If you do not see any draggable pieces in the interactive element list, scroll to find them before planning drags.
 - Use type only for text entry inputs; use click to select radios/checkboxes/options.
 - Do not click disabled primary controls; include enabling prerequisites first.
 - Prefer batching repeated required actions into one TASK (e.g. click the same element 3x => three click lines).
+- Do not add wait steps unless the page text explicitly instructs a wait or countdown.
 
 DATA rule:
 - Do not store element indices in DATA (e.g. input_index=15). Indices belong in TASK.

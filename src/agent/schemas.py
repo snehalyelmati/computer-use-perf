@@ -62,6 +62,18 @@ class OverviewResponse(BaseModel):
     progress: str | None = None
     next: str = Field(min_length=1)
 
+    @field_validator("task", mode="before")
+    @classmethod
+    def _coerce_task(cls, v: Any):
+        if v is None:
+            return v
+        if isinstance(v, (list, tuple)):
+            s = "\n".join(str(item).strip() for item in v if str(item).strip())
+            return s
+        if not isinstance(v, str):
+            return str(v)
+        return v.strip()
+
     @model_validator(mode="before")
     @classmethod
     def _coerce_objective(cls, v: Any):
@@ -100,6 +112,18 @@ class ActionItem(BaseModel):
     n: int | None = None
     v: str | None = None
     t: int | None = None
+
+    @field_validator("v", mode="before")
+    @classmethod
+    def _coerce_v_to_str(cls, v: Any) -> str | None:
+        # LLMs sometimes emit numeric values for v (e.g. scroll 1000).
+        # Coerce to string so ActionResponse validation doesn't fail.
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            return s or None
+        return str(v)
 
 
 class ActionResponse(BaseModel):

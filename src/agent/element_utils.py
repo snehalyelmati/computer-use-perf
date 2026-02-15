@@ -37,58 +37,131 @@ async def extract_elements(page: Page) -> tuple[list, list]:
             "[ondragover]",
         ]
     )
-    selector_handles = await page.query_selector_all(selector)
+    if config.USE_LENIENT_ELEMENT_EXTRACTION:
+        handles = await page.query_selector_all("*")
+    else:
+        selector_handles = await page.query_selector_all(selector)
 
-    # Second pass: find all elements with cursor:pointer computed style
-    # Skip containers that wrap interactive children - the child is already captured
-    cursor_handles = await page.evaluate_handle("""() => {
-        const all = document.querySelectorAll('*');
-        const results = [];
-        for (const el of all) {
-            if (window.getComputedStyle(el).cursor === 'pointer') {
-                const interactiveChild = el.querySelector('button, input, textarea, select, a[href], [role="button"], [role="link"], [role="checkbox"], [role="radio"]');
-                if (interactiveChild) continue;
-                results.push(el);
+        # Second pass: find all elements with cursor indicating direct manipulation.
+        # Skip containers that wrap interactive children - the child is already captured
+        cursor_handles = await page.evaluate_handle("""() => {
+            const all = document.querySelectorAll('*');
+            const results = [];
+            const cursors = new Set(['pointer', 'grab', 'grabbing', 'move']);
+            for (const el of all) {
+                const cur = (window.getComputedStyle(el).cursor || '').toLowerCase();
+                if (cursors.has(cur)) {
+                    const interactiveChild = el.querySelector('button, input, textarea, select, a[href], [role="button"], [role="link"], [role="checkbox"], [role="radio"]');
+                    if (interactiveChild) continue;
+                    results.push(el);
+                }
             }
-        }
-        return results;
-    }""")
-    cursor_count = await cursor_handles.evaluate("els => els.length")
-    cursor_list = []
-    for i in range(cursor_count):
-        handle = await cursor_handles.evaluate_handle(f"els => els[{i}]")
-        cursor_list.append(handle.as_element())
+            return results;
+        }""")
+        cursor_count = await cursor_handles.evaluate("els => els.length")
+        cursor_list = []
+        for i in range(cursor_count):
+            handle = await cursor_handles.evaluate_handle(f"els => els[{i}]")
+            cursor_list.append(handle.as_element())
 
-    # Third pass: find scrollable containers (overflow: auto/scroll with hidden content)
-    scroll_handles = await page.evaluate_handle("""() => {
-        const results = [];
-        for (const el of document.querySelectorAll('*')) {
-            const style = window.getComputedStyle(el);
-            const ov = style.overflowY || style.overflow;
-            if ((ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight + 10) {
-                results.push(el);
+        # Third pass: find scrollable containers (overflow: auto/scroll with hidden content)
+        scroll_handles = await page.evaluate_handle("""() => {
+            const results = [];
+            for (const el of document.querySelectorAll('*')) {
+                const style = window.getComputedStyle(el);
+                const ov = style.overflowY || style.overflow;
+                if ((ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight + 10) {
+                    results.push(el);
+                }
             }
-        }
-        return results;
-    }""")
-    scroll_count = await scroll_handles.evaluate("els => els.length")
-    scroll_list = []
-    for i in range(scroll_count):
-        handle = await scroll_handles.evaluate_handle(f"els => els[{i}]")
-        scroll_list.append(handle.as_element())
+            return results;
+        }""")
+        scroll_count = await scroll_handles.evaluate("els => els.length")
+        scroll_list = []
+        for i in range(scroll_count):
+            handle = await scroll_handles.evaluate_handle(f"els => els[{i}]")
+            scroll_list.append(handle.as_element())
 
-    # Dedup: combine all lists, skip duplicates
-    seen = set()
-    handles = []
-    for handle in selector_handles + cursor_list + scroll_list:
-        if handle is None:
-            continue
-        uid = await handle.evaluate(
-            "el => el.uniqueId || (el.uniqueId = Math.random().toString(36))"
+        # Fourth pass: find drag/drop related elements via properties (not just attributes).
+        # This catches frameworks that bind handlers via DOM properties or listeners.
+        dragdrop_handles = await page.evaluate_handle(
+            """() => {
+            const results = [];
+            const all = document.querySelectorAll('*');
+        const dropRoles = new Set([
+            'listbox', 'grid', 'tree', 'treegrid', 'table', 'rowgroup', 'tabpanel',
+            'gridcell', 'row', 'cell', 'listitem'
+        ]);
+            for (const el of all) {
+                try {
+                    const draggable = el.draggable === true;
+                    const droppable = !!el.ondrop || !!el.ondragover || !!el.ondragenter || !!el.ondragleave || !!el.ondragend;
+                    const hasDropzoneAttr = !!el.getAttribute && !!el.getAttribute('dropzone');
+                    const ariaDropeffect = el.getAttribute && el.getAttribute('aria-dropeffect');
+                const role = (el.getAttribute && el.getAttribute('role')) || '';
+                const hasDropRole = role && dropRoles.has(role.toLowerCase());
+                    if (draggable || droppable || hasDropzoneAttr || hasDropRole || (ariaDropeffect && ariaDropeffect !== 'none')) {
+                        results.push(el);
+                    }
+                } catch (e) {
+                    // ignore
+                }
+            }
+            return results;
+        }"""
         )
-        if uid not in seen:
-            seen.add(uid)
-            handles.append(handle)
+        dragdrop_count = await dragdrop_handles.evaluate("els => els.length")
+        dragdrop_list = []
+        for i in range(dragdrop_count):
+            handle = await dragdrop_handles.evaluate_handle(f"els => els[{i}]")
+            dragdrop_list.append(handle.as_element())
+
+        # Fifth pass: include elements with event/role/ARIA hints that are often interactive.
+        hint_handles = await page.evaluate_handle(
+            """() => {
+            const results = [];
+            const all = document.querySelectorAll('*');
+            const allowedRoles = new Set([
+                'button', 'link', 'checkbox', 'radio', 'tab', 'switch', 'menuitem', 'option',
+                'listbox', 'grid', 'tree', 'treegrid', 'table', 'rowgroup', 'tabpanel',
+                'textbox', 'combobox', 'list', 'listitem', 'row', 'cell', 'gridcell'
+            ]);
+            for (const el of all) {
+                try {
+                    if (!el.getAttribute) continue;
+                    const role = (el.getAttribute('role') || '').toLowerCase();
+                    const hasRole = role && allowedRoles.has(role);
+                    const ariaHint = Array.from(el.attributes || []).some(attr => attr.name.startsWith('aria-'));
+                    const hasTabindex = el.hasAttribute('tabindex');
+                    const hasOnEvent = !!el.onclick || !!el.onmousedown || !!el.onmouseup || !!el.onkeydown || !!el.onkeyup || !!el.onkeypress;
+                    if (hasRole || ariaHint || hasTabindex || hasOnEvent) {
+                        results.push(el);
+                    }
+                } catch (e) {
+                    // ignore
+                }
+            }
+            return results;
+        }"""
+        )
+        hint_count = await hint_handles.evaluate("els => els.length")
+        hint_list = []
+        for i in range(hint_count):
+            handle = await hint_handles.evaluate_handle(f"els => els[{i}]")
+            hint_list.append(handle.as_element())
+
+        # Dedup: combine all lists, skip duplicates
+        seen = set()
+        handles = []
+        for handle in selector_handles + cursor_list + scroll_list + dragdrop_list + hint_list:
+            if handle is None:
+                continue
+            uid = await handle.evaluate(
+                "el => el.uniqueId || (el.uniqueId = Math.random().toString(36))"
+            )
+            if uid not in seen:
+                seen.add(uid)
+                handles.append(handle)
 
     elements = []
     visible_handles = []
@@ -111,6 +184,18 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 const state = el.getAttribute('data-state') || '';
                 const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
                 const href = el.getAttribute('href') || '';
+
+                // Drag/drop metadata
+                const draggable = (el.draggable === true) || (el.getAttribute('draggable') === 'true');
+                const ariaDropeffect = el.getAttribute('aria-dropeffect');
+                const dropRoles = ['listbox', 'grid', 'tree', 'treegrid', 'table', 'rowgroup', 'tabpanel', 'gridcell', 'row', 'cell', 'listitem'];
+                const roleLower = role.toLowerCase();
+                const hasDropRole = !!roleLower && dropRoles.includes(roleLower);
+                const droppable = !!el.ondrop || !!el.ondragover || !!el.ondragenter || !!el.ondragleave || !!el.ondragend
+                    || el.hasAttribute('ondrop') || el.hasAttribute('ondragover') || el.hasAttribute('ondragenter') || el.hasAttribute('ondragleave')
+                    || !!el.getAttribute('dropzone')
+                    || (ariaDropeffect && ariaDropeffect !== 'none')
+                    || hasDropRole;
 
                 // Additional metadata for better decision making
                 const value = el.value || '';
@@ -165,6 +250,8 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                     name: name, dataValue: dataValue,
                     mediaPlaying: mediaPlaying, mediaDuration: mediaDuration,
                     mediaCurrentTime: mediaCurrentTime, mediaLoop: mediaLoop,
+                    draggable: draggable,
+                    droppable: droppable,
                     bbox: {
                         x: Math.round(rect.x + rect.width / 2),
                         y: Math.round(rect.y + rect.height / 2)
@@ -200,8 +287,25 @@ async def extract_elements(page: Page) -> tuple[list, list]:
                 "link",
                 "slider",
             )
-            if not has_content and not is_core_interactive and not has_semantic_role:
-                continue
+            is_drag_related = bool(
+                metadata.get("draggable") or metadata.get("droppable")
+            )
+            if (
+                not has_content
+                and not is_core_interactive
+                and not has_semantic_role
+                and not is_drag_related
+            ):
+                if not config.USE_LENIENT_ELEMENT_EXTRACTION:
+                    continue
+                if metadata.get("bbox"):
+                    bbox = metadata["bbox"]
+                    if not isinstance(bbox, dict):
+                        continue
+                    if bbox.get("x") is None or bbox.get("y") is None:
+                        continue
+                else:
+                    continue
 
             # Assign sequential index that matches position in visible_handles
             metadata["index"] = len(elements)
@@ -246,6 +350,10 @@ def format_element_summary(elements: list, max_elements: int | None = None) -> s
             state += " [checked]"
         if el.get("selected"):
             state += " [selected]"
+        if el.get("draggable"):
+            state += " [draggable]"
+        if el.get("droppable"):
+            state += " [droppable]"
 
         # Media state for audio/video elements
         if el.get("tag") in ("audio", "video"):
@@ -339,7 +447,8 @@ def format_context(
     goal: str,
     objective: str | None,
     data: str | None,
-    next_directive: str,
+    task: str | None,
+    next_intent: str | None,
     elements: list,
 ) -> str:
     """Format the analysis and elements for the action LLM.
@@ -347,7 +456,8 @@ def format_context(
     Args:
         goal: The current goal from overview
         data: Discovered data values (may be None)
-        next_directive: Natural language description of next actions
+        task: TASK DSL text to translate (may be None)
+        next_intent: Natural language intent (optional; not executed)
         elements: List of element metadata dicts
     """
     parts = []
@@ -357,7 +467,11 @@ def format_context(
         parts.append(f"OBJECTIVE: {objective}")
     if data:
         parts.append(f"DATA: {data}")
-    parts.append(f"NEXT: {next_directive}")
+    if task:
+        parts.append("TASK:")
+        parts.append(task)
+    if next_intent:
+        parts.append(f"NEXT (intent only): {next_intent}")
     parts.append("\n=== INTERACTIVE ELEMENTS ===")
 
     # Budget the element list for the Action model.
@@ -368,10 +482,18 @@ def format_context(
         score = 0
         if " inp " in s or " txt " in s or " sel " in s or "textbox" in s:
             score += 50
-        if " btn " in s or "role=button" in s:
+        if " btn " in s or " button " in s or "role=button" in s:
             score += 25
         if ' data="' in s or ' value="' in s:
             score += 30
+        if "[draggable]" in s or "[droppable]" in s:
+            score += 50
+        if " link " in s:
+            score += 20
+        if " scroll " in s:
+            score += 10
+        if s.strip():
+            score += 5
         if "disabled" in s:
             score += 5
         return score

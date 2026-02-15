@@ -13,7 +13,7 @@ from cerebras.cloud.sdk import AsyncCerebras
 from groq import AsyncGroq
 from pydantic import BaseModel, ValidationError
 
-from .logging_utils import log
+from .logging_utils import log, log_verbose
 from .providers import (
     ProviderName,
     find_unique_model_spec,
@@ -302,6 +302,11 @@ async def complete(
                     )
                 except _RETRYABLE_PARSE_ERRORS as e:
                     last_error = e
+                    if text:
+                        preview = text if len(text) <= 2000 else text[:2000] + "..."
+                        log_verbose(
+                            f"=== {ct.upper()} PARSE FAILURE (attempt {attempt + 1}) ===\n{preview}\n=== End Parse Failure ==="
+                        )
                     if stats is not None:
                         stats.record_llm_call(
                             call_type=ct,

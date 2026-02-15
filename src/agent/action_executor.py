@@ -68,42 +68,97 @@ async def execute(
             return f"[{index}] not found (only {len(handles)} elements)"
 
         elif action_type == "drag":
-            target = action.get("t", 0)
-            target_text = str(action.get("v", ""))
+            target = action.get("t")
+            target_text = str(action.get("v", "") or "").strip()
+            if target_text:
+                target_text = target_text.strip().strip('"').strip("'")
+
+            # Recovery: some models emit the destination index as v="12".
+            if target is None and target_text.strip().isdigit():
+                target = int(target_text.strip())
+                target_text = ""
+
             if index < len(handles):
                 # Find drop target: by element index or by text content
                 dst = None
                 if target_text:
                     dst = await page.evaluate_handle(
                         """(text) => {
+                        const want = (text || '').trim();
+                        if (!want) return null;
+                        const skip = new Set(['SCRIPT','STYLE','NOSCRIPT','META','LINK','HEAD']);
+                        const exact = [];
+                        const partial = [];
+
                         const all = document.querySelectorAll('*');
                         for (const el of all) {
-                            if (el.children.length === 0 && el.textContent.trim() === text) return el;
+                            try {
+                                if (skip.has(el.tagName)) continue;
+                                const style = window.getComputedStyle(el);
+                                if (!style) continue;
+                                if (style.display === 'none' || style.visibility === 'hidden') continue;
+                                if (style.pointerEvents === 'none') continue;
+                                const opacity = parseFloat(style.opacity || '1');
+                                if (!isNaN(opacity) && opacity <= 0.01) continue;
+
+                                const rect = el.getBoundingClientRect();
+                                if (!rect || rect.width < 2 || rect.height < 2) continue;
+
+                                const txt = (el.innerText || el.textContent || '').trim();
+                                if (!txt) continue;
+                                if (txt === want) exact.push(el);
+                                else if (txt.includes(want)) partial.push(el);
+                            } catch (e) {
+                                // ignore
+                            }
                         }
-                        return null;
+
+                        const pickBest = (arr) => {
+                            let best = null;
+                            let bestArea = Infinity;
+                            for (const el of arr) {
+                                const r = el.getBoundingClientRect();
+                                const area = (r.width || 0) * (r.height || 0);
+                                if (area > 0 && area < bestArea) {
+                                    bestArea = area;
+                                    best = el;
+                                }
+                            }
+                            return best;
+                        };
+
+                        return pickBest(exact) || pickBest(partial) || null;
                     }""",
                         target_text,
                     )
                     if await dst.evaluate("el => el === null"):
                         dst = None
-                if dst is None and target < len(handles):
+                    else:
+                        dst = dst.as_element()
+
+                if dst is None and isinstance(target, int) and target < len(handles):
                     dst = handles[target]
                 if dst is None:
                     return f"drop target not found"
-                # Use JS DataTransfer events to bypass overlays
-                await page.evaluate(
-                    """([src, dst]) => {
-                    const dt = new DataTransfer();
-                    src.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
-                    dst.dispatchEvent(new DragEvent('dragenter', {bubbles: true, dataTransfer: dt}));
-                    dst.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
-                    dst.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
-                    src.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
-                }""",
-                    [handles[index], dst],
-                )
+
+                # Use JS DataTransfer events to bypass overlays.
+                try:
+                    await page.evaluate(
+                        """([src, dst]) => {
+                        const dt = new DataTransfer();
+                        src.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
+                        dst.dispatchEvent(new DragEvent('dragenter', {bubbles: true, dataTransfer: dt}));
+                        dst.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
+                        dst.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
+                        src.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+                    }""",
+                        [handles[index], dst],
+                    )
+                except Exception:
+                    # Fallback: native pointer-based drag.
+                    await handles[index].drag_to(dst, timeout=2000)
                 await asyncio.sleep(ACTION_DELAY)
-                label = target_text or f"[{target}]"
+                label = target_text or (f"[{target}]" if target is not None else "?")
                 return f"dragged [{index}] to {label}"
             return f"[{index}] not found (only {len(handles)} elements)"
 
@@ -273,6 +328,8 @@ async def execute(
         elif action_type == "wait":
             match = re.search(r"[\d.]+", str(value)) if value else None
             seconds = min(float(match.group()) if match else 1, 10)
+            # Add a small buffer to account for UI timers/animations.
+            seconds = min(seconds + 0.5, 10)
             await asyncio.sleep(seconds)
             return "waited"
 
@@ -314,47 +371,11 @@ async def _verify_action(
                 return f"verify failed: element [{index}] detached after click"
 
         elif action_type == "drag" and index < len(handles):
-            # Check if source element moved (parent changed or detached)
+            # Drag success is app-specific; avoid aggressive auto-retries.
             try:
-                src_moved = await handles[index].evaluate("""el => {
-                    return !el.isConnected || el.offsetParent === null
-                        || el.style.display === 'none' || el.style.visibility === 'hidden';
-                }""")
-                if not src_moved:
-                    # Source still in place - auto-retry drag once
-                    target = action.get("t", 0)
-                    target_text = str(value or "")
-                    dst = None
-                    if target_text:
-                        dst = await page.evaluate_handle(
-                            """(text) => {
-                            const all = document.querySelectorAll('*');
-                            for (const el of all) {
-                                if (el.children.length === 0 && el.textContent.trim() === text) return el;
-                            }
-                            return null;
-                        }""",
-                            target_text,
-                        )
-                        if await dst.evaluate("el => el === null"):
-                            dst = None
-                    if dst is None and target < len(handles):
-                        dst = handles[target]
-                    if dst is not None:
-                        await page.evaluate(
-                            """([src, dst]) => {
-                            const dt = new DataTransfer();
-                            src.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
-                            dst.dispatchEvent(new DragEvent('dragenter', {bubbles: true, dataTransfer: dt}));
-                            dst.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
-                            dst.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
-                            src.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
-                        }""",
-                            [handles[index], dst],
-                        )
-                        await asyncio.sleep(ACTION_DELAY)
+                await handles[index].is_visible()
             except Exception:
-                pass  # Element detached = drag succeeded
+                pass
     except Exception:
         pass  # Verification errors are non-fatal
 

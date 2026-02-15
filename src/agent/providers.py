@@ -92,7 +92,9 @@ _MODEL_SPECS: dict[tuple[ProviderName, str], ModelSpec] = {
     ("groq", "moonshotai/kimi-k2-instruct-0905"): ModelSpec(
         provider="groq",
         name="moonshotai/kimi-k2-instruct-0905",
-        supports_response_format_json_object=True,
+        # Groq's server-side json_object enforcement is brittle with this model
+        # (can 400 with json_validate_failed). Prefer prompt-based JSON + local parsing.
+        supports_response_format_json_object=False,
         supports_reasoning_effort=False,
         pricing=TokenPricingPer1M(0.0, 0.0, 0.0),
     ),
@@ -144,7 +146,7 @@ _PROVIDER_DEFAULTS: dict[ProviderName, ProviderDefaults] = {
     "groq": ProviderDefaults(
         provider="groq",
         model="qwen/qwen3-32b",
-        oracle="qwen/qwen3-32b",
+        oracle="moonshotai/kimi-k2-instruct-0905",
         action="meta-llama/llama-4-scout-17b-16e-instruct",
         filter="llama-3.1-8b-instant",
     ),
