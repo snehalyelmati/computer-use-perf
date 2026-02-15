@@ -91,7 +91,7 @@ The agent uses semantic tools that reference stable element IDs:
 ### Reference-Based, Not Selectors
 
 - The LLM never sees raw CSS/XPath selectors.
-- Each snapshot produces a mapping: `element_id -> current selector`.
+- Each snapshot produces a mapping: `stable_id -> backend node id + frame metadata` (internal only).
 - Tool calls only accept stable element IDs.
 
 ### Optional Escape Hatches
@@ -121,7 +121,7 @@ The agent uses semantic tools that reference stable element IDs:
 - Replace legacy docs with updated architecture guidance.
 - Define basic config and entrypoint.
 
-### Phase 2: Context & Tooling
+### Phase 2: Context & Tooling (Done)
 
 - Implement CDP snapshot capture for DOM + accessibility.
 - Create hashed stable element-id mapping per snapshot (CDP node IDs stay internal).
