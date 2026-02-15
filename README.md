@@ -124,9 +124,9 @@ The agent uses semantic tools that reference stable element IDs:
 ### Phase 2: Context & Tooling
 
 - Implement CDP snapshot capture for DOM + accessibility.
-- Create stable element-id mapping per snapshot.
-- Wire semantic tools to Playwright actions.
-- Support iframe switching and navigation APIs.
+- Create hashed stable element-id mapping per snapshot (CDP node IDs stay internal).
+- Wire semantic tools to Playwright/CDP actions with overlay-aware input.
+- Support iframe switching and navigation APIs with frame-aware CDP sessions.
 
 ### Phase 3: Agent Loop
 

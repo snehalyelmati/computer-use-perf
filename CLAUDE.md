@@ -25,6 +25,7 @@ A general-purpose browser agent. Python 3.14, managed with [uv](https://docs.ast
 - Let the LLM decide what to click/type based on context, not hardcoded rules
 - Keep element selection generic: pass stable element IDs to the LLM and let it decide
 - Never pass raw CSS/XPath selectors to the LLM
+- When significant changes are made, update docs and Mermaid diagrams to match the current behavior
 
 ## Architecture
 
