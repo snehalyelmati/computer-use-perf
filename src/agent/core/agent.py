@@ -802,7 +802,8 @@ class BrowserAgent:
                 metrics.emit(
                     "step_end",
                     step=self.state.step,
-                    done=bool(step_output.done),
+                    done=False,
+                    worker_done=bool(step_output.done),
                     duration_ms=int((time.perf_counter() - step_started) * 1000),
                 )
                 if step_output.done:

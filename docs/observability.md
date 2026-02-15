@@ -22,7 +22,7 @@ Event types:
 - `snapshot`: `step`, `duration_ms`, `url`, `title`, `elements`
 - `agent_call`: `step`, `agent` (`orchestrator` or `browser_worker`), `duration_ms`, token fields (`input_tokens`, `output_tokens`, `requests`, `tool_calls`), and cost fields when available (`cost_usd`, `upstream_inference_cost_usd`)
 - `tool_call`: `step`, `tool`, `ok`, `duration_ms` plus safe tool metadata (e.g. `element_id`, `text_len`, `code_len`, `query_len`, `limit`)
-- `step_end`: `step`, `done`, `duration_ms`
+- `step_end`: `step`, `done`, `duration_ms` (and `worker_done` when available)
 - `run_end`: `duration_ms`
 
 ### Tokens and cost

@@ -52,7 +52,7 @@ You will be given a page snapshot containing interactive elements with stable ID
 - If the page has many candidates or decoy elements, use find_elements(query) to shortlist relevant element IDs first.
 
 After using tools (if needed), return a JSON object matching this schema:
-- done: boolean
+- done: boolean (set true when the delegated goal for this step is complete; the orchestrator decides when the overall run is done)
 - summary: string
 - next_goal: string | null
 """.strip()

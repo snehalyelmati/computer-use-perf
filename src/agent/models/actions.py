@@ -28,7 +28,13 @@ class ToolExecutionResult(BaseModel):
 class StepOutput(BaseModel):
     """Structured output returned by the agent after a step."""
 
-    done: bool = Field(False, description="Set true when the overall goal is complete")
+    done: bool = Field(
+        False,
+        description=(
+            "Set true when the delegated worker goal for this step is complete. "
+            "This does not necessarily mean the overall run goal is complete."
+        ),
+    )
     summary: str = Field(..., description="Concise summary of what happened in this step")
     next_goal: str | None = Field(
         None,
