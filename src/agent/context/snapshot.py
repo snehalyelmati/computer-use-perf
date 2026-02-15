@@ -257,7 +257,11 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
         for index in range(node_count):
             node_name = _decode_string(node_names[index], strings)
             node_value = _decode_string(node_values[index], strings) if index < len(node_values) else ""
-            text_value = _decode_string(text_values[index], strings) if index < len(text_values) else ""
+            if isinstance(text_values, dict):
+                text_value_raw = text_values.get(index, "")
+            else:
+                text_value_raw = text_values[index] if index < len(text_values) else ""
+            text_value = _decode_string(text_value_raw, strings)
             text = _normalize_text(text_value or node_value)
             if node_name == "#text" and text:
                 raw_text.append(text)
@@ -273,10 +277,14 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
                     cursor = _decode_string(style_values[0], strings)
 
             element_frame_id = frame_id
-            if index < len(content_document_indices):
-                child_document_index = content_document_indices[index]
-                if isinstance(child_document_index, int) and 0 <= child_document_index < len(documents):
-                    element_frame_id = documents[child_document_index].get("frameId") or frame_id
+            if isinstance(content_document_indices, dict):
+                child_document_index = content_document_indices.get(index)
+            else:
+                child_document_index = (
+                    content_document_indices[index] if index < len(content_document_indices) else None
+                )
+            if isinstance(child_document_index, int) and 0 <= child_document_index < len(documents):
+                element_frame_id = documents[child_document_index].get("frameId") or frame_id
 
             frame_meta = frame_lookup.get(element_frame_id or "", {})
             frame_url = frame_meta.get("url") or document_frame_url
