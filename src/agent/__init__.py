@@ -1,1 +1,1 @@
-"""Agent package modules."""
+"""General-purpose browser agent package."""
