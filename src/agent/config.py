@@ -35,5 +35,8 @@ class AgentConfig:
     """Top-level agent runtime settings."""
 
     target_url: str | None = None
+    goal: str | None = None
     max_steps: int = 100
     log_dir: str = "logs"
+    max_elements: int = 60
+    memory_steps: int = 10

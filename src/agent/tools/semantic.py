@@ -18,6 +18,7 @@ class ToolResult:
     ok: bool
     message: str
 
+
 @dataclass
 class ToolContext:
     """Execution context for semantic tools."""
@@ -28,7 +29,13 @@ class ToolContext:
     frame_sessions: dict[str, CDPSession] = field(default_factory=dict)
     active_frame_id: str | None = None
 
-def build_tool_context(session: BrowserSession, element_index: ElementIndex) -> ToolContext:
+
+def build_tool_context(
+    session: BrowserSession,
+    element_index: ElementIndex,
+    *,
+    active_frame_id: str | None = None,
+) -> ToolContext:
     """Build a tool context tied to the browser session lifecycle."""
 
     return ToolContext(
@@ -36,6 +43,7 @@ def build_tool_context(session: BrowserSession, element_index: ElementIndex) -> 
         cdp_session=session.cdp_session,
         element_index=element_index,
         frame_sessions=session.frame_sessions,
+        active_frame_id=active_frame_id,
     )
 
 def _resolve_element(element_id: str, context: ToolContext) -> ElementSnapshot | None:

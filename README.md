@@ -10,8 +10,10 @@ General-purpose browser agent (scaffold).
 flowchart LR
     subgraph LLM[LLM Infrastructure]
         OR[OpenRouter]
-        PAI[PydanticAI]
-        OR --> PAI
+        ORCH[PydanticAI Orchestrator]
+        WORK[PydanticAI Browser Worker]
+        OR --> ORCH
+        OR --> WORK
     end
 
     subgraph Browser[Execution Environment]
@@ -20,8 +22,10 @@ flowchart LR
         CDP --> PW
     end
 
-    PAI -->|Structured Actions| PW
-    CDP -->|Context Snapshot| PAI
+    CDP -->|Context Snapshot| ORCH
+    CDP -->|Context Snapshot| WORK
+    ORCH -->|Delegated Goal| WORK
+    WORK -->|Semantic Tool Calls (stable ids)| PW
 ```
 
 ## Setup
@@ -29,7 +33,7 @@ flowchart LR
 - Set `OPENROUTER_API_KEY` for OpenRouter access
 
 ## Run
-- `uv run main.py --url <target>`
+- `uv run main.py --url <target> --goal "<task>" [--headless]`
 
 ## Architecture
 
@@ -64,14 +68,17 @@ This project is a general-purpose browser agent built around a clear separation 
 
 ```mermaid
 sequenceDiagram
-    participant Agent as PydanticAI Agent
+    participant Orchestrator as PydanticAI Orchestrator
+    participant Worker as PydanticAI Browser Worker
     participant CDP as CDP Snapshotter
     participant PW as Playwright Executor
 
-    Agent->>CDP: Request context snapshot
-    CDP-->>Agent: Structured snapshot + element ids
-    Agent->>PW: Semantic action calls (element ids)
-    PW-->>Agent: Action results
+    Orchestrator->>CDP: Request context snapshot
+    CDP-->>Orchestrator: Structured snapshot + element ids
+    Orchestrator->>Worker: Delegated sub-goal + snapshot
+    Worker->>PW: Semantic tool calls (stable ids)
+    PW-->>Worker: Tool results
+    Worker-->>Orchestrator: Step summary + done?
 ```
 
 ## Tooling Principles
@@ -102,10 +109,10 @@ The agent uses semantic tools that reference stable element IDs:
 ## Recommended Agent Loop
 
 1. **Extract context via CDP** into a structured snapshot.
-2. **Send snapshot + memory** to the PydanticAI agent.
-3. **Receive structured actions** referencing stable element IDs.
-4. **Execute actions via Playwright** using the element mapping.
-5. **Repeat** until goal completion or stop conditions.
+2. **Ask the orchestrator** for the next delegated sub-goal.
+3. **Ask the browser worker** to execute that sub-goal using semantic tools.
+4. **Update memory + stop criteria** (`done` or `max_steps`).
+5. **Repeat** until the overall goal is complete.
 
 ## Guardrails
 
@@ -128,11 +135,11 @@ The agent uses semantic tools that reference stable element IDs:
 - Wire semantic tools to Playwright/CDP actions with overlay-aware input.
 - Support iframe switching and navigation APIs with frame-aware CDP sessions.
 
-### Phase 3: Agent Loop
+### Phase 3: Agent Loop (Done)
 
-- Add PydanticAI agent with tool-calling support.
-- Define structured outputs for actions and summary state.
-- Build orchestration loop with memory and stop criteria.
+- Add an orchestrator agent that delegates to worker agents.
+- Implement a browser worker agent with tool-calling support.
+- Build an orchestration loop with memory and stop criteria.
 
 ### Phase 4: Quality & Reliability
 

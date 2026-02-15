@@ -321,3 +321,52 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
 
     title = await page.title()
     return PageSnapshot(url=page.url, title=title, elements=elements, raw_text=raw_text)
+
+
+def format_snapshot_for_llm(snapshot: PageSnapshot, *, max_elements: int = 60) -> str:
+    """Format a snapshot into a compact, LLM-friendly text representation."""
+
+    lines: list[str] = []
+    title = snapshot.title or ""
+    lines.append(f"URL: {snapshot.url}")
+    if title:
+        lines.append(f"Title: {title}")
+    lines.append("")
+    lines.append(f"Interactive elements (showing up to {max_elements}):")
+    for element in list(snapshot.elements)[:max_elements]:
+        role = (element.role or "").strip()
+        name = (element.name or "").strip()
+        text = (element.text or "").strip()
+        tag = (element.node_name or "").strip()
+        attrs = element.attributes or {}
+        important_attrs = {
+            key: attrs.get(key)
+            for key in [
+                "id",
+                "name",
+                "type",
+                "placeholder",
+                "aria-label",
+                "title",
+                "alt",
+                "href",
+                "value",
+            ]
+            if attrs.get(key)
+        }
+        attr_str = (
+            " ".join(f'{key}="{value}"' for key, value in important_attrs.items())
+            if important_attrs
+            else ""
+        )
+        label_parts = [part for part in [role, name, text, tag] if part]
+        label = " | ".join(label_parts) if label_parts else "element"
+        if attr_str:
+            label = f"{label} ({attr_str})"
+        frame_hint = ""
+        if element.frame_name or element.frame_url:
+            frame_name = element.frame_name or ""
+            frame_url = element.frame_url or ""
+            frame_hint = f" [frame: {frame_name} {frame_url}]".strip()
+        lines.append(f"- {element.stable_id}: {label}{(' ' + frame_hint) if frame_hint else ''}")
+    return "\n".join(lines).strip()

@@ -9,7 +9,7 @@ A general-purpose browser agent. Python 3.14, managed with [uv](https://docs.ast
 ## Commands
 
 - `uv sync` — install/update dependencies
-- `uv run main.py` — run the agent with default settings (flags TBD)
+- `uv run main.py --url <target> --goal "<task>"` — run the agent
 - `uv add <package>` — add a dependency
 
 ## Dependencies

@@ -2,7 +2,7 @@
 
 Build/Test/Lint:
 - Install deps: `uv sync`
-- Run agent: `uv run main.py` (flags TBD)
+- Run agent: `uv run main.py --url <target> --goal "<task>"`
 - Run tests: `uv run pytest -q`
 
 Architecture:
@@ -13,7 +13,7 @@ Architecture:
 - No database or server components.
 
 Common Commands:
-- `uv run main.py` - run with default settings
+- `uv run main.py --url <target> --goal "<task>"` - run the agent
 - `uv add <package>` - add a dependency
 
 Dependencies:

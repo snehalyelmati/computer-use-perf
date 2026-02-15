@@ -5,17 +5,23 @@ from __future__ import annotations
 import argparse
 
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
-from src.agent.core.agent import BrowserAgent
+from src.agent.core.agent import run_agent_sync
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="General-purpose browser agent")
-    parser.add_argument("--url", dest="target_url", help="Target URL")
+    parser.add_argument("--url", dest="target_url", required=True, help="Target URL")
+    parser.add_argument("--goal", required=True, help="High-level task for the agent to complete")
     parser.add_argument(
         "--max-steps",
         type=int,
         default=100,
         help="Max agent steps before stopping",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run browser in headless mode",
     )
     return parser
 
@@ -24,15 +30,11 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    agent_config = AgentConfig(target_url=args.target_url, max_steps=args.max_steps)
+    agent_config = AgentConfig(target_url=args.target_url, goal=args.goal, max_steps=args.max_steps)
     llm_config = LLMConfig()
-    browser_config = BrowserConfig()
+    browser_config = BrowserConfig(headless=bool(args.headless))
 
-    agent = BrowserAgent(agent_config, llm_config, browser_config)
-    # The run loop is async; wiring will happen once the browser context is ready.
-    # For now, we keep the entrypoint lightweight.
-    # asyncio.run(agent.run())
-    print("Agent scaffold initialized.")
+    run_agent_sync(agent_config, llm_config, browser_config)
 
 
 if __name__ == "__main__":
