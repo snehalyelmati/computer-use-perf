@@ -245,13 +245,26 @@ async def _dispatch_click(session: CDPSession, x: float, y: float) -> bool:
         return False
     return True
 
-def _scroll_anchor(page: Page) -> tuple[float, float]:
-    viewport = page.viewport_size or {}
-    width = viewport.get("width") if isinstance(viewport, dict) else None
-    height = viewport.get("height") if isinstance(viewport, dict) else None
-    if not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
-        return (0.0, 0.0)
-    return (float(width) / 2, float(height) / 2)
+_SCROLL_JS = """
+(dx, dy) => {
+    function findScrollable() {
+        const se = document.scrollingElement;
+        if (se && se.scrollHeight > se.clientHeight + 1) return se;
+        for (const el of document.querySelectorAll('*')) {
+            const style = getComputedStyle(el);
+            const oy = style.overflowY;
+            if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 1)
+                return el;
+        }
+        return document.documentElement;
+    }
+    const target = findScrollable();
+    const before = { x: target.scrollLeft, y: target.scrollTop };
+    target.scrollBy(dx, dy);
+    const after = { x: target.scrollLeft, y: target.scrollTop };
+    return { before, after };
+}
+""".strip()
 
 async def _insert_text(session: CDPSession, text: str) -> bool:
     try:
@@ -455,19 +468,6 @@ async def _read_input_value(
     return result.get("result", {}).get("value")
 
 
-async def _read_scroll_position(session: CDPSession) -> dict | None:
-    """Read the current scroll position."""
-    try:
-        result = await session.send(
-            "Runtime.evaluate",
-            {
-                "expression": "({x: window.scrollX || window.pageXOffset || 0, y: window.scrollY || window.pageYOffset || 0})",
-                "returnByValue": True,
-            },
-        )
-        return result.get("result", {}).get("value")
-    except Exception:
-        return None
 
 
 async def click_element(element_id: str, context: ToolContext) -> ToolResult:
@@ -625,58 +625,118 @@ async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
     return ToolResult(ok=True, message=f"Waited {clamped}ms")
 
 
-async def read_element_text(element_id: str, context: ToolContext) -> ToolResult:
-    context.last_tool = "read_element_text"
+def _truncate_attr(value: str, max_len: int = 200) -> str:
+    if len(value) > max_len:
+        return value[:max_len] + "..."
+    return value
+
+
+async def inspect_element(element_id: str, context: ToolContext) -> ToolResult:
+    """Read an element's full text content and all HTML attributes."""
+    context.last_tool = "inspect_element"
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
-    if not element or not element.backend_node_id:
+    if not element:
         return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
-    session = await _session_for_element(element, context)
-    result = await _call_on_node(
-        element.backend_node_id,
-        session,
-        """
-        function () {
-            return this.innerText || this.textContent || '';
-        }
-        """,
-    )
-    if not result:
-        return ToolResult(ok=False, message="Read text failed")
-    value = result.get("result", {}).get("value")
-    return ToolResult(ok=True, message=value or "")
+
+    # Read text via CDP if possible
+    text_value = ""
+    if element.backend_node_id:
+        session = await _session_for_element(element, context)
+        result = await _call_on_node(
+            element.backend_node_id,
+            session,
+            """
+            function () {
+                return this.innerText || this.textContent || '';
+            }
+            """,
+        )
+        if result:
+            text_value = result.get("result", {}).get("value") or ""
+
+    # Read attributes from snapshot
+    attrs = element.attributes or {}
+    attr_parts = [f'{k}="{_truncate_attr(v)}"' for k, v in attrs.items()]
+    attr_str = " ".join(attr_parts) if attr_parts else "none"
+
+    parts = []
+    parts.append(f"text: {text_value}" if text_value else "text: (empty)")
+    parts.append(f"attributes: {attr_str}")
+    return ToolResult(ok=True, message="\n".join(parts))
+
+
+async def search_page_attributes(query: str, context: ToolContext) -> ToolResult:
+    """Search every element on the page for attributes whose name or value contains the query string."""
+    context.last_tool = "search_page_attributes"
+    context.last_element_id = None
+    if not query or len(query) < 2:
+        return ToolResult(ok=False, message="Query must be at least 2 characters")
+    try:
+        results = await context.page.evaluate(
+            """(query) => {
+                const matches = [];
+                const q = query.toLowerCase();
+                for (const el of document.querySelectorAll('*')) {
+                    for (const attr of el.attributes) {
+                        if (attr.value.toLowerCase().includes(q) ||
+                            attr.name.toLowerCase().includes(q)) {
+                            const text = (el.innerText || '').slice(0, 100).trim();
+                            const attrs = {};
+                            for (const a of el.attributes) {
+                                attrs[a.name] = a.value.length > 200
+                                    ? a.value.slice(0, 200) + '...' : a.value;
+                            }
+                            matches.push({
+                                tag: el.tagName.toLowerCase(),
+                                attrs: attrs,
+                                text: text
+                            });
+                            break;
+                        }
+                    }
+                    if (matches.length >= 10) break;
+                }
+                return matches;
+            }""",
+            query,
+        )
+    except Exception as exc:
+        return ToolResult(ok=False, message=f"Search failed: {exc}")
+    if not results:
+        return ToolResult(ok=True, message="No matching elements found.")
+    lines = []
+    for match in results:
+        attrs_str = " ".join(f'{k}="{v}"' for k, v in match["attrs"].items())
+        text_hint = f' text="{match["text"]}"' if match.get("text") else ""
+        lines.append(f"<{match['tag']} {attrs_str}>{text_hint}")
+    return ToolResult(ok=True, message="\n".join(lines))
 
 async def scroll(delta_x: int, delta_y: int, context: ToolContext) -> ToolResult:
+    """Scroll the page by finding the actual scrollable container and calling scrollBy."""
     context.last_tool = "scroll"
     context.last_element_id = None
-    session = context.cdp_session
-    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
-        session = context.frame_sessions[context.active_frame_id]
-    before_pos = await _read_scroll_position(session)
     try:
-        x, y = _scroll_anchor(context.page)
-        await session.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseWheel", "x": x, "y": y, "deltaX": delta_x, "deltaY": delta_y},
-        )
-    except Exception as exc:  # pragma: no cover - runtime safety
+        result = await context.page.evaluate(_SCROLL_JS, [delta_x, delta_y])
+    except Exception as exc:
         return ToolResult(ok=False, message=f"Scroll failed: {exc}")
-    await asyncio.sleep(0.05)
-    after_pos = await _read_scroll_position(session)
-    base_msg = f"Scrolled dx={delta_x} dy={delta_y}"
-    if before_pos and after_pos:
-        dx = round(after_pos.get("x", 0) - before_pos.get("x", 0))
-        dy = round(after_pos.get("y", 0) - before_pos.get("y", 0))
-        base_msg += (
-            f". Scroll position changed by ({dx}, {dy})px,"
-            f" now at ({round(after_pos['x'])}, {round(after_pos['y'])})"
-        )
-        if dx == 0 and dy == 0:
-            base_msg += ". WARNING: scroll position did not change (may be at boundary)"
-    return ToolResult(ok=True, message=base_msg)
+    if not result:
+        return ToolResult(ok=True, message=f"Scrolled dx={delta_x} dy={delta_y}")
+    before = result.get("before", {})
+    after = result.get("after", {})
+    dx = round(after.get("x", 0) - before.get("x", 0))
+    dy = round(after.get("y", 0) - before.get("y", 0))
+    msg = (
+        f"Scrolled dx={delta_x} dy={delta_y}"
+        f". Scroll position changed by ({dx}, {dy})px,"
+        f" now at ({round(after.get('x', 0))}, {round(after.get('y', 0))})"
+    )
+    if dx == 0 and dy == 0:
+        msg += ". WARNING: scroll position did not change (may be at boundary)"
+    return ToolResult(ok=True, message=msg)
 
 
 async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:

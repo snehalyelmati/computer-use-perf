@@ -40,6 +40,17 @@ A general-purpose browser agent. Python 3.14, managed with [uv](https://docs.ast
 - **Minimize CDP round-trips**: Combine operations into single `_call_on_node` calls instead of chaining multiple CDP commands
 - **No `onTop` gates for DOM operations**: Don't check `document.elementFromPoint()` or `onTop` before DOM interactions — they bypass visual layering by design
 
+## Tool Docstrings
+
+- Follow the pattern: **What it does. When to use it. Constraints.** — action-first, one sentence each
+- Tools that accept `element_id` must include: "Use element_id from the page snapshot."
+- Describe behavior, not internals — don't mention CDP, snapshot dicts, or interactivity filters
+
+## Snapshot Scope
+
+- `capture_snapshot` only includes **interactive** elements — non-interactive elements need live DOM search via `page.evaluate()`
+- All HTML attributes are stored in `ElementSnapshot.attributes`, but only 9 are shown to the LLM in `format_snapshot_for_llm()`
+
 ## Architecture
 
 - Entry point: `main.py`

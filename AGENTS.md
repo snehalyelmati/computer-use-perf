@@ -40,6 +40,15 @@ Code Style:
 - Avoid magic strings; centralize prompts/constants near top of file.
 - Error handling should log context and keep the loop resilient.
 
+Tool Docstrings:
+- Follow the pattern: What it does. When to use it. Constraints. — action-first, one sentence each.
+- Tools that accept `element_id` must include: "Use element_id from the page snapshot."
+- Describe behavior, not internals — don't mention CDP, snapshot dicts, or interactivity filters.
+
+Snapshot Scope:
+- `capture_snapshot` only includes interactive elements — non-interactive elements need live DOM search via `page.evaluate()`.
+- All HTML attributes are stored in `ElementSnapshot.attributes`, but only 9 are shown to the LLM in `format_snapshot_for_llm()`.
+
 Browser Interaction Principles:
 - DOM-first: use DOM methods (`.click()`, `.focus()`, `.innerText`) — they work through any visual layer (overlays, modals, z-index stacking).
 - CDP coordinates only when required: only use `Input.dispatchMouseEvent` for actions needing screen positions (e.g., drag-and-drop). Never gate click/type/read on visibility checks.

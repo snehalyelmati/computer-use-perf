@@ -278,10 +278,9 @@ class WorkerDeps:
 
 DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
     "click_element",
-    "find_elements",
     "type_text",
     "drag_and_drop",
-    "read_element_text",
+    "inspect_element",
     "scroll",
     "wait",
     "switch_to_iframe",
@@ -570,7 +569,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="click_element")
     async def click_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
-        """Click on an element. Use element_id from the page snapshot."""
+        """Click on an element to activate it, follow a link, or toggle a control. Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.click_element(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -606,7 +605,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="find_elements")
     async def find_elements(ctx: RunContext[WorkerDeps], query: str, limit: int = 8) -> ToolExecutionResult:
-        """Search for elements by text, label, or role. Returns matching element IDs and descriptions. Use when the element you need is not in the current snapshot."""
+        """Search for elements by text, label, or role. Use when the target element is not visible in the current snapshot."""
         start = time.perf_counter()
         limit = max(1, min(int(limit), 20))
         page_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
@@ -647,7 +646,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="type_text")
     async def type_text(ctx: RunContext[WorkerDeps], element_id: str, text: str) -> ToolExecutionResult:
-        """Focus an input/textarea and type text into it. Replaces any existing content."""
+        """Type text into an input or editable field. Replaces any existing content. Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.type_text(element_id, text, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -686,7 +685,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="drag_and_drop")
     async def drag_and_drop(ctx: RunContext[WorkerDeps], source_id: str, target_id: str) -> ToolExecutionResult:
-        """Drag source_id and drop it onto target_id. Use for sortable lists, kanban boards, sliders, etc."""
+        """Drag one element onto another. Use for reordering lists, moving cards, adjusting sliders, etc. Use element IDs from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.drag_and_drop(source_id, target_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -723,7 +722,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="wait")
     async def wait(ctx: RunContext[WorkerDeps], milliseconds: int) -> ToolExecutionResult:
-        """Pause for the given number of milliseconds (capped at 10 000). Use when the page needs time to load or animate."""
+        """Pause execution. Use when the page needs time to load, animate, or settle. Capped at 10 000 ms."""
         start = time.perf_counter()
         result = await semantic.wait(milliseconds, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -753,17 +752,17 @@ def build_browser_worker_agent(
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
-    @agent.tool(name="read_element_text")
-    async def read_element_text(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
-        """Return the inner text of an element. Use to read content not fully shown in the snapshot."""
+    @agent.tool(name="inspect_element")
+    async def inspect_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
+        """Read an element's full text content and all HTML attributes. Use when the snapshot shows truncated text or you need attribute values like data-*, aria-*, etc. Use element_id from the page snapshot."""
         start = time.perf_counter()
-        result = await semantic.read_element_text(element_id, ctx.deps.tool_context)
+        result = await semantic.inspect_element(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
         element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
-                "read_element_text",
+                "inspect_element",
                 result.ok,
                 duration_ms,
                 element_id=element_id,
@@ -772,7 +771,7 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=read_element_text step=%s ok=%s element_id=%s duration_ms=%s",
+            "tool=inspect_element step=%s ok=%s element_id=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
             element_id,
@@ -781,16 +780,49 @@ def build_browser_worker_agent(
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
-            tool="read_element_text",
+            tool="inspect_element",
             ok=result.ok,
             duration_ms=duration_ms,
             element_id=element_id,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
+    @agent.tool(name="search_page_attributes")
+    async def search_page_attributes(ctx: RunContext[WorkerDeps], query: str) -> ToolExecutionResult:
+        """Search every element on the page for attributes whose name or value contains the query string. Use to find hidden data embedded in element attributes anywhere on the page."""
+        start = time.perf_counter()
+        result = await semantic.search_page_attributes(query, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        query_preview = query[:30] + "..." if len(query) > 30 else query
+        logger.info(
+            _format_tool_log(
+                "search_page_attributes",
+                result.ok,
+                duration_ms,
+                extra=f'query="{query_preview}"',
+            )
+        )
+        logger.debug(
+            "tool=search_page_attributes step=%s ok=%s query=%s duration_ms=%s",
+            ctx.deps.step,
+            result.ok,
+            query,
+            duration_ms,
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="search_page_attributes",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            query=query,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message)
+
     @agent.tool(name="scroll")
     async def scroll(ctx: RunContext[WorkerDeps], delta_x: int = 0, delta_y: int = 0) -> ToolExecutionResult:
-        """Scroll the viewport. Positive delta_y scrolls down, positive delta_x scrolls right. Units are pixels."""
+        """Scroll the viewport by a pixel offset. Positive delta_y scrolls down, positive delta_x scrolls right."""
         start = time.perf_counter()
         result = await semantic.scroll(delta_x, delta_y, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -831,7 +863,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="switch_to_iframe")
     async def switch_to_iframe(ctx: RunContext[WorkerDeps], iframe_id: str) -> ToolExecutionResult:
-        """Enter an iframe to access its elements. After switching, the snapshot will show the iframe's DOM."""
+        """Switch into an iframe to interact with its elements. Required before clicking or typing inside an iframe. Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.switch_to_iframe(iframe_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -866,7 +898,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="switch_to_main_frame")
     async def switch_to_main_frame(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
-        """Exit the current iframe and return to the top-level page."""
+        """Leave the current iframe and return to the top-level page."""
         start = time.perf_counter()
         result = await semantic.switch_to_main_frame(ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -896,7 +928,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="navigate_to")
     async def navigate_to(ctx: RunContext[WorkerDeps], url: str) -> ToolExecutionResult:
-        """Navigate to a URL. Use for opening new pages, not for clicking links on the current page."""
+        """Navigate to a URL. Use for opening new pages, not for following links already on the page."""
         start = time.perf_counter()
         result = await semantic.navigate_to(url, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -960,7 +992,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="execute_js")
     async def execute_js(ctx: RunContext[WorkerDeps], code: str) -> ToolExecutionResult:
-        """Run JavaScript in the page context. Use as a last resort when no semantic tool fits."""
+        """Run arbitrary JavaScript in the page. Use only as a last resort when no other tool fits."""
         start = time.perf_counter()
         result = await semantic.execute_js(code, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -993,7 +1025,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="press_key_combination")
     async def press_key_combination(ctx: RunContext[WorkerDeps], keys: list[str]) -> ToolExecutionResult:
-        """Press a key combination. Pass modifier and key names, e.g. ["Control", "C"] for copy, ["Enter"] for submit."""
+        """Press a keyboard shortcut. Examples: ["Enter"] to submit, ["Control", "C"] to copy, ["Escape"] to dismiss."""
         start = time.perf_counter()
         result = await semantic.press_key_combination(keys, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)

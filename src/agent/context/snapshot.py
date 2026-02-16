@@ -60,6 +60,7 @@ class ElementSnapshot:
     interactive_confidence: float | None = None
     in_viewport: bool | None = None
     area: float | None = None
+    parent_chain: tuple[tuple[int, str, str], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -394,6 +395,7 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
         backend_node_ids = nodes.get("backendNodeId", [])
         attributes = nodes.get("attributes", [])
         computed_styles = nodes.get("computedStyles", [])
+        parent_indices = nodes.get("parentIndex", [])
         content_document_indices = nodes.get("contentDocumentIndex", [])
         frame_id = document.get("frameId")
         document_frame_meta = frame_lookup.get(frame_id or "", {})
@@ -470,6 +472,26 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
                 stable_id_base = build_stable_id(payload)
             stable_id = unique_stable_id(stable_id_base, stable_id_counts)
 
+            # Build parent chain for tree structure
+            parent_chain: tuple[tuple[int, str, str], ...] | None = None
+            if parent_indices:
+                chain: list[tuple[int, str, str]] = []
+                pi = parent_indices[index] if index < len(parent_indices) else -1
+                while isinstance(pi, int) and 0 <= pi < node_count:
+                    p_name = _decode_string(node_names[pi], strings) if pi < len(node_names) else ""
+                    if p_name and p_name.upper() in {"HTML", "#DOCUMENT"}:
+                        break
+                    p_attrs = attribute_map(attributes[pi], strings) if pi < len(attributes) else {}
+                    p_label = p_attrs.get("id") or p_attrs.get("class", "").split()[0] if p_attrs.get("class") else ""
+                    if p_name and not p_name.startswith("#"):
+                        chain.append((pi, p_name.lower(), p_label))
+                    next_pi = parent_indices[pi] if pi < len(parent_indices) else -1
+                    if next_pi == pi:
+                        break
+                    pi = next_pi
+                if chain:
+                    parent_chain = tuple(reversed(chain))
+
             bbox = bounds_map.get(index)
             in_viewport = _in_viewport(bbox, viewport_width=viewport_width, viewport_height=viewport_height)
             area = None
@@ -494,6 +516,7 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
                     interactive_confidence=float(interactive_confidence),
                     in_viewport=in_viewport,
                     area=area,
+                    parent_chain=parent_chain,
                 )
             )
 
@@ -550,64 +573,140 @@ def format_snapshot_for_llm(
 
     elements = elements[:max_elements]
 
-    def _label_key(el: ElementSnapshot) -> tuple[str, str, str, str]:
-        def norm(value: str | None) -> str:
-            return " ".join((value or "").lower().split())
+    # --- Build element label ---
+    _IMPORTANT_ATTR_KEYS = [
+        "id", "name", "type", "placeholder", "aria-label", "title", "alt", "href", "value",
+    ]
+    _SHOWN_ATTRS = set(_IMPORTANT_ATTR_KEYS)
+    _SEMANTIC_TAGS = frozenset({
+        "form", "section", "main", "nav", "aside", "article",
+        "dialog", "header", "footer", "ul", "ol", "table", "fieldset",
+    })
 
+    def _label_key(el: ElementSnapshot) -> tuple[str, str, str, str]:
+        def norm(v: str | None) -> str:
+            return " ".join((v or "").lower().split())
         return (norm(el.role), norm(el.name), norm(el.text), norm(el.node_name))
 
     label_counts: dict[tuple[str, str, str, str], int] = {}
-    for element in elements:
-        key = _label_key(element)
+    for el in elements:
+        key = _label_key(el)
         label_counts[key] = label_counts.get(key, 0) + 1
 
-    for element in elements:
+    def _element_label(element: ElementSnapshot) -> str:
         role = (element.role or "").strip()
         name = (element.name or "").strip()
         text = (element.text or "").strip()
         tag = (element.node_name or "").strip()
         attrs = element.attributes or {}
         important_attrs = {
-            key: attrs.get(key)
-            for key in [
-                "id",
-                "name",
-                "type",
-                "placeholder",
-                "aria-label",
-                "title",
-                "alt",
-                "href",
-                "value",
-            ]
-            if attrs.get(key)
+            k: attrs.get(k) for k in _IMPORTANT_ATTR_KEYS if attrs.get(k)
         }
         attr_str = (
-            " ".join(f'{key}="{value}"' for key, value in important_attrs.items())
-            if important_attrs
-            else ""
+            " ".join(f'{k}="{v}"' for k, v in important_attrs.items())
+            if important_attrs else ""
         )
         label_parts = [part for part in [role, name, text, tag] if part]
         label = " | ".join(label_parts) if label_parts else "element"
         if attr_str:
             label = f"{label} ({attr_str})"
-        frame_hint = ""
+        # Hints
+        hints_parts: list[str] = []
         if element.frame_name or element.frame_url:
-            frame_name = element.frame_name or ""
-            frame_url = element.frame_url or ""
-            frame_hint = f" [frame: {frame_name} {frame_url}]".strip()
-        bbox_hint = ""
+            fn = element.frame_name or ""
+            fu = element.frame_url or ""
+            hints_parts.append(f"[frame: {fn} {fu}]".strip())
+        if element.interactive_reason and (element.interactive_confidence or 0.0) < 0.55:
+            hints_parts.append(f"reason={element.interactive_reason}")
         if label_counts.get(_label_key(element), 0) > 1 and element.bounding_box:
             x, y, w, h = element.bounding_box
-            bbox_hint = f" bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}"
-        reason_hint = ""
-        if element.interactive_reason and (element.interactive_confidence or 0.0) < 0.55:
-            reason_hint = f" reason={element.interactive_reason}"
-        viewport_hint = ""
+            hints_parts.append(f"bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}")
         if element.in_viewport is False:
-            viewport_hint = " offscreen"
-        hints = f"{(' ' + frame_hint) if frame_hint else ''}{bbox_hint}{reason_hint}{viewport_hint}"
-        lines.append(f"- {element.stable_id}: {label}{hints}")
+            hints_parts.append("offscreen")
+        has_extra = any(
+            k.startswith("data-") or (k.startswith("aria-") and k not in _SHOWN_ATTRS)
+            for k in attrs
+        )
+        if has_extra:
+            hints_parts.append("[+attrs]")
+        hints = (" " + " ".join(hints_parts)) if hints_parts else ""
+        return f"- {element.stable_id}: {label}{hints}"
+
+    # --- Try tree output ---
+    has_chains = any(el.parent_chain for el in elements)
+    if not has_chains:
+        # Fallback: flat list (no parent chain data available)
+        for element in elements:
+            lines.append(_element_label(element))
+        return "\n".join(lines).strip()
+
+    # Build a tree from parent chains.
+    # Tree node: dict with "tag", "label", "children" (ordered dict by node_idx),
+    #   "elements" (list of ElementSnapshot in DOM order)
+    root: dict = {"tag": "", "label": "", "children": {}, "elements": [], "idx": -1}
+
+    for element in elements:
+        chain = element.parent_chain or ()
+        node = root
+        for node_idx, tag, label in chain:
+            if node_idx not in node["children"]:
+                node["children"][node_idx] = {
+                    "tag": tag, "label": label, "children": {}, "elements": [], "idx": node_idx,
+                }
+            node = node["children"][node_idx]
+        node["elements"].append(element)
+
+    # Prune: a container is "meaningful" if it has id/class, is semantic, or is a
+    # branching point (multiple child subtrees with interactive elements).
+    def _is_meaningful(node: dict) -> bool:
+        if node["label"]:
+            return True
+        if node["tag"] in _SEMANTIC_TAGS:
+            return True
+        child_count = len(node["children"]) + len(node["elements"])
+        if child_count > 1:
+            return True
+        return False
+
+    def _container_label(node: dict) -> str:
+        tag = node["tag"] or "div"
+        label = node["label"]
+        if label:
+            # Determine if label is an id or class
+            return f"<{tag} {label}>"
+        return f"<{tag}>"
+
+    def _walk_tree(node: dict, depth: int, out: list[str]) -> None:
+        # Sort children by node index (DOM order)
+        sorted_children = sorted(node["children"].values(), key=lambda n: n["idx"])
+        # Interleave containers and elements by index
+        items: list[tuple[int, dict | ElementSnapshot]] = []
+        for child in sorted_children:
+            items.append((child["idx"], child))
+        # Elements don't have a node index from parent_chain, but they appear
+        # after all children in DOM order. Use a high index.
+        for el in node["elements"]:
+            el_idx = el.parent_chain[-1][0] + 1 if el.parent_chain else 999999
+            items.append((el_idx, el))
+
+        for _, item in sorted(items, key=lambda x: x[0]):
+            if isinstance(item, dict):
+                # Container node
+                if _is_meaningful(item):
+                    indent = "  " * depth
+                    out.append(f"{indent}{_container_label(item)}")
+                    _walk_tree(item, depth + 1, out)
+                else:
+                    # Skip this level, promote children
+                    _walk_tree(item, depth, out)
+            else:
+                # Interactive element
+                indent = "  " * depth
+                out.append(f"{indent}{_element_label(item)}")
+
+    tree_lines: list[str] = []
+    _walk_tree(root, 0, tree_lines)
+    lines.extend(tree_lines)
     return "\n".join(lines).strip()
 
 

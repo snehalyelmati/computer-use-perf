@@ -49,8 +49,9 @@ Goal: {goal}
 You will be given a page snapshot containing interactive elements with stable IDs.
 - Use only the provided tools to interact with the browser.
 - Never use or request raw CSS/XPath selectors.
-- If you need more information, prefer reading element text or navigating rather than guessing.
-- If the page has many candidates or decoy elements, use find_elements(query) to shortlist relevant element IDs first.
+- If you need more information, use inspect_element to read full text and attributes, or navigate rather than guessing.
+- The snapshot is a tree: elements are grouped under their parent containers. Use this structure to distinguish real elements from decoys.
+- When submitting forms, prefer buttons in the same container as the input fields you filled. Ignore unrelated buttons elsewhere in the tree.
 
 After using tools (if needed), return a JSON object matching this schema:
 - done: boolean (set true when the delegated goal for this step is complete; the orchestrator decides when the overall run is done)
