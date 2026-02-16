@@ -36,6 +36,22 @@ from src.agent.tools import semantic
 
 logger = logging.getLogger(__name__)
 
+_LOG_INDENT = "  "
+
+class _ShortNameFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith("src."):
+            record.name = record.name.split(".")[-1]
+        return True
+
+def _format_phase(step: int, phase: str, *, detail: str | None = None, indent: int = 0) -> str:
+    prefix = f"Step {step}"
+    spacer = _LOG_INDENT * max(indent, 0)
+    message = f"{prefix} {spacer}{phase}"
+    if detail:
+        message = f"{message} {detail}"
+    return message
+
 
 @dataclass
 class AgentState:
@@ -69,8 +85,10 @@ class WorkerDeps:
 def _setup_logging(log_dir: str, *, level: str = "INFO") -> None:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
-    root.setLevel(level.upper())
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    normalized_level = level.upper()
+    root.setLevel(normalized_level)
+    formatter = logging.Formatter("%(levelname)s %(name)s: %(message)s")
+    short_name_filter = _ShortNameFilter()
     log_path = str(Path(log_dir) / "agent.log")
     has_file = any(
         isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == log_path
@@ -79,7 +97,13 @@ def _setup_logging(log_dir: str, *, level: str = "INFO") -> None:
     if not has_file:
         file_handler = logging.FileHandler(log_path)
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(short_name_filter)
         root.addHandler(file_handler)
+    else:
+        for handler in root.handlers:
+            if isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == log_path:
+                if not any(isinstance(f, _ShortNameFilter) for f in handler.filters):
+                    handler.addFilter(short_name_filter)
 
     has_stream = any(
         isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
@@ -88,7 +112,22 @@ def _setup_logging(log_dir: str, *, level: str = "INFO") -> None:
     if not has_stream:
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(formatter)
+        stream_handler.addFilter(short_name_filter)
         root.addHandler(stream_handler)
+    else:
+        for handler in root.handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                if not any(isinstance(f, _ShortNameFilter) for f in handler.filters):
+                    handler.addFilter(short_name_filter)
+
+    httpx_logger = logging.getLogger("httpx")
+    httpcore_logger = logging.getLogger("httpcore")
+    if normalized_level == "DEBUG":
+        httpx_logger.setLevel(logging.DEBUG)
+        httpcore_logger.setLevel(logging.DEBUG)
+    else:
+        httpx_logger.setLevel(logging.WARNING)
+        httpcore_logger.setLevel(logging.WARNING)
 
 
 def _build_openrouter_model(config: LLMConfig) -> OpenRouterModel:
@@ -292,9 +331,16 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.click_element(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool click_element",
+                detail=f"ok={result.ok} element_id={element_id} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s element_id=%s duration_ms=%s",
-            "click_element",
+            "tool=click_element step=%s ok=%s element_id=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
             element_id,
@@ -321,9 +367,16 @@ def build_browser_worker_agent(
         if matches:
             message = "\n".join(_format_element_brief(element) for element in matches)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool find_elements",
+                detail=f"ok=True query_len={len(query or '')} limit={limit} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s query_len=%s limit=%s duration_ms=%s",
-            "find_elements",
+            "tool=find_elements step=%s ok=%s query_len=%s limit=%s duration_ms=%s",
             ctx.deps.step,
             True,
             len(query or ""),
@@ -345,21 +398,29 @@ def build_browser_worker_agent(
     async def type_text(ctx: RunContext[WorkerDeps], element_id: str, text: str) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.type_text(element_id, text, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool type_text",
+                detail=f"ok={result.ok} element_id={element_id} text_len={len(text)} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s element_id=%s text_len=%s duration_ms=%s",
-            "type_text",
+            "tool=type_text step=%s ok=%s element_id=%s text_len=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
             element_id,
             len(text),
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="type_text",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
             element_id=element_id,
             text_len=len(text),
         )
@@ -369,21 +430,31 @@ def build_browser_worker_agent(
     async def drag_and_drop(ctx: RunContext[WorkerDeps], source_id: str, target_id: str) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.drag_and_drop(source_id, target_id, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool drag_and_drop",
+                detail=(
+                    f"ok={result.ok} source_id={source_id} target_id={target_id} duration_ms={duration_ms}"
+                ),
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s source_id=%s target_id=%s duration_ms=%s",
-            "drag_and_drop",
+            "tool=drag_and_drop step=%s ok=%s source_id=%s target_id=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
             source_id,
             target_id,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="drag_and_drop",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
             source_id=source_id,
             target_id=target_id,
         )
@@ -393,19 +464,27 @@ def build_browser_worker_agent(
     async def select_all(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.select_all(ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool select_all",
+                detail=f"ok={result.ok} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s duration_ms=%s",
-            "select_all",
+            "tool=select_all step=%s ok=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="select_all",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
@@ -413,19 +492,27 @@ def build_browser_worker_agent(
     async def copy_selection(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.copy_selection(ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool copy_selection",
+                detail=f"ok={result.ok} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s duration_ms=%s",
-            "copy_selection",
+            "tool=copy_selection step=%s ok=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="copy_selection",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
@@ -433,19 +520,27 @@ def build_browser_worker_agent(
     async def paste(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.paste(ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool paste",
+                detail=f"ok={result.ok} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s duration_ms=%s",
-            "paste",
+            "tool=paste step=%s ok=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="paste",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
@@ -453,20 +548,28 @@ def build_browser_worker_agent(
     async def read_element_text(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.read_element_text(element_id, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool read_element_text",
+                detail=f"ok={result.ok} element_id={element_id} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s element_id=%s duration_ms=%s",
-            "read_element_text",
+            "tool=read_element_text step=%s ok=%s element_id=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
             element_id,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="read_element_text",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
             element_id=element_id,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
@@ -475,20 +578,28 @@ def build_browser_worker_agent(
     async def switch_to_iframe(ctx: RunContext[WorkerDeps], iframe_id: str) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.switch_to_iframe(iframe_id, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool switch_to_iframe",
+                detail=f"ok={result.ok} iframe_id={iframe_id} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s iframe_id=%s duration_ms=%s",
-            "switch_to_iframe",
+            "tool=switch_to_iframe step=%s ok=%s iframe_id=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
             iframe_id,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="switch_to_iframe",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
             iframe_id=iframe_id,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
@@ -497,19 +608,27 @@ def build_browser_worker_agent(
     async def switch_to_main_frame(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.switch_to_main_frame(ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool switch_to_main_frame",
+                detail=f"ok={result.ok} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s duration_ms=%s",
-            "switch_to_main_frame",
+            "tool=switch_to_main_frame step=%s ok=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="switch_to_main_frame",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
@@ -517,20 +636,28 @@ def build_browser_worker_agent(
     async def navigate_to(ctx: RunContext[WorkerDeps], url: str) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.navigate_to(url, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool navigate_to",
+                detail=f"ok={result.ok} url={url} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s url=%s duration_ms=%s",
-            "navigate_to",
+            "tool=navigate_to step=%s ok=%s url=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
             url,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="navigate_to",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
             url=url,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
@@ -539,19 +666,27 @@ def build_browser_worker_agent(
     async def take_screenshot(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.take_screenshot(ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool take_screenshot",
+                detail=f"ok={result.ok} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s duration_ms=%s",
-            "take_screenshot",
+            "tool=take_screenshot step=%s ok=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="take_screenshot",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
@@ -559,20 +694,28 @@ def build_browser_worker_agent(
     async def execute_js(ctx: RunContext[WorkerDeps], code: str) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.execute_js(code, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool execute_js",
+                detail=f"ok={result.ok} code_len={len(code)} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s code_len=%s duration_ms=%s",
-            "execute_js",
+            "tool=execute_js step=%s ok=%s code_len=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
             len(code),
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="execute_js",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
             code_len=len(code),
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
@@ -581,20 +724,28 @@ def build_browser_worker_agent(
     async def press_key_combination(ctx: RunContext[WorkerDeps], keys: list[str]) -> ToolExecutionResult:
         start = time.perf_counter()
         result = await semantic.press_key_combination(keys, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool press_key_combination",
+                detail=f"ok={result.ok} keys={'+'.join(keys)} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
         logger.debug(
-            "tool=%s step=%s ok=%s keys=%s duration_ms=%s",
-            "press_key_combination",
+            "tool=press_key_combination step=%s ok=%s keys=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
             "+".join(keys),
-            int((time.perf_counter() - start) * 1000),
+            duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
             tool="press_key_combination",
             ok=result.ok,
-            duration_ms=int((time.perf_counter() - start) * 1000),
+            duration_ms=duration_ms,
             keys=keys,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
@@ -662,6 +813,16 @@ class BrowserAgent:
             for step in range(self.agent_config.max_steps):
                 self.state.step = step + 1
                 step_started = time.perf_counter()
+                logger.info(
+                    _format_phase(
+                        self.state.step,
+                        "start",
+                        detail=(
+                            f"no_progress_steps={self.state.no_progress_steps} "
+                            f"stuck_threshold={self.agent_config.stuck_threshold}"
+                        ),
+                    )
+                )
                 snapshot_started = time.perf_counter()
                 snapshot = await capture_snapshot(session.page, session.cdp_session)
                 snapshot_duration_ms = int((time.perf_counter() - snapshot_started) * 1000)
@@ -683,11 +844,15 @@ class BrowserAgent:
                             **(snapshot.diagnostics.size_hints or {}),
                         )
                 logger.info(
-                    "Step %s snapshot duration_ms=%s elements=%s url=%s",
-                    self.state.step,
-                    snapshot_duration_ms,
-                    len(snapshot.elements),
-                    snapshot.url,
+                    _format_phase(
+                        self.state.step,
+                        "snapshot",
+                        detail=(
+                            f"duration_ms={snapshot_duration_ms} elements={len(snapshot.elements)} "
+                            f"url={snapshot.url}"
+                        ),
+                        indent=1,
+                    )
                 )
                 diff_text, _diff_ids = _snapshot_diff(prev_snapshot, snapshot)
                 page_fingerprint = _page_fingerprint(snapshot)
@@ -700,9 +865,16 @@ class BrowserAgent:
                 if self.state.no_progress_steps >= self.agent_config.unchanged_abort_threshold:
                     stop_reason = "unchanged_fingerprint_abort"
                     logger.warning(
-                        "Aborting: page fingerprint unchanged for %s consecutive steps (threshold=%s)",
-                        self.state.no_progress_steps,
-                        self.agent_config.unchanged_abort_threshold,
+                        _format_phase(
+                            self.state.step,
+                            "abort",
+                            detail=(
+                                "reason=unchanged_fingerprint "
+                                f"count={self.state.no_progress_steps} "
+                                f"threshold={self.agent_config.unchanged_abort_threshold}"
+                            ),
+                            indent=1,
+                        )
                     )
                     metrics.emit(
                         "step_end",
@@ -761,6 +933,11 @@ class BrowserAgent:
                         f"Candidate page text lines:\n{raw_text_block}\n"
                     )
 
+                    logger.debug(
+                        "snapshot_filter prompt step=%s chars=%s",
+                        self.state.step,
+                        len(filter_prompt),
+                    )
                     filter_started = time.perf_counter()
                     filter_result = await snapshot_filter.run(filter_prompt)
                     filter_duration_ms = int((time.perf_counter() - filter_started) * 1000)
@@ -795,6 +972,18 @@ class BrowserAgent:
                     )
                     self.state.last_filter_output = filter_output
                     self.state.last_filter_fingerprint = page_fingerprint
+                    logger.info(
+                        _format_phase(
+                            self.state.step,
+                            "filter",
+                            detail=(
+                                f"duration_ms={filter_duration_ms} "
+                                f"useful_lines={len(filter_output.useful_text_lines or [])} "
+                                f"priority_ids={len(priority_ids)}"
+                            ),
+                            indent=1,
+                        )
+                    )
 
                 useful_lines = filter_output.useful_text_lines if filter_output else []
                 useful_block = "\n".join(useful_lines) if useful_lines else "None."
@@ -820,6 +1009,11 @@ class BrowserAgent:
                     f"Memory (recent):\n{memory_text}\n\n"
                     f"Page snapshot:\n{snapshot_text_orchestrator}\n"
                     f"{stuck_hint}"
+                )
+                logger.debug(
+                    "orchestrator prompt step=%s chars=%s",
+                    self.state.step,
+                    len(orchestrator_prompt),
                 )
                 orchestrator_started = time.perf_counter()
                 decision_result = await orchestrator.run(orchestrator_prompt)
@@ -847,16 +1041,36 @@ class BrowserAgent:
                 decision = decision_result.output
                 self.state.last_worker_goal = decision.worker_goal
                 logger.info(
-                    "Step %s orchestrator duration_ms=%s in_tokens=%s out_tokens=%s cost_usd=%s decision=%s",
+                    _format_phase(
+                        self.state.step,
+                        "orchestrator",
+                        detail=(
+                            f"duration_ms={orchestrator_duration_ms} "
+                            f"worker={decision.worker} "
+                            f"goal={decision.worker_goal} "
+                            f"done={decision.done} "
+                            f"rationale={decision.rationale or 'None'}"
+                        ),
+                        indent=1,
+                    )
+                )
+                logger.debug(
+                    "orchestrator step=%s duration_ms=%s input_tokens=%s output_tokens=%s cost_usd=%s",
                     self.state.step,
                     orchestrator_duration_ms,
                     orchestrator_usage.input_tokens,
                     orchestrator_usage.output_tokens,
                     (orchestrator_cost.cost_usd if orchestrator_cost else None),
-                    decision.worker_goal,
                 )
                 if decision.done:
-                    logger.info("Done (orchestrator): %s", decision.rationale or "")
+                    logger.info(
+                        _format_phase(
+                            self.state.step,
+                            "orchestrator done",
+                            detail=(decision.rationale or ""),
+                            indent=2,
+                        )
+                    )
                     metrics.emit(
                         "step_end",
                         step=self.state.step,
@@ -895,6 +1109,11 @@ class BrowserAgent:
                     + f"Page snapshot:\n{snapshot_text_worker}\n"
                     + (stuck_hint + "\n" if stuck_hint else "")
                 )
+                logger.debug(
+                    "worker prompt step=%s chars=%s",
+                    self.state.step,
+                    len(worker_prompt),
+                )
                 worker_started = time.perf_counter()
                 with browser_worker.sequential_tool_calls():
                     worker_result = await browser_worker.run(worker_prompt, deps=deps)
@@ -924,14 +1143,23 @@ class BrowserAgent:
                 self.state.last_tool = tool_context.last_tool
                 self.state.last_element_id = tool_context.last_element_id
                 logger.info(
-                    "Step %s worker duration_ms=%s in_tokens=%s out_tokens=%s cost_usd=%s done=%s summary=%s",
+                    _format_phase(
+                        self.state.step,
+                        "worker",
+                        detail=(
+                            f"duration_ms={worker_duration_ms} "
+                            f"done={step_output.done} summary={step_output.summary}"
+                        ),
+                        indent=1,
+                    )
+                )
+                logger.debug(
+                    "worker step=%s duration_ms=%s input_tokens=%s output_tokens=%s cost_usd=%s",
                     self.state.step,
                     worker_duration_ms,
                     worker_usage.input_tokens,
                     worker_usage.output_tokens,
                     (worker_cost.cost_usd if worker_cost else None),
-                    step_output.done,
-                    step_output.summary,
                 )
                 metrics.emit(
                     "step_end",
@@ -942,8 +1170,20 @@ class BrowserAgent:
                 )
                 if step_output.done:
                     logger.info(
-                        "Worker reported done=true (delegated goal complete); continuing until orchestrator done=true."
+                        _format_phase(
+                            self.state.step,
+                            "worker done",
+                            detail="delegated goal complete; continuing until orchestrator done=true",
+                            indent=2,
+                        )
                     )
+                logger.info(
+                    _format_phase(
+                        self.state.step,
+                        "end",
+                        detail=f"duration_ms={int((time.perf_counter() - step_started) * 1000)}",
+                    )
+                )
                 prev_snapshot = snapshot
         finally:
             await close_browser(session)
