@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import re
+import time
 from urllib.parse import urlparse
 from typing import Any, Iterable, Sequence
 
@@ -54,6 +56,18 @@ class ElementSnapshot:
     frame_id: str | None
     frame_url: str | None
     frame_name: str | None
+    interactive_reason: str | None = None
+    interactive_confidence: float | None = None
+    in_viewport: bool | None = None
+    area: float | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotDiagnostics:
+    """Timing and size hints for snapshot capture."""
+
+    durations_ms: dict[str, int]
+    size_hints: dict[str, int]
 
 
 @dataclass
@@ -64,6 +78,9 @@ class PageSnapshot:
     title: str | None
     elements: Sequence[ElementSnapshot]
     raw_text: Sequence[str]
+    viewport_width: int | None = None
+    viewport_height: int | None = None
+    diagnostics: SnapshotDiagnostics | None = None
 
 @dataclass(frozen=True)
 class ElementIndex:
@@ -76,6 +93,11 @@ def build_element_index(snapshot: PageSnapshot) -> ElementIndex:
 
 def build_stable_id(parts: dict[str, Any]) -> str:
     payload = json.dumps(parts, sort_keys=True, ensure_ascii=True)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"el_{digest[:12]}"
+
+def build_stable_id_from_backend(frame_id: str | None, backend_node_id: int) -> str:
+    payload = json.dumps({"frame": frame_id or "", "backend_node_id": int(backend_node_id)}, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return f"el_{digest[:12]}"
 
@@ -108,27 +130,32 @@ def attribute_map(raw_attributes: Iterable[Any], strings: Sequence[str]) -> dict
         for index in range(0, len(decoded) - 1, 2)
     }
 
-def _is_interactive(
+def _interactive_reason(
     node_name: str | None,
     role: str | None,
     attributes: dict[str, str],
     cursor: str | None,
-) -> bool:
+) -> tuple[bool, str | None, float]:
     if role and role.lower() in INTERACTIVE_ROLES:
-        return True
+        return True, "role", 1.0
     if node_name and node_name.upper() in INTERACTIVE_TAGS:
-        return True
+        reason = "native_tag"
+        confidence = 0.95
+        if (node_name or "").upper() == "A" and "href" in attributes:
+            reason = "href"
+            confidence = 0.98
+        return True, reason, confidence
     if "contenteditable" in attributes:
-        return True
+        return True, "contenteditable", 0.9
     if "tabindex" in attributes:
-        return True
+        return True, "tabindex", 0.75
     if "onclick" in attributes:
-        return True
+        return True, "onclick", 0.65
     if "href" in attributes and (node_name or "").upper() == "A":
-        return True
+        return True, "href", 0.98
     if cursor == "pointer":
-        return True
-    return False
+        return True, "cursor_pointer", 0.35
+    return False, None, 0.0
 
 def _frame_tree_lookup(frame_tree: dict[str, Any]) -> dict[str, dict[str, str]]:
     lookup: dict[str, dict[str, str]] = {}
@@ -255,13 +282,32 @@ def rank_elements(
     if not query_tokens:
         return list(elements)
 
+    token_freq: dict[str, int] = {}
+    for element in elements:
+        for token in _tokenize(element_text_blob(element)):
+            token_freq[token] = token_freq.get(token, 0) + 1
+
     page_host = _hostname(page_url)
     scored: list[tuple[float, str, ElementSnapshot]] = []
     max_score = 0.0
+    n = max(1, len(elements))
     for element in elements:
         blob_tokens = _tokenize(element_text_blob(element))
-        overlap = float(len(query_tokens & blob_tokens))
-        score = overlap
+        overlap_tokens = query_tokens & blob_tokens
+        score = 0.0
+        for token in overlap_tokens:
+            freq = token_freq.get(token, 1)
+            score += math.log((n + 1.0) / (freq + 1.0)) + 1.0
+
+        confidence = float(element.interactive_confidence or 0.6)
+        score *= max(0.1, min(confidence, 1.0))
+
+        if element.in_viewport is False:
+            score *= 0.7
+        if element.area is not None and element.area > 0:
+            # Prefer reasonable-sized targets; avoid tiny icons without hard-dropping them.
+            size_factor = min(1.25, max(0.6, math.log10(max(1.0, float(element.area))) / 3.0))
+            score *= size_factor
 
         node_name = (element.node_name or "").upper()
         if node_name == "IFRAME":
@@ -301,6 +347,10 @@ def unique_stable_id(stable_id: str, counts: dict[str, int]) -> str:
 async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
     """Capture a DOM + accessibility snapshot using CDP."""
 
+    durations_ms: dict[str, int] = {}
+    size_hints: dict[str, int] = {}
+
+    started = time.perf_counter()
     dom_snapshot = await cdp_session.send(
         "DOMSnapshot.captureSnapshot",
         {
@@ -309,8 +359,15 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
             "includePaintOrder": True,
         },
     )
+    durations_ms["DOMSnapshot.captureSnapshot"] = int((time.perf_counter() - started) * 1000)
+
+    started = time.perf_counter()
     ax_tree = await cdp_session.send("Accessibility.getFullAXTree")
+    durations_ms["Accessibility.getFullAXTree"] = int((time.perf_counter() - started) * 1000)
+
+    started = time.perf_counter()
     frame_tree = await cdp_session.send("Page.getFrameTree")
+    durations_ms["Page.getFrameTree"] = int((time.perf_counter() - started) * 1000)
 
     ax_lookup = _ax_lookup(ax_tree.get("nodes", []))
     frame_lookup = _frame_tree_lookup(frame_tree.get("frameTree", {}))
@@ -319,8 +376,16 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
     raw_text: list[str] = []
     strings = dom_snapshot.get("strings", [])
     stable_id_counts: dict[str, int] = {}
-
+    size_hints["dom_strings"] = int(len(strings) if isinstance(strings, list) else 0)
     documents = dom_snapshot.get("documents", [])
+    size_hints["dom_documents"] = int(len(documents) if isinstance(documents, list) else 0)
+    size_hints["ax_nodes"] = int(len(ax_tree.get("nodes", []) or []))
+    size_hints["frames"] = int(len(frame_lookup))
+
+    viewport = page.viewport_size or {}
+    viewport_width = viewport.get("width") if isinstance(viewport, dict) else None
+    viewport_height = viewport.get("height") if isinstance(viewport, dict) else None
+
     for document in documents:
         nodes = document.get("nodes", {})
         node_names = nodes.get("nodeName", [])
@@ -338,6 +403,7 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
         bounds_map = _layout_bounds(document.get("layout", {}))
 
         node_count = len(node_names)
+        size_hints["dom_total_nodes"] = size_hints.get("dom_total_nodes", 0) + int(node_count)
         for index in range(node_count):
             node_name = _decode_string(node_names[index], strings)
             node_value = _decode_string(node_values[index], strings) if index < len(node_values) else ""
@@ -382,19 +448,35 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
             role = ax_info.get("role") or None
             name = _normalize_text(ax_info.get("name") or None)
 
-            if not _is_interactive(node_name, role, node_attributes, cursor):
+            is_interactive, interactive_reason, interactive_confidence = _interactive_reason(
+                node_name, role, node_attributes, cursor
+            )
+            if not is_interactive:
                 continue
 
-            payload = _stable_id_payload(
-                node_name,
-                role,
-                name,
-                text,
-                node_attributes,
-                frame_id,
-                frame_url,
-            )
-            stable_id = unique_stable_id(build_stable_id(payload), stable_id_counts)
+            stable_id_base: str
+            if backend_node_id is not None:
+                stable_id_base = build_stable_id_from_backend(element_frame_id, backend_node_id)
+            else:
+                payload = _stable_id_payload(
+                    node_name,
+                    role,
+                    name,
+                    text,
+                    node_attributes,
+                    frame_id,
+                    frame_url,
+                )
+                stable_id_base = build_stable_id(payload)
+            stable_id = unique_stable_id(stable_id_base, stable_id_counts)
+
+            bbox = bounds_map.get(index)
+            in_viewport = _in_viewport(bbox, viewport_width=viewport_width, viewport_height=viewport_height)
+            area = None
+            if bbox:
+                _, _, w, h = bbox
+                if w and h and w > 0 and h > 0:
+                    area = float(w * h)
             elements.append(
                 ElementSnapshot(
                     stable_id=stable_id,
@@ -403,16 +485,32 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
                     role=role,
                     name=name,
                     text=text,
-                    bounding_box=bounds_map.get(index),
+                    bounding_box=bbox,
                     attributes=node_attributes,
                     frame_id=element_frame_id,
                     frame_url=frame_url,
                     frame_name=frame_name,
+                    interactive_reason=interactive_reason,
+                    interactive_confidence=float(interactive_confidence),
+                    in_viewport=in_viewport,
+                    area=area,
                 )
             )
 
+    started = time.perf_counter()
     title = await page.title()
-    return PageSnapshot(url=page.url, title=title, elements=elements, raw_text=raw_text)
+    durations_ms["page.title"] = int((time.perf_counter() - started) * 1000)
+
+    diagnostics = SnapshotDiagnostics(durations_ms=durations_ms, size_hints=size_hints)
+    return PageSnapshot(
+        url=page.url,
+        title=title,
+        elements=elements,
+        raw_text=raw_text,
+        viewport_width=(int(viewport_width) if isinstance(viewport_width, int) else None),
+        viewport_height=(int(viewport_height) if isinstance(viewport_height, int) else None),
+        diagnostics=diagnostics,
+    )
 
 
 def format_snapshot_for_llm(
@@ -420,6 +518,7 @@ def format_snapshot_for_llm(
     *,
     max_elements: int = 60,
     query: str | None = None,
+    priority_ids: Sequence[str] | None = None,
 ) -> str:
     """Format a snapshot into a compact, LLM-friendly text representation."""
 
@@ -432,8 +531,21 @@ def format_snapshot_for_llm(
     lines.append(f"Interactive elements (showing up to {max_elements}):")
 
     elements = list(snapshot.elements)
+    if priority_ids:
+        index = {element.stable_id: element for element in elements}
+        prioritized = [index[stable_id] for stable_id in priority_ids if stable_id in index]
+        remaining = [element for element in elements if element.stable_id not in set(priority_ids)]
+        elements = prioritized + remaining
     if query:
-        elements = rank_elements(elements, query=query, page_url=snapshot.url)
+        # Keep user-provided priority IDs at the top, then rank the remainder.
+        if priority_ids:
+            keep = {stable_id for stable_id in priority_ids}
+            head = [element for element in elements if element.stable_id in keep]
+            tail = [element for element in elements if element.stable_id not in keep]
+            tail = rank_elements(tail, query=query, page_url=snapshot.url)
+            elements = head + tail
+        else:
+            elements = rank_elements(elements, query=query, page_url=snapshot.url)
         lines.append("Elements are sorted by predicted relevance to the goal.")
 
     elements = elements[:max_elements]
@@ -488,6 +600,30 @@ def format_snapshot_for_llm(
         if label_counts.get(_label_key(element), 0) > 1 and element.bounding_box:
             x, y, w, h = element.bounding_box
             bbox_hint = f" bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}"
-        hints = f"{(' ' + frame_hint) if frame_hint else ''}{bbox_hint}"
+        reason_hint = ""
+        if element.interactive_reason and (element.interactive_confidence or 0.0) < 0.55:
+            reason_hint = f" reason={element.interactive_reason}"
+        viewport_hint = ""
+        if element.in_viewport is False:
+            viewport_hint = " offscreen"
+        hints = f"{(' ' + frame_hint) if frame_hint else ''}{bbox_hint}{reason_hint}{viewport_hint}"
         lines.append(f"- {element.stable_id}: {label}{hints}")
     return "\n".join(lines).strip()
+
+
+def _in_viewport(
+    bbox: tuple[float, float, float, float] | None,
+    *,
+    viewport_width: int | None,
+    viewport_height: int | None,
+) -> bool | None:
+    if not bbox or not viewport_width or not viewport_height:
+        return None
+    x, y, w, h = bbox
+    if w <= 0 or h <= 0:
+        return False
+    left = x
+    top = y
+    right = x + w
+    bottom = y + h
+    return not (right < 0 or bottom < 0 or left > viewport_width or top > viewport_height)

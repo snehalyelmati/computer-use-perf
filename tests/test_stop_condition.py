@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.snapshot import PageSnapshot
 from src.agent.core import agent as agent_mod
-from src.agent.models.actions import OrchestratorDecision, StepOutput, ClickGuardDecision
+from src.agent.models.actions import OrchestratorDecision, SnapshotFilterOutput, StepOutput
 
 
 @dataclass
@@ -39,13 +39,13 @@ async def test_run_does_not_stop_on_worker_done(monkeypatch: pytest.MonkeyPatch,
         call_tools=[],
         custom_output_args=OrchestratorDecision(done=False, worker_goal="noop"),
     )
+    filter_model = TestModel(
+        call_tools=[],
+        custom_output_args=SnapshotFilterOutput(useful_text_lines=[], priority_element_ids=[], notes=None),
+    )
     worker_model = TestModel(
         call_tools=[],
         custom_output_args=StepOutput(done=True, summary="delegated goal complete", next_goal=None),
-    )
-    guard_model = TestModel(
-        call_tools=[],
-        custom_output_args=ClickGuardDecision(allow=True, rationale="ok", alternatives=[]),
     )
 
     async def fake_launch_browser(_config: BrowserConfig) -> _StubSession:
@@ -65,7 +65,7 @@ async def test_run_does_not_stop_on_worker_done(monkeypatch: pytest.MonkeyPatch,
 
     orig_build_orchestrator = agent_mod.build_orchestrator_agent
     orig_build_worker = agent_mod.build_browser_worker_agent
-    orig_build_guard = agent_mod.build_click_guard_agent
+    orig_build_filter = agent_mod.build_snapshot_filter_agent
 
     monkeypatch.setattr(agent_mod, "launch_browser", fake_launch_browser)
     monkeypatch.setattr(agent_mod, "close_browser", fake_close_browser)
@@ -81,8 +81,8 @@ async def test_run_does_not_stop_on_worker_done(monkeypatch: pytest.MonkeyPatch,
     )
     monkeypatch.setattr(
         agent_mod,
-        "build_click_guard_agent",
-        lambda _model, *, model_settings: orig_build_guard(guard_model, model_settings=model_settings),
+        "build_snapshot_filter_agent",
+        lambda _model, *, model_settings: orig_build_filter(filter_model, model_settings=model_settings),
     )
     monkeypatch.setattr(
         agent_mod,

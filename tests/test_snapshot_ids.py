@@ -50,4 +50,7 @@ def test_attribute_map_normalizes_case() -> None:
 
 
 def test_is_interactive_cursor_pointer() -> None:
-    assert snapshot._is_interactive("DIV", None, {}, "pointer")
+    is_interactive, reason, confidence = snapshot._interactive_reason("DIV", None, {}, "pointer")
+    assert is_interactive is True
+    assert reason == "cursor_pointer"
+    assert confidence < 0.6

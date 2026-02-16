@@ -56,7 +56,6 @@ async def test_browser_worker_registers_semantic_tools() -> None:
         recent_memory=(),
         no_progress_steps=0,
         stuck_threshold=2,
-        decoy_guard_enabled=True,
         prior_tool=None,
         prior_element_id=None,
     )

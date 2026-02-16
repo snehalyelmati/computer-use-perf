@@ -30,8 +30,8 @@ from src.agent.metrics import (
     usage_stats_from_result,
     write_run_summary,
 )
-from src.agent.models.actions import ClickGuardDecision, OrchestratorDecision, StepOutput, ToolExecutionResult
-from src.agent.prompts.system import CLICK_GUARD_PROMPT, ORCHESTRATOR_PROMPT, STEP_PROMPT, SYSTEM_PROMPT
+from src.agent.models.actions import OrchestratorDecision, SnapshotFilterOutput, StepOutput, ToolExecutionResult
+from src.agent.prompts.system import FILTER_PROMPT, ORCHESTRATOR_PROMPT, STEP_PROMPT, SYSTEM_PROMPT
 from src.agent.tools import semantic
 
 logger = logging.getLogger(__name__)
@@ -43,10 +43,13 @@ class AgentState:
     active_frame_id: str | None = None
     memory: list[str] = field(default_factory=list)
     last_summary: str | None = None
-    last_snapshot_digest: str | None = None
+    last_page_fingerprint: str | None = None
     no_progress_steps: int = 0
     last_tool: str | None = None
     last_element_id: str | None = None
+    last_filter_fingerprint: str | None = None
+    last_filter_output: SnapshotFilterOutput | None = None
+    last_worker_goal: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,7 +62,6 @@ class WorkerDeps:
     recent_memory: tuple[str, ...]
     no_progress_steps: int
     stuck_threshold: int
-    decoy_guard_enabled: bool
     prior_tool: str | None
     prior_element_id: str | None
 
@@ -122,10 +124,134 @@ def _format_memory(memory: list[str], *, limit: int = 10) -> str:
     lines = [f"{idx + 1}. {item}" for idx, item in enumerate(recent)]
     return "\n".join(lines)
 
-def _snapshot_digest(url: str, title: str | None, elements: list[ElementSnapshot]) -> str:
-    ids = [element.stable_id for element in elements[:80]]
-    material = "\n".join([url, title or "", *ids])
+def _normalize_label(value: str | None) -> str:
+    return " ".join((value or "").split()).strip().lower()
+
+def _element_fingerprint_line(element: ElementSnapshot) -> str:
+    attrs = element.attributes or {}
+    important_attrs = []
+    for key in ["id", "name", "type", "placeholder", "aria-label", "title", "alt", "href", "value"]:
+        if value := attrs.get(key):
+            important_attrs.append(f"{key}={_normalize_label(str(value))}")
+    parts = [
+        element.stable_id,
+        _normalize_label(element.role),
+        _normalize_label(element.name),
+        _normalize_label(element.text),
+        _normalize_label(element.node_name),
+        "|".join(important_attrs),
+    ]
+    return "\t".join(parts)
+
+def _page_fingerprint(snapshot: Any) -> str:
+    elements = list(getattr(snapshot, "elements", []) or [])
+    elements.sort(key=lambda el: el.stable_id)
+    raw_lines = _select_raw_text_lines(list(getattr(snapshot, "raw_text", []) or []), limit=60)
+    lines = [snapshot.url or "", snapshot.title or ""]
+    for element in elements[:120]:
+        lines.append(_element_fingerprint_line(element))
+    if raw_lines:
+        lines.append("RAW_TEXT:")
+        lines.extend(raw_lines)
+    material = "\n".join(lines)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+def _format_element_brief(element: ElementSnapshot) -> str:
+    role = (element.role or "").strip()
+    name = (element.name or "").strip()
+    text = (element.text or "").strip()
+    tag = (element.node_name or "").strip()
+    attrs = element.attributes or {}
+    important_attrs = {
+        key: attrs.get(key)
+        for key in [
+            "id",
+            "name",
+            "type",
+            "placeholder",
+            "aria-label",
+            "title",
+            "alt",
+            "href",
+            "value",
+        ]
+        if attrs.get(key)
+    }
+    attr_str = " ".join(f'{key}="{value}"' for key, value in important_attrs.items()) if important_attrs else ""
+    label_parts = [part for part in [role, name, text, tag] if part]
+    label = " | ".join(label_parts) if label_parts else "element"
+    if attr_str:
+        label = f"{label} ({attr_str})"
+    bbox_hint = ""
+    if element.bounding_box:
+        x, y, w, h = element.bounding_box
+        bbox_hint = f" bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}"
+    frame_hint = ""
+    if element.frame_name or element.frame_url:
+        frame_name = element.frame_name or ""
+        frame_url = element.frame_url or ""
+        frame_hint = f" frame={frame_name or frame_url}".strip()
+    reason_hint = ""
+    if element.interactive_reason and (element.interactive_confidence or 0.0) < 0.55:
+        reason_hint = f" reason={element.interactive_reason}"
+    viewport_hint = ""
+    if element.in_viewport is False:
+        viewport_hint = " offscreen"
+    hints = f"{bbox_hint}{(' ' + frame_hint) if frame_hint else ''}{reason_hint}{viewport_hint}"
+    return f"{element.stable_id}: {label}{hints}"
+
+def _select_raw_text_lines(raw_text: list[str] | tuple[str, ...] | Any, *, limit: int = 120) -> list[str]:
+    if not raw_text:
+        return []
+    seen: set[str] = set()
+    candidates: list[tuple[float, int, str]] = []
+    for idx, line in enumerate(list(raw_text)[:5000]):
+        normalized = " ".join(str(line).split())
+        if len(normalized) < 3 or len(normalized) > 220:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        has_digit = any(ch.isdigit() for ch in normalized)
+        symbol_count = sum(1 for ch in normalized if ch in ":=/@#_-")
+        alpha_count = sum(1 for ch in normalized if ch.isalpha())
+        score = 0.0
+        score += 2.0 if has_digit else 0.0
+        score += min(2.0, float(symbol_count) / 2.0)
+        score += min(3.0, float(alpha_count) / 40.0)
+        candidates.append((score, idx, normalized))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in candidates[:limit]]
+
+def _snapshot_diff(prev: Any | None, curr: Any) -> tuple[str, list[str]]:
+    if not prev:
+        return "First snapshot (no prior snapshot to diff).", []
+    prev_map = {el.stable_id: el for el in list(getattr(prev, "elements", []) or [])}
+    curr_map = {el.stable_id: el for el in list(getattr(curr, "elements", []) or [])}
+    new_ids = sorted([sid for sid in curr_map.keys() if sid not in prev_map])
+    removed_ids = sorted([sid for sid in prev_map.keys() if sid not in curr_map])
+    changed: list[str] = []
+    for sid in sorted(set(prev_map.keys()) & set(curr_map.keys())):
+        a = prev_map[sid]
+        b = curr_map[sid]
+        a_key = (_normalize_label(a.role), _normalize_label(a.name), _normalize_label(a.text), _normalize_label(a.node_name))
+        b_key = (_normalize_label(b.role), _normalize_label(b.name), _normalize_label(b.text), _normalize_label(b.node_name))
+        if a_key != b_key:
+            changed.append(sid)
+    lines: list[str] = []
+    lines.append(f"new_elements={len(new_ids)} changed_labels={len(changed)} removed_elements={len(removed_ids)}")
+    detail_ids: list[str] = []
+    for sid in new_ids[:8]:
+        detail_ids.append(sid)
+        lines.append(f"+ {_format_element_brief(curr_map[sid])}")
+    for sid in changed[:8]:
+        detail_ids.append(sid)
+        lines.append(f"~ {_format_element_brief(curr_map[sid])}")
+    for sid in removed_ids[:8]:
+        detail_ids.append(sid)
+        lines.append(f"- {sid}: (removed)")
+    return "\n".join(lines), detail_ids
 
 
 def build_orchestrator_agent(model: OpenRouterModel, *, model_settings: dict[str, Any]) -> Agent[None, OrchestratorDecision]:
@@ -137,11 +263,13 @@ def build_orchestrator_agent(model: OpenRouterModel, *, model_settings: dict[str
         retries=1,
     )
 
-def build_click_guard_agent(model: OpenRouterModel, *, model_settings: dict[str, Any]) -> Agent[None, ClickGuardDecision]:
+def build_snapshot_filter_agent(
+    model: OpenRouterModel, *, model_settings: dict[str, Any]
+) -> Agent[None, SnapshotFilterOutput]:
     return Agent(
         model,
-        output_type=ClickGuardDecision,
-        system_prompt=(SYSTEM_PROMPT, CLICK_GUARD_PROMPT),
+        output_type=SnapshotFilterOutput,
+        system_prompt=(SYSTEM_PROMPT, FILTER_PROMPT),
         model_settings=model_settings,
         retries=1,
     )
@@ -150,7 +278,6 @@ def build_click_guard_agent(model: OpenRouterModel, *, model_settings: dict[str,
 def build_browser_worker_agent(
     model: OpenRouterModel, *, model_settings: dict[str, Any]
 ) -> Agent[WorkerDeps, StepOutput]:
-    click_guard = build_click_guard_agent(model, model_settings=model_settings)
     agent: Agent[WorkerDeps, StepOutput] = Agent(
         model,
         deps_type=WorkerDeps,
@@ -160,108 +287,9 @@ def build_browser_worker_agent(
         retries=1,
     )
 
-    def _format_element_brief(element: ElementSnapshot) -> str:
-        role = (element.role or "").strip()
-        name = (element.name or "").strip()
-        text = (element.text or "").strip()
-        tag = (element.node_name or "").strip()
-        attrs = element.attributes or {}
-        important_attrs = {
-            key: attrs.get(key)
-            for key in [
-                "id",
-                "name",
-                "type",
-                "placeholder",
-                "aria-label",
-                "title",
-                "alt",
-                "href",
-                "value",
-            ]
-            if attrs.get(key)
-        }
-        attr_str = (
-            " ".join(f'{key}="{value}"' for key, value in important_attrs.items())
-            if important_attrs
-            else ""
-        )
-        label_parts = [part for part in [role, name, text, tag] if part]
-        label = " | ".join(label_parts) if label_parts else "element"
-        if attr_str:
-            label = f"{label} ({attr_str})"
-        bbox_hint = ""
-        if element.bounding_box:
-            x, y, w, h = element.bounding_box
-            bbox_hint = f" bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}"
-        frame_hint = ""
-        if element.frame_name or element.frame_url:
-            frame_name = element.frame_name or ""
-            frame_url = element.frame_url or ""
-            frame_hint = f" frame={frame_name or frame_url}".strip()
-        hints = f"{bbox_hint}{(' ' + frame_hint) if frame_hint else ''}"
-        return f"{element.stable_id}: {label}{hints}"
-
     @agent.tool(name="click_element")
     async def click_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
         start = time.perf_counter()
-        if (
-            ctx.deps.decoy_guard_enabled
-            and ctx.deps.no_progress_steps >= ctx.deps.stuck_threshold
-            and ctx.deps.prior_tool == "click_element"
-            and ctx.deps.prior_element_id == element_id
-        ):
-            page_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
-            all_elements = list(ctx.deps.tool_context.element_index.elements.values())
-            candidates = search_elements(all_elements, query=ctx.deps.worker_goal, limit=8, page_url=page_url)
-            candidate_ids = {element.stable_id for element in candidates}
-
-            chosen = ctx.deps.tool_context.element_index.elements.get(element_id)
-            chosen_line = _format_element_brief(chosen) if chosen else f"{element_id}: (unknown)"
-            candidate_lines = "\n".join(_format_element_brief(element) for element in candidates) if candidates else "None."
-            memory_text = "\n".join(f"- {item}" for item in ctx.deps.recent_memory) if ctx.deps.recent_memory else "None."
-            guard_prompt = (
-                f"Overall goal: {ctx.deps.overall_goal}\n"
-                f"Worker goal: {ctx.deps.worker_goal}\n"
-                f"Progress: no_progress_steps={ctx.deps.no_progress_steps} "
-                f"(stuck_threshold={ctx.deps.stuck_threshold}) "
-                f"prior_tool={ctx.deps.prior_tool or 'None'} "
-                f"prior_element_id={ctx.deps.prior_element_id or 'None'}\n\n"
-                f"Recent memory:\n{memory_text}\n\n"
-                f"Chosen click:\n{chosen_line}\n\n"
-                f"Alternative candidates:\n{candidate_lines}\n"
-            )
-            guard_result = await click_guard.run(guard_prompt)
-            decision = guard_result.output
-            alternatives = [
-                alt for alt in (decision.alternatives or []) if alt in candidate_ids and alt != element_id
-            ][:5]
-            if not decision.allow and alternatives:
-                ctx.deps.tool_context.last_tool = "click_element"
-                ctx.deps.tool_context.last_element_id = element_id
-                duration_ms = int((time.perf_counter() - start) * 1000)
-                logger.debug(
-                    "tool=%s step=%s ok=%s element_id=%s duration_ms=%s",
-                    "click_element",
-                    ctx.deps.step,
-                    False,
-                    element_id,
-                    duration_ms,
-                )
-                ctx.deps.metrics.emit(
-                    "tool_call",
-                    step=ctx.deps.step,
-                    tool="click_element",
-                    ok=False,
-                    duration_ms=duration_ms,
-                    element_id=element_id,
-                )
-                alt_str = ", ".join(alternatives)
-                return ToolExecutionResult(
-                    ok=False,
-                    message=f"Click blocked by decoy guard: {decision.rationale}. Try: {alt_str}",
-                )
-
         result = await semantic.click_element(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
         logger.debug(
@@ -623,11 +651,14 @@ class BrowserAgent:
         model = _build_openrouter_model(self.llm_config)
         model_settings = _model_settings(self.llm_config)
         orchestrator = build_orchestrator_agent(model, model_settings=model_settings)
+        snapshot_filter = build_snapshot_filter_agent(model, model_settings=model_settings)
         browser_worker = build_browser_worker_agent(model, model_settings=model_settings)
 
         session = await launch_browser(self.browser_config)
         try:
             await session.page.goto(self.agent_config.target_url)
+            prev_snapshot = None
+            stop_reason: str | None = None
             for step in range(self.agent_config.max_steps):
                 self.state.step = step + 1
                 step_started = time.perf_counter()
@@ -642,6 +673,15 @@ class BrowserAgent:
                     title=snapshot.title,
                     elements=len(snapshot.elements),
                 )
+                if snapshot.diagnostics:
+                    for name, duration_ms in (snapshot.diagnostics.durations_ms or {}).items():
+                        metrics.emit(
+                            "cdp_call",
+                            step=self.state.step,
+                            name=name,
+                            duration_ms=int(duration_ms),
+                            **(snapshot.diagnostics.size_hints or {}),
+                        )
                 logger.info(
                     "Step %s snapshot duration_ms=%s elements=%s url=%s",
                     self.state.step,
@@ -649,23 +689,35 @@ class BrowserAgent:
                     len(snapshot.elements),
                     snapshot.url,
                 )
-                snapshot_digest = _snapshot_digest(snapshot.url, snapshot.title, list(snapshot.elements))
-                if self.state.last_snapshot_digest == snapshot_digest:
+                diff_text, _diff_ids = _snapshot_diff(prev_snapshot, snapshot)
+                page_fingerprint = _page_fingerprint(snapshot)
+                if self.state.last_page_fingerprint == page_fingerprint:
                     self.state.no_progress_steps += 1
                 else:
                     self.state.no_progress_steps = 0
-                self.state.last_snapshot_digest = snapshot_digest
+                self.state.last_page_fingerprint = page_fingerprint
+
+                if self.state.no_progress_steps >= self.agent_config.unchanged_abort_threshold:
+                    stop_reason = "unchanged_fingerprint_abort"
+                    logger.warning(
+                        "Aborting: page fingerprint unchanged for %s consecutive steps (threshold=%s)",
+                        self.state.no_progress_steps,
+                        self.agent_config.unchanged_abort_threshold,
+                    )
+                    metrics.emit(
+                        "step_end",
+                        step=self.state.step,
+                        done=True,
+                        stop_reason=stop_reason,
+                        duration_ms=int((time.perf_counter() - step_started) * 1000),
+                    )
+                    break
 
                 element_index = build_element_index(snapshot)
                 tool_context = semantic.build_tool_context(
                     session,
                     element_index,
                     active_frame_id=self.state.active_frame_id,
-                )
-                snapshot_text_orchestrator = format_snapshot_for_llm(
-                    snapshot,
-                    max_elements=self.agent_config.max_elements,
-                    query=self.agent_config.goal,
                 )
 
                 memory_text = _format_memory(self.state.memory, limit=self.agent_config.memory_steps)
@@ -684,9 +736,87 @@ class BrowserAgent:
                         "shortlisting candidates (find_elements), switching frames, navigating, or using a different "
                         "candidate with the same label but a different bbox/frame."
                     )
+
+                filter_output = self.state.last_filter_output
+                if self.state.last_filter_fingerprint != page_fingerprint or filter_output is None:
+                    raw_lines = _select_raw_text_lines(list(snapshot.raw_text), limit=120)
+                    page_url = getattr(session.page, "url", "") or ""
+                    candidates = search_elements(
+                        list(snapshot.elements),
+                        query=self.agent_config.goal,
+                        limit=min(80, max(20, self.agent_config.max_elements)),
+                        page_url=page_url,
+                    )
+                    candidate_lines = "\n".join(_format_element_brief(el) for el in candidates) if candidates else "None."
+                    raw_text_block = "\n".join(raw_lines) if raw_lines else "None."
+                    last_summary = self.state.last_summary or "None."
+                    last_worker_goal = self.state.last_worker_goal or "None."
+                    filter_prompt = (
+                        f"Overall goal: {self.agent_config.goal}\n\n"
+                        f"{progress_text}\n"
+                        f"Last worker goal: {last_worker_goal}\n"
+                        f"Last step summary: {last_summary}\n\n"
+                        f"Diff since prior snapshot:\n{diff_text}\n\n"
+                        f"Candidate interactive elements (stable ids + labels):\n{candidate_lines}\n\n"
+                        f"Candidate page text lines:\n{raw_text_block}\n"
+                    )
+
+                    filter_started = time.perf_counter()
+                    filter_result = await snapshot_filter.run(filter_prompt)
+                    filter_duration_ms = int((time.perf_counter() - filter_started) * 1000)
+                    filter_usage = usage_stats_from_result(filter_result)
+                    filter_cost = cost_stats_from_result(filter_result)
+                    total_input_tokens += filter_usage.input_tokens
+                    total_output_tokens += filter_usage.output_tokens
+                    if filter_cost:
+                        total_cost_usd += filter_cost.cost_usd
+                    metrics.emit(
+                        "agent_call",
+                        step=self.state.step,
+                        agent="snapshot_filter",
+                        duration_ms=filter_duration_ms,
+                        input_tokens=filter_usage.input_tokens,
+                        output_tokens=filter_usage.output_tokens,
+                        requests=filter_usage.requests,
+                        tool_calls=filter_usage.tool_calls,
+                        cost_usd=(filter_cost.cost_usd if filter_cost else None),
+                        upstream_inference_cost_usd=(filter_cost.upstream_inference_cost_usd if filter_cost else None),
+                    )
+                    filter_output = filter_result.output
+                    valid_ids = set(element_index.elements.keys())
+                    priority_ids: list[str] = []
+                    for sid in filter_output.priority_element_ids or []:
+                        if sid in valid_ids and sid not in priority_ids:
+                            priority_ids.append(sid)
+                    filter_output = SnapshotFilterOutput(
+                        useful_text_lines=list(filter_output.useful_text_lines or []),
+                        priority_element_ids=priority_ids,
+                        notes=filter_output.notes,
+                    )
+                    self.state.last_filter_output = filter_output
+                    self.state.last_filter_fingerprint = page_fingerprint
+
+                useful_lines = filter_output.useful_text_lines if filter_output else []
+                useful_block = "\n".join(useful_lines) if useful_lines else "None."
+                priority_ids = (filter_output.priority_element_ids if filter_output else [])[:20]
+                priority_lines = (
+                    "\n".join(_format_element_brief(element_index.elements[sid]) for sid in priority_ids if sid in element_index.elements)
+                    if priority_ids
+                    else "None."
+                )
+
+                snapshot_text_orchestrator = format_snapshot_for_llm(
+                    snapshot,
+                    max_elements=self.agent_config.max_elements,
+                    query=self.agent_config.goal,
+                    priority_ids=priority_ids,
+                )
                 orchestrator_prompt = (
                     f"Overall goal: {self.agent_config.goal}\n\n"
                     f"{progress_text}\n\n"
+                    f"Filtered useful lines:\n{useful_block}\n\n"
+                    f"Diff since prior snapshot:\n{diff_text}\n\n"
+                    f"Priority interactive elements:\n{priority_lines}\n\n"
                     f"Memory (recent):\n{memory_text}\n\n"
                     f"Page snapshot:\n{snapshot_text_orchestrator}\n"
                     f"{stuck_hint}"
@@ -715,6 +845,7 @@ class BrowserAgent:
                     ),
                 )
                 decision = decision_result.output
+                self.state.last_worker_goal = decision.worker_goal
                 logger.info(
                     "Step %s orchestrator duration_ms=%s in_tokens=%s out_tokens=%s cost_usd=%s decision=%s",
                     self.state.step,
@@ -738,6 +869,7 @@ class BrowserAgent:
                     snapshot,
                     max_elements=self.agent_config.max_elements,
                     query=decision.worker_goal,
+                    priority_ids=priority_ids,
                 )
                 deps = WorkerDeps(
                     tool_context=tool_context,
@@ -748,7 +880,6 @@ class BrowserAgent:
                     recent_memory=tuple(self.state.memory[-self.agent_config.memory_steps :]),
                     no_progress_steps=self.state.no_progress_steps,
                     stuck_threshold=self.agent_config.stuck_threshold,
-                    decoy_guard_enabled=self.agent_config.decoy_guard_enabled,
                     prior_tool=self.state.last_tool,
                     prior_element_id=self.state.last_element_id,
                 )
@@ -757,6 +888,9 @@ class BrowserAgent:
                     + "\n\n"
                     + f"Overall goal: {self.agent_config.goal}\n\n"
                     + f"{progress_text}\n\n"
+                    + f"Filtered useful lines:\n{useful_block}\n\n"
+                    + f"Diff since prior snapshot:\n{diff_text}\n\n"
+                    + f"Priority interactive elements:\n{priority_lines}\n\n"
                     + f"Memory (recent):\n{memory_text}\n\n"
                     + f"Page snapshot:\n{snapshot_text_worker}\n"
                     + (stuck_hint + "\n" if stuck_hint else "")
@@ -810,6 +944,7 @@ class BrowserAgent:
                     logger.info(
                         "Worker reported done=true (delegated goal complete); continuing until orchestrator done=true."
                     )
+                prev_snapshot = snapshot
         finally:
             await close_browser(session)
             run_duration_ms = int((time.perf_counter() - run_started) * 1000)
@@ -821,6 +956,7 @@ class BrowserAgent:
                     "duration_ms": run_duration_ms,
                     "steps": self.state.step,
                     "last_summary": self.state.last_summary,
+                    "stop_reason": stop_reason,
                     "input_tokens": total_input_tokens,
                     "output_tokens": total_output_tokens,
                     "total_tokens": total_input_tokens + total_output_tokens,

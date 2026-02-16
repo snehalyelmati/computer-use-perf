@@ -41,6 +41,6 @@ class AgentConfig:
     max_elements: int = 60
     memory_steps: int = 10
     stuck_threshold: int = 2
-    decoy_guard_enabled: bool = True
+    unchanged_abort_threshold: int = 3
     log_level: str = "INFO"
     metrics_enabled: bool = True

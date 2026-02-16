@@ -8,6 +8,16 @@ from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.core.agent import run_agent_sync
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="General-purpose browser agent")
     parser.add_argument("--url", dest="target_url", required=True, help="Target URL")
@@ -30,19 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=2,
         help="Steps with no progress before forcing recovery behavior",
     )
-    decoy_group = parser.add_mutually_exclusive_group()
-    decoy_group.add_argument(
-        "--decoy-guard",
-        dest="decoy_guard_enabled",
-        action="store_true",
-        default=True,
-        help="Enable extra guardrails against repeated decoy clicks (default: enabled)",
-    )
-    decoy_group.add_argument(
-        "--no-decoy-guard",
-        dest="decoy_guard_enabled",
-        action="store_false",
-        help="Disable extra guardrails against repeated decoy clicks",
+    parser.add_argument(
+        "--unchanged-abort-threshold",
+        type=_positive_int,
+        default=3,
+        help="Abort if the page fingerprint is unchanged for this many consecutive steps",
     )
     parser.add_argument(
         "--headless",
@@ -72,7 +74,7 @@ def main() -> None:
         max_steps=args.max_steps,
         max_elements=args.max_elements,
         stuck_threshold=args.stuck_threshold,
-        decoy_guard_enabled=bool(args.decoy_guard_enabled),
+        unchanged_abort_threshold=args.unchanged_abort_threshold,
         log_level=str(args.log_level),
         metrics_enabled=not bool(args.no_metrics),
     )

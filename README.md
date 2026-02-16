@@ -10,8 +10,10 @@ General-purpose browser agent (scaffold).
 flowchart LR
     subgraph LLM[LLM Infrastructure]
         OR[OpenRouter]
+        FILT[PydanticAI Snapshot Filter]
         ORCH[PydanticAI Orchestrator]
         WORK[PydanticAI Browser Worker]
+        OR --> FILT
         OR --> ORCH
         OR --> WORK
     end
@@ -22,6 +24,8 @@ flowchart LR
         CDP --> PW
     end
 
+    CDP -->|Context Snapshot| FILT
+    FILT -->|Filtered lines + priority ids| ORCH
     CDP -->|Context Snapshot| ORCH
     CDP -->|Context Snapshot| WORK
     ORCH -->|Delegated Goal| WORK
@@ -33,13 +37,14 @@ flowchart LR
 - Set `OPENROUTER_API_KEY` for OpenRouter access
 
 ## Run
-- `uv run main.py --url <target> --goal "<task>" [--headless] [--max-elements 60] [--stuck-threshold 2] [--no-decoy-guard] [--log-level INFO] [--no-metrics]`
+- `uv run main.py --url <target> --goal "<task>" [--headless] [--max-elements 60] [--stuck-threshold 2] [--unchanged-abort-threshold 3] [--log-level INFO] [--no-metrics]`
 
 ### Outputs
 - Logs: `logs/agent.log`
 - Metrics (JSONL): `logs/metrics.jsonl` (timings, token usage, and OpenRouter cost when available)
 - Run summary: `logs/run_summary.json`
 - Details: `docs/observability.md`
+- Analyze timings: `uv run python scripts/analyze_metrics.py logs/metrics.jsonl`
 
 ## Architecture
 
@@ -75,13 +80,15 @@ This project is a general-purpose browser agent built around a clear separation 
 
 ```mermaid
 sequenceDiagram
+    participant Filter as PydanticAI Snapshot Filter
     participant Orchestrator as PydanticAI Orchestrator
     participant Worker as PydanticAI Browser Worker
     participant CDP as CDP Snapshotter
     participant PW as Playwright Executor
 
-    Orchestrator->>CDP: Request context snapshot
-    CDP-->>Orchestrator: Structured snapshot + element ids
+    Filter->>CDP: Request context snapshot
+    CDP-->>Filter: Structured snapshot + element ids
+    Filter-->>Orchestrator: Filtered lines + priority ids
     Orchestrator->>Worker: Delegated sub-goal + snapshot
     Worker->>PW: Semantic tool calls (stable ids)
     PW-->>Worker: Tool results
@@ -117,10 +124,11 @@ The agent uses semantic tools that reference stable element IDs:
 ## Recommended Agent Loop
 
 1. **Extract context via CDP** into a structured snapshot.
-2. **Ask the orchestrator** for the next delegated sub-goal.
-3. **Ask the browser worker** to execute that sub-goal using semantic tools.
-4. **Update memory + stop criteria** (`done` or `max_steps`).
-5. **Repeat** until the overall goal is complete.
+2. **Filter snapshot content** into high-signal lines + a priority shortlist (cached when the page fingerprint is unchanged).
+3. **Ask the orchestrator** for the next delegated sub-goal using filtered context + diffs.
+4. **Ask the browser worker** to execute that sub-goal using semantic tools.
+5. **Update memory + stop criteria** (`done`, `max_steps`, or unchanged fingerprint abort).
+6. **Repeat** until the overall goal is complete.
 
 ## Guardrails
 
@@ -128,7 +136,7 @@ The agent uses semantic tools that reference stable element IDs:
 - Pass stable element IDs, never raw selectors, to the LLM.
 - Keep tools generic and reusable across websites.
 - When the page appears unchanged for multiple steps, the agent forces recovery behavior (do not repeat the previous click; shortlist candidates via `find_elements`, read text, or try alternatives).
-- Optional decoy click guard blocks repeated stuck clicks and suggests alternative stable IDs (disable with `--no-decoy-guard`).
+- If the page fingerprint is unchanged for multiple steps (default: 3), the agent aborts early with a clear stop reason.
 
 ## Roadmap
 

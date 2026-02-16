@@ -22,24 +22,25 @@ Return a JSON object matching this schema:
 - rationale: string | null
 """.strip()
 
-CLICK_GUARD_PROMPT = """
-You are a click guard that prevents the agent from repeatedly clicking likely decoy/bait elements when the page is not changing.
+FILTER_PROMPT = """
+You are a snapshot filter. Your job is to reduce noise and highlight what matters on the page *for the goal*.
 
 You will be given:
-- The overall goal and the current delegated worker goal.
-- A progress summary (no_progress_steps, last tool/element).
-- The chosen element the worker is trying to click.
-- A shortlist of alternative candidate elements (stable ids + brief labels).
+- The overall goal and progress summary.
+- A diff summary since the prior snapshot.
+- A shortlist of candidate interactive elements (stable ids + brief labels).
+- A set of candidate page text lines.
 
 Rules:
+- Extract ONLY useful text lines (task instructions, codes, values, form labels, errors). Remove filler (section headers, repeated patterns).
+- Return each useful text line as a separate list item; do not number the lines.
+- Do not invent element IDs; priority_element_ids must be chosen only from the provided stable IDs.
 - Never request or use raw CSS/XPath selectors.
-- Prefer allowing the click unless there are strong signs it's a decoy, repeated non-progress, or mismatched to the goal.
-- If you block, provide 1–5 alternative stable element IDs from the shortlist that are more likely to advance the worker goal.
 
 Return a JSON object matching this schema:
-- allow: boolean
-- rationale: string
-- alternatives: list[string]
+- useful_text_lines: list[string]
+- priority_element_ids: list[string]
+- notes: string | null
 """.strip()
 
 STEP_PROMPT = """

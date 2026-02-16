@@ -54,12 +54,18 @@ class OrchestratorDecision(BaseModel):
     )
 
 
-class ClickGuardDecision(BaseModel):
-    """Structured output returned by the click guard to block repeated decoy clicks."""
+class SnapshotFilterOutput(BaseModel):
+    """Structured output returned by the snapshot filter stage."""
 
-    allow: bool = Field(..., description="Allow the requested click if true; otherwise block it")
-    rationale: str = Field(..., description="Brief explanation for the decision")
-    alternatives: list[str] = Field(
+    useful_text_lines: list[str] = Field(
         default_factory=list,
-        description="Suggested alternative stable element ids to try instead",
+        description="High-signal page text lines (one line per item, no numbering).",
+    )
+    priority_element_ids: list[str] = Field(
+        default_factory=list,
+        description="Shortlist of stable element ids likely to matter for the goal.",
+    )
+    notes: str | None = Field(
+        None,
+        description="Optional short notes about what matters on the page right now.",
     )
