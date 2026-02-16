@@ -136,6 +136,24 @@ async def _insert_text(session: CDPSession, text: str) -> bool:
         return False
     return True
 
+async def _dom_focus(backend_node_id: int, session: CDPSession) -> bool:
+    """Focus an element via DOM, bypassing visual obscuration."""
+    result = await _call_on_node(
+        backend_node_id,
+        session,
+        """
+        function () {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            this.focus();
+            if (this.select) this.select();
+            return document.activeElement === this;
+        }
+        """,
+    )
+    if not result:
+        return False
+    return bool(result.get("result", {}).get("value"))
+
 def _frame_tree_paths(frame_tree: dict[str, Any]) -> dict[str, list[int]]:
     paths: dict[str, list[int]] = {}
 
@@ -216,27 +234,19 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     if frame_error:
         return frame_error
     session = await _session_for_element(element, context)
-    info = await _viewport_info(element.backend_node_id, session)
-    if not info:
+    result = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function () {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            this.click();
+            return true;
+        }
+        """,
+    )
+    if not result:
         return ToolResult(ok=False, message="Click failed")
-    value = info.get("result", {}).get("value") if isinstance(info, dict) else None
-    if value and value.get("onTop"):
-        if not await _dispatch_click(session, value["x"], value["y"]):
-            return ToolResult(ok=False, message="Click failed")
-    else:
-        result = await _call_on_node(
-            element.backend_node_id,
-            session,
-            """
-            function () {
-                this.scrollIntoView({block: 'center', inline: 'center'});
-                this.click();
-                return true;
-            }
-            """,
-        )
-        if not result:
-            return ToolResult(ok=False, message="Click failed")
     return ToolResult(ok=True, message=f"Clicked {element_id}")
 
 
@@ -250,29 +260,8 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
     if frame_error:
         return frame_error
     session = await _session_for_element(element, context)
-    info = await _viewport_info(element.backend_node_id, session)
-    if not info:
-        return ToolResult(ok=False, message="Type failed")
-    value = info.get("result", {}).get("value") if isinstance(info, dict) else None
-    if value and not value.get("onTop"):
-        return ToolResult(ok=False, message="Type failed: element obscured")
-    if value and not await _dispatch_click(session, value["x"], value["y"]):
-        return ToolResult(ok=False, message="Type failed")
-    result = await _call_on_node(
-        element.backend_node_id,
-        session,
-        """
-        function () {
-            this.scrollIntoView({block: 'center', inline: 'center'});
-            if (this.select) {
-                this.select();
-            }
-            return true;
-        }
-        """,
-    )
-    if not result:
-        return ToolResult(ok=False, message="Type failed")
+    if not await _dom_focus(element.backend_node_id, session):
+        return ToolResult(ok=False, message="Type failed: element not focusable")
     if not await _insert_text(session, text):
         return ToolResult(ok=False, message="Type failed")
     return ToolResult(ok=True, message=f"Typed into {element_id}")
@@ -304,31 +293,57 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
     target_value = target_info.get("result", {}).get("value")
     if not source_value or not target_value:
         return ToolResult(ok=False, message="Drag failed")
-    if not source_value.get("onTop") or not target_value.get("onTop"):
+
+    # Try CDP coordinate-based drag if both elements are on top
+    if source_value.get("onTop") and target_value.get("onTop"):
+        try:
+            await session.send(
+                "Input.dispatchMouseEvent",
+                {"type": "mouseMoved", "x": source_value["x"], "y": source_value["y"], "button": "left"},
+            )
+            await session.send(
+                "Input.dispatchMouseEvent",
+                {"type": "mousePressed", "x": source_value["x"], "y": source_value["y"], "button": "left", "clickCount": 1},
+            )
+            await session.send(
+                "Input.dispatchMouseEvent",
+                {"type": "mouseMoved", "x": target_value["x"], "y": target_value["y"], "button": "left", "buttons": 1},
+            )
+            await session.send(
+                "Input.dispatchMouseEvent",
+                {"type": "mouseReleased", "x": target_value["x"], "y": target_value["y"], "button": "left", "clickCount": 1},
+            )
+            return ToolResult(ok=True, message=f"Dragged {source_id} -> {target_id}")
+        except Exception:
+            pass  # Fall through to DOM fallback
+
+    # DOM fallback — dispatch synthetic mouse events directly on elements
+    target_object_id = await _resolve_object_id(target.backend_node_id, session)
+    if not target_object_id:
+        return ToolResult(ok=False, message="Drag failed: cannot resolve target")
+    result = await _call_on_node(
+        source.backend_node_id,
+        session,
+        """
+        function (targetEl) {
+            const srcRect = this.getBoundingClientRect();
+            const tgtRect = targetEl.getBoundingClientRect();
+            const srcX = srcRect.left + srcRect.width / 2;
+            const srcY = srcRect.top + srcRect.height / 2;
+            const tgtX = tgtRect.left + tgtRect.width / 2;
+            const tgtY = tgtRect.top + tgtRect.height / 2;
+            const opts = {bubbles: true, cancelable: true};
+            this.dispatchEvent(new MouseEvent('mousedown', {...opts, clientX: srcX, clientY: srcY}));
+            this.dispatchEvent(new MouseEvent('mousemove', {...opts, clientX: tgtX, clientY: tgtY}));
+            targetEl.dispatchEvent(new MouseEvent('mousemove', {...opts, clientX: tgtX, clientY: tgtY}));
+            targetEl.dispatchEvent(new MouseEvent('mouseup', {...opts, clientX: tgtX, clientY: tgtY}));
+            return true;
+        }
+        """,
+        [{"objectId": target_object_id}],
+    )
+    if not result:
         return ToolResult(ok=False, message="Drag failed: element obscured")
-    source_x = source_value["x"]
-    source_y = source_value["y"]
-    target_x = target_value["x"]
-    target_y = target_value["y"]
-    try:
-        await session.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseMoved", "x": source_x, "y": source_y, "button": "left"},
-        )
-        await session.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": source_x, "y": source_y, "button": "left", "clickCount": 1},
-        )
-        await session.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseMoved", "x": target_x, "y": target_y, "button": "left", "buttons": 1},
-        )
-        await session.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": target_x, "y": target_y, "button": "left", "clickCount": 1},
-        )
-    except Exception as exc:  # pragma: no cover - runtime safety
-        return ToolResult(ok=False, message=f"Drag failed: {exc}")
     return ToolResult(ok=True, message=f"Dragged {source_id} -> {target_id}")
 
 
@@ -372,12 +387,6 @@ async def read_element_text(element_id: str, context: ToolContext) -> ToolResult
     if frame_error:
         return frame_error
     session = await _session_for_element(element, context)
-    info = await _viewport_info(element.backend_node_id, session)
-    if not info:
-        return ToolResult(ok=False, message="Read text failed")
-    value = info.get("result", {}).get("value") if isinstance(info, dict) else None
-    if value and not value.get("onTop"):
-        return ToolResult(ok=False, message="Read text failed: element obscured")
     result = await _call_on_node(
         element.backend_node_id,
         session,
