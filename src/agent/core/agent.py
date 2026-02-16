@@ -506,6 +506,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="click_element")
     async def click_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
+        """Click on an element. Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.click_element(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -540,6 +541,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="find_elements")
     async def find_elements(ctx: RunContext[WorkerDeps], query: str, limit: int = 8) -> ToolExecutionResult:
+        """Search for elements by text, label, or role. Returns matching element IDs and descriptions. Use when the element you need is not in the current snapshot."""
         start = time.perf_counter()
         limit = max(1, min(int(limit), 20))
         page_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
@@ -580,6 +582,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="type_text")
     async def type_text(ctx: RunContext[WorkerDeps], element_id: str, text: str) -> ToolExecutionResult:
+        """Focus an input/textarea and type text into it. Replaces any existing content."""
         start = time.perf_counter()
         result = await semantic.type_text(element_id, text, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -617,6 +620,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="drag_and_drop")
     async def drag_and_drop(ctx: RunContext[WorkerDeps], source_id: str, target_id: str) -> ToolExecutionResult:
+        """Drag source_id and drop it onto target_id. Use for sortable lists, kanban boards, sliders, etc."""
         start = time.perf_counter()
         result = await semantic.drag_and_drop(source_id, target_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -652,6 +656,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="wait")
     async def wait(ctx: RunContext[WorkerDeps], milliseconds: int) -> ToolExecutionResult:
+        """Pause for the given number of milliseconds (capped at 10 000). Use when the page needs time to load or animate."""
         start = time.perf_counter()
         result = await semantic.wait(milliseconds, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -683,6 +688,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="read_element_text")
     async def read_element_text(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
+        """Return the inner text of an element. Use to read content not fully shown in the snapshot."""
         start = time.perf_counter()
         result = await semantic.read_element_text(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -717,6 +723,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="scroll")
     async def scroll(ctx: RunContext[WorkerDeps], delta_x: int = 0, delta_y: int = 0) -> ToolExecutionResult:
+        """Scroll the viewport. Positive delta_y scrolls down, positive delta_x scrolls right. Units are pixels."""
         start = time.perf_counter()
         result = await semantic.scroll(delta_x, delta_y, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -756,6 +763,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="switch_to_iframe")
     async def switch_to_iframe(ctx: RunContext[WorkerDeps], iframe_id: str) -> ToolExecutionResult:
+        """Enter an iframe to access its elements. After switching, the snapshot will show the iframe's DOM."""
         start = time.perf_counter()
         result = await semantic.switch_to_iframe(iframe_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -790,6 +798,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="switch_to_main_frame")
     async def switch_to_main_frame(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
+        """Exit the current iframe and return to the top-level page."""
         start = time.perf_counter()
         result = await semantic.switch_to_main_frame(ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -819,6 +828,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="navigate_to")
     async def navigate_to(ctx: RunContext[WorkerDeps], url: str) -> ToolExecutionResult:
+        """Navigate to a URL. Use for opening new pages, not for clicking links on the current page."""
         start = time.perf_counter()
         result = await semantic.navigate_to(url, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -851,6 +861,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="take_screenshot")
     async def take_screenshot(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
+        """Capture a full-page screenshot for visual inspection."""
         start = time.perf_counter()
         result = await semantic.take_screenshot(ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -880,6 +891,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="execute_js")
     async def execute_js(ctx: RunContext[WorkerDeps], code: str) -> ToolExecutionResult:
+        """Run JavaScript in the page context. Use as a last resort when no semantic tool fits."""
         start = time.perf_counter()
         result = await semantic.execute_js(code, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -912,6 +924,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="press_key_combination")
     async def press_key_combination(ctx: RunContext[WorkerDeps], keys: list[str]) -> ToolExecutionResult:
+        """Press a key combination. Pass modifier and key names, e.g. ["Control", "C"] for copy, ["Enter"] for submit."""
         start = time.perf_counter()
         result = await semantic.press_key_combination(keys, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
