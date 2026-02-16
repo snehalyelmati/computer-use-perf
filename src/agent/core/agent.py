@@ -574,6 +574,38 @@ def build_browser_worker_agent(
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
+    @agent.tool(name="scroll")
+    async def scroll(ctx: RunContext[WorkerDeps], delta_x: int = 0, delta_y: int = 0) -> ToolExecutionResult:
+        start = time.perf_counter()
+        result = await semantic.scroll(delta_x, delta_y, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            _format_phase(
+                ctx.deps.step,
+                "tool scroll",
+                detail=f"ok={result.ok} delta_x={delta_x} delta_y={delta_y} duration_ms={duration_ms}",
+                indent=3,
+            )
+        )
+        logger.debug(
+            "tool=scroll step=%s ok=%s delta_x=%s delta_y=%s duration_ms=%s",
+            ctx.deps.step,
+            result.ok,
+            delta_x,
+            delta_y,
+            duration_ms,
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="scroll",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            delta_x=delta_x,
+            delta_y=delta_y,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message)
+
     @agent.tool(name="switch_to_iframe")
     async def switch_to_iframe(ctx: RunContext[WorkerDeps], iframe_id: str) -> ToolExecutionResult:
         start = time.perf_counter()

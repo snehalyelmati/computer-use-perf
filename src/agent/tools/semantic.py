@@ -121,6 +121,14 @@ async def _dispatch_click(session: CDPSession, x: float, y: float) -> bool:
         return False
     return True
 
+def _scroll_anchor(page: Page) -> tuple[float, float]:
+    viewport = page.viewport_size or {}
+    width = viewport.get("width") if isinstance(viewport, dict) else None
+    height = viewport.get("height") if isinstance(viewport, dict) else None
+    if not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
+        return (0.0, 0.0)
+    return (float(width) / 2, float(height) / 2)
+
 async def _insert_text(session: CDPSession, text: str) -> bool:
     try:
         await session.send("Input.insertText", {"text": text})
@@ -383,6 +391,22 @@ async def read_element_text(element_id: str, context: ToolContext) -> ToolResult
         return ToolResult(ok=False, message="Read text failed")
     value = result.get("result", {}).get("value")
     return ToolResult(ok=True, message=value or "")
+
+async def scroll(delta_x: int, delta_y: int, context: ToolContext) -> ToolResult:
+    context.last_tool = "scroll"
+    context.last_element_id = None
+    session = context.cdp_session
+    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
+        session = context.frame_sessions[context.active_frame_id]
+    try:
+        x, y = _scroll_anchor(context.page)
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseWheel", "x": x, "y": y, "deltaX": delta_x, "deltaY": delta_y},
+        )
+    except Exception as exc:  # pragma: no cover - runtime safety
+        return ToolResult(ok=False, message=f"Scroll failed: {exc}")
+    return ToolResult(ok=True, message=f"Scrolled dx={delta_x} dy={delta_y}")
 
 
 async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
