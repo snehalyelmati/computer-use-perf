@@ -158,6 +158,53 @@ def _log_tool_header_if_needed(tracker: ToolCallTracker | None) -> None:
         tracker.first_tool_logged = True
 
 
+def _compact_feedback(message: str, base_prefix: str) -> str | None:
+    """Extract a compact verification suffix from an enriched tool result message.
+
+    Returns a short string like ``'→ no DOM changes'`` or ``None`` if no
+    verification data is present.
+    """
+    # Verification is appended after the base message with ". " separators.
+    idx = message.find(". ", len(base_prefix) - 5) if base_prefix else message.find(". ")
+    if idx == -1:
+        return None
+    tail = message[idx + 2:]
+    if not tail:
+        return None
+
+    parts: list[str] = []
+    for segment in tail.split(". "):
+        seg = segment.strip()
+        if not seg:
+            continue
+        # Shorten common prefixes for compactness
+        if seg.startswith("Scroll position changed by "):
+            seg = seg.replace("Scroll position changed by ", "moved ")
+        elif seg.startswith("Page navigated to: "):
+            seg = seg.replace("Page navigated to: ", "nav→")
+        elif seg.startswith("Attribute changes: "):
+            seg = seg.replace("Attribute changes: ", "attr: ")
+        elif seg.startswith("New text appeared: "):
+            seg = seg.replace("New text appeared: ", "text+: ")
+        elif seg.startswith("Text removed: "):
+            seg = seg.replace("Text removed: ", "text-: ")
+        elif seg.startswith("Page title: "):
+            seg = seg.replace("Page title: ", "title: ")
+        elif seg.startswith("No visible DOM changes detected"):
+            seg = "no DOM changes"
+        elif seg.startswith("Current value: "):
+            seg = seg.replace("Current value: ", "val=")
+        elif seg.startswith("WARNING: scroll position did not change"):
+            seg = "AT BOUNDARY"
+        parts.append(seg)
+
+    result = "; ".join(parts)
+    # Cap at 120 chars to keep log lines scannable
+    if len(result) > 120:
+        result = result[:117] + "..."
+    return f"→ {result}"
+
+
 def _format_tool_log(
     tool_name: str,
     ok: bool,
@@ -166,6 +213,7 @@ def _format_tool_log(
     element_id: str | None = None,
     element_label: str | None = None,
     extra: str | None = None,
+    feedback: str | None = None,
 ) -> str:
     """Format a tool call log line with status symbol and details."""
     symbol = "✓" if ok else "✗"
@@ -177,6 +225,8 @@ def _format_tool_log(
     parts.append(f" {duration_ms}ms")
     if extra:
         parts.append(f" - {extra}")
+    if feedback:
+        parts.append(f" {feedback}")
     return "".join(parts)
 
 
@@ -533,6 +583,7 @@ def build_browser_worker_agent(
                 element_id=element_id,
                 element_label=element_label,
                 extra=None if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Clicked {element_id}") if result.ok else None,
             )
         )
         logger.debug(
@@ -610,6 +661,7 @@ def build_browser_worker_agent(
                 element_id=element_id,
                 element_label=element_label,
                 extra=f'text="{text_preview}"' if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Typed into {element_id}") if result.ok else None,
             )
         )
         logger.debug(
@@ -646,6 +698,7 @@ def build_browser_worker_agent(
                 result.ok,
                 duration_ms,
                 extra=f'{source_label or source_id} -> {target_label or target_id}' if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Dragged {source_id} -> {target_id}") if result.ok else None,
             )
         )
         logger.debug(
@@ -753,6 +806,7 @@ def build_browser_worker_agent(
                 result.ok,
                 duration_ms,
                 extra=direction if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Scrolled dx={delta_x} dy={delta_y}") if result.ok else None,
             )
         )
         logger.debug(
@@ -853,6 +907,7 @@ def build_browser_worker_agent(
                 result.ok,
                 duration_ms,
                 extra=url_preview if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Navigated to {url}") if result.ok else None,
             )
         )
         logger.debug(
@@ -949,6 +1004,7 @@ def build_browser_worker_agent(
                 result.ok,
                 duration_ms,
                 extra=keys_str if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Pressed {keys_str}") if result.ok else None,
             )
         )
         logger.debug(

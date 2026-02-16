@@ -49,6 +49,129 @@ def build_tool_context(
         active_frame_id=active_frame_id,
     )
 
+_DEFAULT_SETTLE_MS = 80
+
+_OBSERVER_INJECT_JS = """
+(() => {
+  if (window.__mutObs) {
+    try { window.__mutObs.observer.disconnect(); } catch(e) {}
+  }
+  const data = {
+    addedText: [],
+    removedText: [],
+    addedElements: [],
+    removedElements: [],
+    attrChanges: [],
+  };
+  const IGNORED_TAGS = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META']);
+  const TRACKED_ATTRS = new Set([
+    'aria-expanded','aria-checked','aria-selected','aria-hidden',
+    'aria-disabled','disabled','checked','selected','open','hidden',
+    'value','href','src'
+  ]);
+
+  function textOf(node) {
+    if (node.nodeType === 3) {
+      const t = (node.textContent || '').trim();
+      return t.length > 0 && t.length < 500 ? t : null;
+    }
+    if (node.nodeType === 1) {
+      const t = (node.innerText || node.textContent || '').trim();
+      return t.length > 0 && t.length < 500 ? t : null;
+    }
+    return null;
+  }
+
+  function tagOf(node) {
+    if (node.nodeType === 1) {
+      const tag = node.tagName || '';
+      const role = node.getAttribute && node.getAttribute('role') || '';
+      return [tag.toLowerCase(), role].filter(Boolean).join(' ');
+    }
+    return '';
+  }
+
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.type === 'childList') {
+        for (const node of m.addedNodes) {
+          if (node.nodeType === 1 && IGNORED_TAGS.has(node.tagName)) continue;
+          const text = textOf(node);
+          if (text && data.addedText.length < 20)
+            data.addedText.push(text.slice(0, 250));
+          if (node.nodeType === 1 && data.addedElements.length < 10)
+            data.addedElements.push(tagOf(node));
+        }
+        for (const node of m.removedNodes) {
+          if (node.nodeType === 1 && IGNORED_TAGS.has(node.tagName)) continue;
+          const text = textOf(node);
+          if (text && data.removedText.length < 10)
+            data.removedText.push(text.slice(0, 250));
+          if (node.nodeType === 1 && data.removedElements.length < 10)
+            data.removedElements.push(tagOf(node));
+        }
+      } else if (m.type === 'attributes') {
+        const attr = m.attributeName;
+        if (!TRACKED_ATTRS.has(attr)) continue;
+        const newVal = m.target.getAttribute(attr);
+        const oldVal = m.oldValue;
+        if (newVal !== oldVal && data.attrChanges.length < 15) {
+          const tag = (m.target.tagName || '').toLowerCase();
+          data.attrChanges.push({tag, attr, old: oldVal, new: newVal});
+        }
+      } else if (m.type === 'characterData') {
+        const text = (m.target.textContent || '').trim();
+        if (text && data.addedText.length < 20)
+          data.addedText.push(text.slice(0, 250));
+      }
+    }
+  });
+
+  observer.observe(document.body || document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeOldValue: true,
+    characterData: true,
+    characterDataOldValue: true,
+    attributeFilter: Array.from(TRACKED_ATTRS),
+  });
+
+  window.__mutObs = { observer, data, startUrl: location.href };
+})();
+"""
+
+_OBSERVER_COLLECT_JS = """
+(() => {
+  if (!window.__mutObs) return null;
+  const { observer, data, startUrl } = window.__mutObs;
+  observer.disconnect();
+  delete window.__mutObs;
+
+  const seen = new Set();
+  const uniqueAdded = [];
+  for (const t of data.addedText) {
+    const key = t.toLowerCase().trim();
+    if (!seen.has(key) && key.length > 0) {
+      seen.add(key);
+      uniqueAdded.push(t);
+    }
+  }
+
+  return {
+    addedText: uniqueAdded,
+    removedText: data.removedText,
+    addedElements: data.addedElements,
+    removedElements: data.removedElements,
+    attrChanges: data.attrChanges,
+    currentUrl: location.href,
+    startUrl: startUrl,
+    title: document.title || '',
+  };
+})();
+"""
+
+
 def _resolve_element(element_id: str, context: ToolContext) -> ElementSnapshot | None:
     return context.element_index.elements.get(element_id)
 
@@ -225,6 +348,128 @@ def _active_frame_error(element: ElementSnapshot | None, context: ToolContext) -
     return None
 
 
+async def _inject_observer(session: CDPSession) -> bool:
+    """Inject a MutationObserver into the page. Returns True on success."""
+    try:
+        await session.send(
+            "Runtime.evaluate",
+            {"expression": _OBSERVER_INJECT_JS, "returnByValue": True},
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def _collect_mutations(
+    session: CDPSession, settle_ms: int = _DEFAULT_SETTLE_MS
+) -> dict | None:
+    """Wait for DOM mutations to settle, then collect and disconnect the observer."""
+    await asyncio.sleep(settle_ms / 1000.0)
+    try:
+        result = await session.send(
+            "Runtime.evaluate",
+            {"expression": _OBSERVER_COLLECT_JS, "returnByValue": True},
+        )
+        value = result.get("result", {}).get("value")
+        if isinstance(value, dict):
+            return value
+        return None
+    except Exception:
+        return None
+
+
+def _format_verification(mutations: dict | None, base_message: str) -> str:
+    """Append a concise DOM-change summary to the base tool result message."""
+    if mutations is None:
+        return base_message
+
+    parts: list[str] = [base_message]
+
+    # URL change
+    start_url = mutations.get("startUrl", "")
+    current_url = mutations.get("currentUrl", "")
+    if start_url and current_url and start_url != current_url:
+        parts.append(f"Page navigated to: {current_url}")
+
+    # Attribute changes
+    attr_changes = mutations.get("attrChanges", [])
+    if attr_changes:
+        attr_lines = []
+        for change in attr_changes:
+            tag = change.get("tag", "?")
+            attr = change.get("attr", "?")
+            old = change.get("old") or "null"
+            new = change.get("new") or "null"
+            attr_lines.append(f"{tag}[{attr}]: {old} -> {new}")
+        parts.append("Attribute changes: " + "; ".join(attr_lines))
+
+    # New text
+    added_text = mutations.get("addedText", [])
+    if added_text:
+        items = [t[:250] for t in added_text]
+        parts.append("New text appeared: " + " | ".join(items))
+
+    # Removed text
+    removed_text = mutations.get("removedText", [])
+    if removed_text:
+        items = [t[:250] for t in removed_text]
+        parts.append("Text removed: " + " | ".join(items))
+
+    # New elements (only if no text to avoid redundancy)
+    added_elements = mutations.get("addedElements", [])
+    if added_elements and not added_text:
+        parts.append(
+            f"{len(added_elements)} element(s) added: "
+            + ", ".join(added_elements)
+        )
+
+    # Removed elements (only if no text to avoid redundancy)
+    removed_elements = mutations.get("removedElements", [])
+    if removed_elements and not removed_text:
+        parts.append(
+            f"{len(removed_elements)} element(s) removed: "
+            + ", ".join(removed_elements)
+        )
+
+    if len(parts) == 1:
+        parts.append("No visible DOM changes detected")
+
+    return ". ".join(parts)
+
+
+async def _read_input_value(
+    backend_node_id: int, session: CDPSession
+) -> str | None:
+    """Read the current value of an input/textarea element."""
+    result = await _call_on_node(
+        backend_node_id,
+        session,
+        """
+        function () {
+            return this.value !== undefined ? this.value : (this.textContent || '');
+        }
+        """,
+    )
+    if not result:
+        return None
+    return result.get("result", {}).get("value")
+
+
+async def _read_scroll_position(session: CDPSession) -> dict | None:
+    """Read the current scroll position."""
+    try:
+        result = await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": "({x: window.scrollX || window.pageXOffset || 0, y: window.scrollY || window.pageYOffset || 0})",
+                "returnByValue": True,
+            },
+        )
+        return result.get("result", {}).get("value")
+    except Exception:
+        return None
+
+
 async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     context.last_tool = "click_element"
     context.last_element_id = element_id
@@ -235,6 +480,7 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     if frame_error:
         return frame_error
     session = await _session_for_element(element, context)
+    await _inject_observer(session)
     result = await _call_on_node(
         element.backend_node_id,
         session,
@@ -247,8 +493,11 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
         """,
     )
     if not result:
+        await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Click failed")
-    return ToolResult(ok=True, message=f"Clicked {element_id}")
+    mutations = await _collect_mutations(session)
+    message = _format_verification(mutations, f"Clicked {element_id}")
+    return ToolResult(ok=True, message=message)
 
 
 async def type_text(element_id: str, text: str, context: ToolContext) -> ToolResult:
@@ -261,11 +510,21 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
     if frame_error:
         return frame_error
     session = await _session_for_element(element, context)
+    await _inject_observer(session)
     if not await _dom_focus(element.backend_node_id, session):
+        await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Type failed: element not focusable")
     if not await _insert_text(session, text):
+        await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Type failed")
-    return ToolResult(ok=True, message=f"Typed into {element_id}")
+    mutations = await _collect_mutations(session)
+    current_value = await _read_input_value(element.backend_node_id, session)
+    base_msg = f"Typed into {element_id}"
+    if current_value is not None:
+        display = current_value[:250] + "..." if len(current_value) > 250 else current_value
+        base_msg = f"Typed into {element_id}. Current value: \"{display}\""
+    message = _format_verification(mutations, base_msg)
+    return ToolResult(ok=True, message=message)
 
 
 async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) -> ToolResult:
@@ -295,6 +554,8 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
     if not source_value or not target_value:
         return ToolResult(ok=False, message="Drag failed")
 
+    await _inject_observer(session)
+
     # Try CDP coordinate-based drag if both elements are on top
     if source_value.get("onTop") and target_value.get("onTop"):
         try:
@@ -314,13 +575,17 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
                 "Input.dispatchMouseEvent",
                 {"type": "mouseReleased", "x": target_value["x"], "y": target_value["y"], "button": "left", "clickCount": 1},
             )
-            return ToolResult(ok=True, message=f"Dragged {source_id} -> {target_id}")
+            mutations = await _collect_mutations(session)
+            base_msg = f"Dragged {source_id} -> {target_id}"
+            message = _format_verification(mutations, base_msg)
+            return ToolResult(ok=True, message=message)
         except Exception:
             pass  # Fall through to DOM fallback
 
     # DOM fallback — dispatch synthetic mouse events directly on elements
     target_object_id = await _resolve_object_id(target.backend_node_id, session)
     if not target_object_id:
+        await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Drag failed: cannot resolve target")
     result = await _call_on_node(
         source.backend_node_id,
@@ -344,8 +609,12 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
         [{"objectId": target_object_id}],
     )
     if not result:
+        await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Drag failed: element obscured")
-    return ToolResult(ok=True, message=f"Dragged {source_id} -> {target_id}")
+    mutations = await _collect_mutations(session)
+    base_msg = f"Dragged {source_id} -> {target_id}"
+    message = _format_verification(mutations, base_msg)
+    return ToolResult(ok=True, message=message)
 
 
 async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
@@ -386,6 +655,7 @@ async def scroll(delta_x: int, delta_y: int, context: ToolContext) -> ToolResult
     session = context.cdp_session
     if context.active_frame_id and context.active_frame_id in context.frame_sessions:
         session = context.frame_sessions[context.active_frame_id]
+    before_pos = await _read_scroll_position(session)
     try:
         x, y = _scroll_anchor(context.page)
         await session.send(
@@ -394,7 +664,19 @@ async def scroll(delta_x: int, delta_y: int, context: ToolContext) -> ToolResult
         )
     except Exception as exc:  # pragma: no cover - runtime safety
         return ToolResult(ok=False, message=f"Scroll failed: {exc}")
-    return ToolResult(ok=True, message=f"Scrolled dx={delta_x} dy={delta_y}")
+    await asyncio.sleep(0.05)
+    after_pos = await _read_scroll_position(session)
+    base_msg = f"Scrolled dx={delta_x} dy={delta_y}"
+    if before_pos and after_pos:
+        dx = round(after_pos.get("x", 0) - before_pos.get("x", 0))
+        dy = round(after_pos.get("y", 0) - before_pos.get("y", 0))
+        base_msg += (
+            f". Scroll position changed by ({dx}, {dy})px,"
+            f" now at ({round(after_pos['x'])}, {round(after_pos['y'])})"
+        )
+        if dx == 0 and dy == 0:
+            base_msg += ". WARNING: scroll position did not change (may be at boundary)"
+    return ToolResult(ok=True, message=base_msg)
 
 
 async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
@@ -423,7 +705,17 @@ async def navigate_to(url: str, context: ToolContext) -> ToolResult:
         await context.page.goto(url)
     except Exception as exc:  # pragma: no cover - runtime safety
         return ToolResult(ok=False, message=f"Navigation failed: {exc}")
-    return ToolResult(ok=True, message=f"Navigated to {url}")
+    try:
+        final_url = context.page.url
+        title = await context.page.title()
+        parts = [f"Navigated to {final_url}"]
+        if title:
+            parts.append(f"Page title: \"{title}\"")
+        if final_url != url:
+            parts.append(f"(redirected from {url})")
+        return ToolResult(ok=True, message=". ".join(parts))
+    except Exception:
+        return ToolResult(ok=True, message=f"Navigated to {url}")
 
 
 async def take_screenshot(context: ToolContext) -> ToolResult:
@@ -449,8 +741,16 @@ async def execute_js(code: str, context: ToolContext) -> ToolResult:
 async def press_key_combination(keys: list[str], context: ToolContext) -> ToolResult:
     context.last_tool = "press_key_combination"
     context.last_element_id = None
+    session = context.cdp_session
+    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
+        session = context.frame_sessions[context.active_frame_id]
+    await _inject_observer(session)
     try:
         await context.page.keyboard.press("+".join(keys))
     except Exception as exc:  # pragma: no cover - runtime safety
+        await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Key press failed: {exc}")
-    return ToolResult(ok=True, message=f"Pressed {'+'.join(keys)}")
+    mutations = await _collect_mutations(session)
+    base_msg = f"Pressed {'+'.join(keys)}"
+    message = _format_verification(mutations, base_msg)
+    return ToolResult(ok=True, message=message)
