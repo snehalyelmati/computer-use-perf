@@ -69,9 +69,10 @@ async def test_run_does_not_stop_on_worker_done(monkeypatch: pytest.MonkeyPatch,
 
     monkeypatch.setattr(agent_mod, "launch_browser", fake_launch_browser)
     monkeypatch.setattr(agent_mod, "close_browser", fake_close_browser)
+    monkeypatch.setattr(agent_mod, "_teardown_logging", lambda: None)
     monkeypatch.setattr(agent_mod, "capture_snapshot", fake_capture_snapshot)
     monkeypatch.setattr(agent_mod, "write_run_summary", fake_write_run_summary)
-    monkeypatch.setattr(agent_mod, "_build_openrouter_model", lambda _config: object())
+    monkeypatch.setattr(agent_mod, "_build_model", lambda _config: object())
     monkeypatch.setattr(agent_mod, "_model_settings", lambda _config: {})
 
     monkeypatch.setattr(

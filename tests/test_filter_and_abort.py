@@ -112,12 +112,13 @@ async def test_filter_is_cached_when_fingerprint_unchanged(monkeypatch: pytest.M
 
     monkeypatch.setattr(agent_mod, "launch_browser", fake_launch_browser)
     monkeypatch.setattr(agent_mod, "close_browser", fake_close_browser)
+    monkeypatch.setattr(agent_mod, "_teardown_logging", lambda: None)
     monkeypatch.setattr(agent_mod, "capture_snapshot", fake_capture_snapshot)
     monkeypatch.setattr(agent_mod, "write_run_summary", fake_write_run_summary)
-    monkeypatch.setattr(agent_mod, "_build_openrouter_model", lambda _config: object())
+    monkeypatch.setattr(agent_mod, "_build_model", lambda _config: object())
     monkeypatch.setattr(agent_mod, "_model_settings", lambda _config: {})
     monkeypatch.setattr(agent_mod, "usage_stats_from_result", lambda _res: UsageStats(0, 0, 0, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(agent_mod, "cost_stats_from_result", lambda _res: None)
+    monkeypatch.setattr(agent_mod, "cost_stats_from_result", lambda _res, _model: None)
 
     monkeypatch.setattr(agent_mod, "build_snapshot_filter_agent", lambda *_a, **_k: _StubAgent(filter_runner))
     monkeypatch.setattr(agent_mod, "build_orchestrator_agent", lambda *_a, **_k: _StubAgent(orchestrator_runner))
@@ -164,12 +165,13 @@ async def test_filter_reruns_when_fingerprint_changes(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(agent_mod, "launch_browser", fake_launch_browser)
     monkeypatch.setattr(agent_mod, "close_browser", fake_close_browser)
+    monkeypatch.setattr(agent_mod, "_teardown_logging", lambda: None)
     monkeypatch.setattr(agent_mod, "capture_snapshot", fake_capture_snapshot)
     monkeypatch.setattr(agent_mod, "write_run_summary", lambda **_k: tmp_path / "run_summary.json")
-    monkeypatch.setattr(agent_mod, "_build_openrouter_model", lambda _config: object())
+    monkeypatch.setattr(agent_mod, "_build_model", lambda _config: object())
     monkeypatch.setattr(agent_mod, "_model_settings", lambda _config: {})
     monkeypatch.setattr(agent_mod, "usage_stats_from_result", lambda _res: UsageStats(0, 0, 0, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(agent_mod, "cost_stats_from_result", lambda _res: None)
+    monkeypatch.setattr(agent_mod, "cost_stats_from_result", lambda _res, _model: None)
 
     monkeypatch.setattr(agent_mod, "build_snapshot_filter_agent", lambda *_a, **_k: _StubAgent(filter_runner))
     monkeypatch.setattr(agent_mod, "build_orchestrator_agent", lambda *_a, **_k: _StubAgent(lambda *_: OrchestratorDecision(done=False, worker_goal="noop")))
@@ -212,12 +214,13 @@ async def test_abort_when_fingerprint_unchanged_for_threshold(monkeypatch: pytes
 
     monkeypatch.setattr(agent_mod, "launch_browser", fake_launch_browser)
     monkeypatch.setattr(agent_mod, "close_browser", fake_close_browser)
+    monkeypatch.setattr(agent_mod, "_teardown_logging", lambda: None)
     monkeypatch.setattr(agent_mod, "capture_snapshot", fake_capture_snapshot)
     monkeypatch.setattr(agent_mod, "write_run_summary", fake_write_run_summary)
-    monkeypatch.setattr(agent_mod, "_build_openrouter_model", lambda _config: object())
+    monkeypatch.setattr(agent_mod, "_build_model", lambda _config: object())
     monkeypatch.setattr(agent_mod, "_model_settings", lambda _config: {})
     monkeypatch.setattr(agent_mod, "usage_stats_from_result", lambda _res: UsageStats(0, 0, 0, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(agent_mod, "cost_stats_from_result", lambda _res: None)
+    monkeypatch.setattr(agent_mod, "cost_stats_from_result", lambda _res, _model: None)
 
     monkeypatch.setattr(
         agent_mod,

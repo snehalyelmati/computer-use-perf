@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass, field
 
 from playwright.async_api import (
@@ -14,6 +16,10 @@ from playwright.async_api import (
 )
 
 from src.agent.config import BrowserConfig
+
+logger = logging.getLogger(__name__)
+
+_CLOSE_TIMEOUT_SECONDS = 10
 
 
 @dataclass
@@ -48,14 +54,33 @@ async def launch_browser(config: BrowserConfig) -> BrowserSession:
     )
 
 async def close_browser(session: BrowserSession) -> None:
-    """Close the Playwright browser session."""
+    """Close the Playwright browser session, tolerating individual failures."""
+    try:
+        await asyncio.wait_for(
+            _close_browser_inner(session), timeout=_CLOSE_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Browser close timed out after %ss; some processes may be orphaned",
+            _CLOSE_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.warning("Unexpected error during browser close", exc_info=True)
 
+
+async def _close_browser_inner(session: BrowserSession) -> None:
     for frame_session in session.frame_sessions.values():
         try:
             await frame_session.detach()
         except Exception:
-            continue
-    await session.cdp_session.detach()
-    await session.context.close()
-    await session.browser.close()
-    await session.playwright.stop()
+            pass
+    for label, method in [
+        ("cdp_session.detach", session.cdp_session.detach),
+        ("context.close", session.context.close),
+        ("browser.close", session.browser.close),
+        ("playwright.stop", session.playwright.stop),
+    ]:
+        try:
+            await method()
+        except Exception:
+            logger.warning("Failed to %s during browser close", label, exc_info=True)

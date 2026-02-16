@@ -6,8 +6,10 @@ import asyncio
 from dataclasses import dataclass, field
 import hashlib
 import logging
+import os
 from pathlib import Path
 import re
+import signal
 import sys
 import time
 from typing import Any
@@ -292,6 +294,17 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
     else:
         httpx_logger.setLevel(logging.WARNING)
         httpcore_logger.setLevel(logging.WARNING)
+
+
+def _teardown_logging() -> None:
+    """Remove and close handlers added by _setup_logging."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        try:
+            handler.close()
+            root.removeHandler(handler)
+        except Exception:
+            pass
 
 
 def _build_model(config: LLMConfig) -> Model:
@@ -1335,32 +1348,79 @@ class BrowserAgent:
                 logger.info(f"Step {self.state.step} end {step_duration_ms}ms")
                 prev_snapshot = snapshot
         finally:
-            await close_browser(session)
+            interrupted = isinstance(
+                sys.exc_info()[1], (asyncio.CancelledError, KeyboardInterrupt)
+            )
+            if interrupted:
+                print("\nShutting down gracefully... (press Ctrl+C again to force-kill)")
+
+            # Allow a second Ctrl+C to force-kill during cleanup
+            original_sigint = signal.getsignal(signal.SIGINT)
+
+            def _force_kill(signum: int, frame: Any) -> None:
+                print("\nForce-killing...")
+                os._exit(1)
+
+            try:
+                signal.signal(signal.SIGINT, _force_kill)
+            except (OSError, ValueError):
+                pass
+
+            try:
+                await close_browser(session)
+            except Exception:
+                logger.warning("Error closing browser", exc_info=True)
+
             run_duration_ms = int((time.perf_counter() - run_started) * 1000)
-            metrics.emit("run_end", duration_ms=run_duration_ms)
-            write_run_summary(
-                log_dir=self.agent_config.log_dir,
-                run_id=run_id,
-                summary={
-                    "duration_ms": run_duration_ms,
-                    "steps": self.state.step,
-                    "last_summary": self.state.last_summary,
-                    "stop_reason": stop_reason,
-                    "input_tokens": total_input_tokens,
-                    "output_tokens": total_output_tokens,
-                    "total_tokens": total_input_tokens + total_output_tokens,
-                    "cost_usd": total_cost_usd,
-                },
-            )
-            logger.info(
-                "Run end run_id=%s duration_ms=%s steps=%s total_tokens=%s cost_usd=%s",
-                run_id,
-                run_duration_ms,
-                self.state.step,
-                total_input_tokens + total_output_tokens,
-                total_cost_usd,
-            )
-            metrics.close()
+            effective_stop_reason = "interrupted" if interrupted else stop_reason
+
+            try:
+                metrics.emit("run_end", duration_ms=run_duration_ms, interrupted=interrupted)
+            except Exception:
+                pass
+
+            try:
+                write_run_summary(
+                    log_dir=self.agent_config.log_dir,
+                    run_id=run_id,
+                    summary={
+                        "duration_ms": run_duration_ms,
+                        "steps": self.state.step,
+                        "last_summary": self.state.last_summary,
+                        "stop_reason": effective_stop_reason,
+                        "input_tokens": total_input_tokens,
+                        "output_tokens": total_output_tokens,
+                        "total_tokens": total_input_tokens + total_output_tokens,
+                        "cost_usd": total_cost_usd,
+                    },
+                )
+            except Exception:
+                logger.warning("Failed to write run summary", exc_info=True)
+
+            try:
+                logger.info(
+                    "Run end run_id=%s duration_ms=%s steps=%s total_tokens=%s cost_usd=%s%s",
+                    run_id,
+                    run_duration_ms,
+                    self.state.step,
+                    total_input_tokens + total_output_tokens,
+                    total_cost_usd,
+                    " (interrupted)" if interrupted else "",
+                )
+            except Exception:
+                pass
+
+            try:
+                metrics.close()
+            except Exception:
+                pass
+
+            _teardown_logging()
+
+            try:
+                signal.signal(signal.SIGINT, original_sigint)
+            except (OSError, ValueError):
+                pass
 
 
 async def run_agent(agent_config: AgentConfig, llm_config: LLMConfig, browser_config: BrowserConfig) -> None:
@@ -1369,4 +1429,7 @@ async def run_agent(agent_config: AgentConfig, llm_config: LLMConfig, browser_co
 
 
 def run_agent_sync(agent_config: AgentConfig, llm_config: LLMConfig, browser_config: BrowserConfig) -> None:
-    asyncio.run(run_agent(agent_config, llm_config, browser_config))
+    try:
+        asyncio.run(run_agent(agent_config, llm_config, browser_config))
+    except KeyboardInterrupt:
+        pass  # Cleanup already handled in BrowserAgent.run() finally block

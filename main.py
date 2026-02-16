@@ -104,7 +104,10 @@ def main() -> None:
     )
     browser_config = BrowserConfig(headless=bool(args.headless))
 
-    run_agent_sync(agent_config, llm_config, browser_config)
+    try:
+        run_agent_sync(agent_config, llm_config, browser_config)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
