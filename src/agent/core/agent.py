@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 import hashlib
 import logging
 from pathlib import Path
+import re
+import sys
 import time
 from typing import Any
 
@@ -37,12 +39,141 @@ from src.agent.tools import semantic
 logger = logging.getLogger(__name__)
 
 _LOG_INDENT = "  "
+_STEP_SEPARATOR = "─" * 64
+
 
 class _ShortNameFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name.startswith("src."):
             record.name = record.name.split(".")[-1]
         return True
+
+
+class _ColorFormatter(logging.Formatter):
+    """Formatter that applies ANSI color codes to log messages for terminal output."""
+
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    GREEN = "\033[32m"
+    RED = "\033[31m"
+    YELLOW = "\033[33m"
+    CYAN = "\033[36m"
+
+    # Pattern to match tool status symbols
+    _TOOL_OK_PATTERN = re.compile(r"^(\s*)(✓)")
+    _TOOL_FAIL_PATTERN = re.compile(r"^(\s*)(✗)")
+    # Pattern to match element IDs like (el_abc123)
+    _ELEMENT_ID_PATTERN = re.compile(r"\((el_[a-f0-9]+)\)")
+    # Pattern to match durations like 123ms
+    _DURATION_PATTERN = re.compile(r"\b(\d+ms)\b")
+    # Pattern to match done=True or done=False
+    _DONE_TRUE_PATTERN = re.compile(r"\bdone=True\b")
+    _DONE_FALSE_PATTERN = re.compile(r"\bdone=False\b")
+    # Pattern for step headers
+    _STEP_HEADER_PATTERN = re.compile(r"^(Step \d+) (start|end)")
+    # Pattern for warning indicators
+    _WARNING_PATTERN = re.compile(r"\b(abort|STUCK|retry|unchanged|warning)\b", re.IGNORECASE)
+    # Pattern for step separator line
+    _SEPARATOR_PATTERN = re.compile(r"^(─{20,})$")
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = super().format(record)
+        message = self._apply_colors(message)
+        return message
+
+    def _apply_colors(self, message: str) -> str:
+        # Tool success (green checkmark)
+        message = self._TOOL_OK_PATTERN.sub(
+            rf"\1{self.GREEN}✓{self.RESET}", message
+        )
+        # Tool failure (red X)
+        message = self._TOOL_FAIL_PATTERN.sub(
+            rf"\1{self.RED}✗{self.RESET}", message
+        )
+        # Element IDs (cyan)
+        message = self._ELEMENT_ID_PATTERN.sub(
+            rf"({self.CYAN}\1{self.RESET})", message
+        )
+        # Durations (dim)
+        message = self._DURATION_PATTERN.sub(
+            rf"{self.DIM}\1{self.RESET}", message
+        )
+        # done=True (green)
+        message = self._DONE_TRUE_PATTERN.sub(
+            rf"{self.GREEN}done=True{self.RESET}", message
+        )
+        # Step headers (bold)
+        message = self._STEP_HEADER_PATTERN.sub(
+            rf"{self.BOLD}\1 \2{self.RESET}", message
+        )
+        # Warnings (yellow)
+        message = self._WARNING_PATTERN.sub(
+            rf"{self.YELLOW}\1{self.RESET}", message
+        )
+        # Step separator (dim)
+        message = self._SEPARATOR_PATTERN.sub(
+            rf"{self.DIM}\1{self.RESET}", message
+        )
+        return message
+
+
+# Global flag to track if color logging is enabled
+_color_enabled = True
+
+
+def _get_element_label(element_index: Any, element_id: str) -> str:
+    """Get a brief label for an element from the element index."""
+    if not element_index or not hasattr(element_index, "elements"):
+        return ""
+    element = element_index.elements.get(element_id)
+    if not element:
+        return ""
+    # Build a concise label from role, name, or text
+    parts = []
+    if element.role:
+        parts.append(element.role.strip())
+    if element.name:
+        name = element.name.strip()
+        if len(name) > 30:
+            name = name[:27] + "..."
+        parts.append(f'"{name}"')
+    elif element.text:
+        text = element.text.strip()
+        if len(text) > 30:
+            text = text[:27] + "..."
+        parts.append(f'"{text}"')
+    return " ".join(parts) if parts else ""
+
+
+def _log_tool_header_if_needed(tracker: ToolCallTracker | None) -> None:
+    """Log the 'tools:' header on the first tool call of a step."""
+    if tracker and not tracker.first_tool_logged:
+        logger.info("    tools:")
+        tracker.first_tool_logged = True
+
+
+def _format_tool_log(
+    tool_name: str,
+    ok: bool,
+    duration_ms: int,
+    *,
+    element_id: str | None = None,
+    element_label: str | None = None,
+    extra: str | None = None,
+) -> str:
+    """Format a tool call log line with status symbol and details."""
+    symbol = "✓" if ok else "✗"
+    parts = [f"      {symbol} {tool_name}"]
+    if element_label:
+        parts.append(f' {element_label}')
+    if element_id:
+        parts.append(f" ({element_id})")
+    parts.append(f" {duration_ms}ms")
+    if extra:
+        parts.append(f" - {extra}")
+    return "".join(parts)
+
 
 def _format_phase(step: int, phase: str, *, detail: str | None = None, indent: int = 0) -> str:
     prefix = f"Step {step}"
@@ -68,6 +199,12 @@ class AgentState:
     last_worker_goal: str | None = None
 
 
+@dataclass
+class ToolCallTracker:
+    """Track tool calls within a step for logging purposes."""
+    first_tool_logged: bool = False
+
+
 @dataclass(frozen=True)
 class WorkerDeps:
     tool_context: semantic.ToolContext
@@ -80,14 +217,21 @@ class WorkerDeps:
     stuck_threshold: int
     prior_tool: str | None
     prior_element_id: str | None
+    tool_tracker: ToolCallTracker | None = None
 
 
-def _setup_logging(log_dir: str, *, level: str = "INFO") -> None:
+def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> None:
+    global _color_enabled
+    # Auto-disable color if not a TTY
+    use_color = color and sys.stdout.isatty()
+    _color_enabled = use_color
+
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     normalized_level = level.upper()
     root.setLevel(normalized_level)
-    formatter = logging.Formatter("%(levelname)s %(name)s: %(message)s")
+    plain_formatter = logging.Formatter("%(levelname)s %(name)s: %(message)s")
+    color_formatter = _ColorFormatter("%(levelname)s %(name)s: %(message)s") if use_color else plain_formatter
     short_name_filter = _ShortNameFilter()
     log_path = str(Path(log_dir) / "agent.log")
     has_file = any(
@@ -96,7 +240,7 @@ def _setup_logging(log_dir: str, *, level: str = "INFO") -> None:
     )
     if not has_file:
         file_handler = logging.FileHandler(log_path)
-        file_handler.setFormatter(formatter)
+        file_handler.setFormatter(plain_formatter)  # File handler always uses plain formatter
         file_handler.addFilter(short_name_filter)
         root.addHandler(file_handler)
     else:
@@ -111,12 +255,13 @@ def _setup_logging(log_dir: str, *, level: str = "INFO") -> None:
     )
     if not has_stream:
         stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
+        stream_handler.setFormatter(color_formatter)  # Stream handler uses color formatter
         stream_handler.addFilter(short_name_filter)
         root.addHandler(stream_handler)
     else:
         for handler in root.handlers:
             if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                handler.setFormatter(color_formatter)  # Update formatter to color version
                 if not any(isinstance(f, _ShortNameFilter) for f in handler.filters):
                     handler.addFilter(short_name_filter)
 
@@ -331,12 +476,16 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.click_element(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool click_element",
-                detail=f"ok={result.ok} element_id={element_id} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "click_element",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=None if result.ok else result.message,
             )
         )
         logger.debug(
@@ -367,12 +516,14 @@ def build_browser_worker_agent(
         if matches:
             message = "\n".join(_format_element_brief(element) for element in matches)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        query_preview = query[:30] + "..." if len(query) > 30 else query
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool find_elements",
-                detail=f"ok=True query_len={len(query or '')} limit={limit} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "find_elements",
+                True,
+                duration_ms,
+                extra=f'query="{query_preview}" found={len(matches)}',
             )
         )
         logger.debug(
@@ -399,12 +550,17 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.type_text(element_id, text, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        text_preview = text[:20] + "..." if len(text) > 20 else text
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool type_text",
-                detail=f"ok={result.ok} element_id={element_id} text_len={len(text)} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "type_text",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=f'text="{text_preview}"' if result.ok else result.message,
             )
         )
         logger.debug(
@@ -431,14 +587,15 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.drag_and_drop(source_id, target_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        source_label = _get_element_label(ctx.deps.tool_context.element_index, source_id)
+        target_label = _get_element_label(ctx.deps.tool_context.element_index, target_id)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool drag_and_drop",
-                detail=(
-                    f"ok={result.ok} source_id={source_id} target_id={target_id} duration_ms={duration_ms}"
-                ),
-                indent=3,
+            _format_tool_log(
+                "drag_and_drop",
+                result.ok,
+                duration_ms,
+                extra=f'{source_label or source_id} -> {target_label or target_id}' if result.ok else result.message,
             )
         )
         logger.debug(
@@ -465,12 +622,13 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.select_all(ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool select_all",
-                detail=f"ok={result.ok} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "select_all",
+                result.ok,
+                duration_ms,
+                extra=None if result.ok else result.message,
             )
         )
         logger.debug(
@@ -493,12 +651,13 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.copy_selection(ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool copy_selection",
-                detail=f"ok={result.ok} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "copy_selection",
+                result.ok,
+                duration_ms,
+                extra=None if result.ok else result.message,
             )
         )
         logger.debug(
@@ -521,12 +680,13 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.paste(ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool paste",
-                detail=f"ok={result.ok} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "paste",
+                result.ok,
+                duration_ms,
+                extra=None if result.ok else result.message,
             )
         )
         logger.debug(
@@ -549,12 +709,16 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.read_element_text(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool read_element_text",
-                detail=f"ok={result.ok} element_id={element_id} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "read_element_text",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=None if result.ok else result.message,
             )
         )
         logger.debug(
@@ -579,12 +743,19 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.scroll(delta_x, delta_y, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        direction_parts = []
+        if delta_x != 0:
+            direction_parts.append(f"dx={delta_x}")
+        if delta_y != 0:
+            direction_parts.append(f"dy={delta_y}")
+        direction = " ".join(direction_parts) if direction_parts else "no movement"
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool scroll",
-                detail=f"ok={result.ok} delta_x={delta_x} delta_y={delta_y} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "scroll",
+                result.ok,
+                duration_ms,
+                extra=direction if result.ok else result.message,
             )
         )
         logger.debug(
@@ -611,12 +782,16 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.switch_to_iframe(iframe_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, iframe_id)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool switch_to_iframe",
-                detail=f"ok={result.ok} iframe_id={iframe_id} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "switch_to_iframe",
+                result.ok,
+                duration_ms,
+                element_id=iframe_id,
+                element_label=element_label,
+                extra=None if result.ok else result.message,
             )
         )
         logger.debug(
@@ -641,12 +816,13 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.switch_to_main_frame(ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool switch_to_main_frame",
-                detail=f"ok={result.ok} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "switch_to_main_frame",
+                result.ok,
+                duration_ms,
+                extra=None if result.ok else result.message,
             )
         )
         logger.debug(
@@ -669,12 +845,14 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.navigate_to(url, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        url_preview = url[:50] + "..." if len(url) > 50 else url
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool navigate_to",
-                detail=f"ok={result.ok} url={url} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "navigate_to",
+                result.ok,
+                duration_ms,
+                extra=url_preview if result.ok else result.message,
             )
         )
         logger.debug(
@@ -699,12 +877,13 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.take_screenshot(ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool take_screenshot",
-                detail=f"ok={result.ok} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "take_screenshot",
+                result.ok,
+                duration_ms,
+                extra=None if result.ok else result.message,
             )
         )
         logger.debug(
@@ -727,12 +906,14 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.execute_js(code, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        code_preview = code[:30].replace("\n", " ") + "..." if len(code) > 30 else code.replace("\n", " ")
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool execute_js",
-                detail=f"ok={result.ok} code_len={len(code)} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "execute_js",
+                result.ok,
+                duration_ms,
+                extra=f'"{code_preview}"' if result.ok else result.message,
             )
         )
         logger.debug(
@@ -757,19 +938,21 @@ def build_browser_worker_agent(
         start = time.perf_counter()
         result = await semantic.press_key_combination(keys, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        keys_str = "+".join(keys)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
-            _format_phase(
-                ctx.deps.step,
-                "tool press_key_combination",
-                detail=f"ok={result.ok} keys={'+'.join(keys)} duration_ms={duration_ms}",
-                indent=3,
+            _format_tool_log(
+                "press_key_combination",
+                result.ok,
+                duration_ms,
+                extra=keys_str if result.ok else result.message,
             )
         )
         logger.debug(
             "tool=press_key_combination step=%s ok=%s keys=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
-            "+".join(keys),
+            keys_str,
             duration_ms,
         )
         ctx.deps.metrics.emit(
@@ -806,7 +989,11 @@ class BrowserAgent:
             raise ValueError("goal is required")
 
         run_id = new_run_id()
-        _setup_logging(self.agent_config.log_dir, level=self.agent_config.log_level)
+        _setup_logging(
+            self.agent_config.log_dir,
+            level=self.agent_config.log_level,
+            color=self.agent_config.color_logs,
+        )
         metrics = MetricsRecorder(
             log_dir=self.agent_config.log_dir,
             run_id=run_id,
@@ -845,16 +1032,10 @@ class BrowserAgent:
             for step in range(self.agent_config.max_steps):
                 self.state.step = step + 1
                 step_started = time.perf_counter()
-                logger.info(
-                    _format_phase(
-                        self.state.step,
-                        "start",
-                        detail=(
-                            f"no_progress_steps={self.state.no_progress_steps} "
-                            f"stuck_threshold={self.agent_config.stuck_threshold}"
-                        ),
-                    )
-                )
+                # Visual separation between steps
+                logger.info("")
+                logger.info(_STEP_SEPARATOR)
+                logger.info(f"Step {self.state.step} start")
                 snapshot_started = time.perf_counter()
                 snapshot = await capture_snapshot(session.page, session.cdp_session)
                 snapshot_duration_ms = int((time.perf_counter() - snapshot_started) * 1000)
@@ -876,15 +1057,7 @@ class BrowserAgent:
                             **(snapshot.diagnostics.size_hints or {}),
                         )
                 logger.info(
-                    _format_phase(
-                        self.state.step,
-                        "snapshot",
-                        detail=(
-                            f"duration_ms={snapshot_duration_ms} elements={len(snapshot.elements)} "
-                            f"url={snapshot.url}"
-                        ),
-                        indent=1,
-                    )
+                    f"  snapshot: {snapshot_duration_ms}ms elements={len(snapshot.elements)} url={snapshot.url}"
                 )
                 diff_text, _diff_ids = _snapshot_diff(prev_snapshot, snapshot)
                 page_fingerprint = _page_fingerprint(snapshot)
@@ -897,16 +1070,8 @@ class BrowserAgent:
                 if self.state.no_progress_steps >= self.agent_config.unchanged_abort_threshold:
                     stop_reason = "unchanged_fingerprint_abort"
                     logger.warning(
-                        _format_phase(
-                            self.state.step,
-                            "abort",
-                            detail=(
-                                "reason=unchanged_fingerprint "
-                                f"count={self.state.no_progress_steps} "
-                                f"threshold={self.agent_config.unchanged_abort_threshold}"
-                            ),
-                            indent=1,
-                        )
+                        f"  abort: unchanged_fingerprint count={self.state.no_progress_steps} "
+                        f"threshold={self.agent_config.unchanged_abort_threshold}"
                     )
                     metrics.emit(
                         "step_end",
@@ -1005,16 +1170,9 @@ class BrowserAgent:
                     self.state.last_filter_output = filter_output
                     self.state.last_filter_fingerprint = page_fingerprint
                     logger.info(
-                        _format_phase(
-                            self.state.step,
-                            "filter",
-                            detail=(
-                                f"duration_ms={filter_duration_ms} "
-                                f"useful_lines={len(filter_output.useful_text_lines or [])} "
-                                f"priority_ids={len(priority_ids)}"
-                            ),
-                            indent=1,
-                        )
+                        f"  filter: {filter_duration_ms}ms "
+                        f"useful_lines={len(filter_output.useful_text_lines or [])} "
+                        f"priority_ids={len(priority_ids)}"
                     )
 
                 useful_lines = filter_output.useful_text_lines if filter_output else []
@@ -1073,19 +1231,12 @@ class BrowserAgent:
                 decision = decision_result.output
                 self.state.last_worker_goal = decision.worker_goal
                 logger.info(
-                    _format_phase(
-                        self.state.step,
-                        "orchestrator",
-                        detail=(
-                            f"duration_ms={orchestrator_duration_ms} "
-                            f"worker={decision.worker} "
-                            f"goal={decision.worker_goal} "
-                            f"done={decision.done} "
-                            f"rationale={decision.rationale or 'None'}"
-                        ),
-                        indent=1,
-                    )
+                    f"  orchestrator: {orchestrator_duration_ms}ms worker={decision.worker} done={decision.done}"
                 )
+                if decision.worker_goal:
+                    logger.info(f"    goal: {decision.worker_goal}")
+                if decision.rationale:
+                    logger.info(f"    rationale: {decision.rationale}")
                 logger.debug(
                     "orchestrator step=%s duration_ms=%s input_tokens=%s output_tokens=%s cost_usd=%s",
                     self.state.step,
@@ -1095,14 +1246,7 @@ class BrowserAgent:
                     (orchestrator_cost.cost_usd if orchestrator_cost else None),
                 )
                 if decision.done:
-                    logger.info(
-                        _format_phase(
-                            self.state.step,
-                            "orchestrator done",
-                            detail=(decision.rationale or ""),
-                            indent=2,
-                        )
-                    )
+                    logger.info(f"  orchestrator done: {decision.rationale or 'task complete'}")
                     metrics.emit(
                         "step_end",
                         step=self.state.step,
@@ -1117,6 +1261,7 @@ class BrowserAgent:
                     query=decision.worker_goal,
                     priority_ids=priority_ids,
                 )
+                tool_tracker = ToolCallTracker()
                 deps = WorkerDeps(
                     tool_context=tool_context,
                     metrics=metrics,
@@ -1128,6 +1273,7 @@ class BrowserAgent:
                     stuck_threshold=self.agent_config.stuck_threshold,
                     prior_tool=self.state.last_tool,
                     prior_element_id=self.state.last_element_id,
+                    tool_tracker=tool_tracker,
                 )
                 worker_prompt = (
                     STEP_PROMPT.format(goal=decision.worker_goal)
@@ -1174,17 +1320,9 @@ class BrowserAgent:
                 self.state.memory.append(step_output.summary)
                 self.state.last_tool = tool_context.last_tool
                 self.state.last_element_id = tool_context.last_element_id
-                logger.info(
-                    _format_phase(
-                        self.state.step,
-                        "worker",
-                        detail=(
-                            f"duration_ms={worker_duration_ms} "
-                            f"done={step_output.done} summary={step_output.summary}"
-                        ),
-                        indent=1,
-                    )
-                )
+                logger.info(f"  worker: {worker_duration_ms}ms done={step_output.done}")
+                if step_output.summary:
+                    logger.info(f"    summary: {step_output.summary}")
                 logger.debug(
                     "worker step=%s duration_ms=%s input_tokens=%s output_tokens=%s cost_usd=%s",
                     self.state.step,
@@ -1201,21 +1339,9 @@ class BrowserAgent:
                     duration_ms=int((time.perf_counter() - step_started) * 1000),
                 )
                 if step_output.done:
-                    logger.info(
-                        _format_phase(
-                            self.state.step,
-                            "worker done",
-                            detail="delegated goal complete; continuing until orchestrator done=true",
-                            indent=2,
-                        )
-                    )
-                logger.info(
-                    _format_phase(
-                        self.state.step,
-                        "end",
-                        detail=f"duration_ms={int((time.perf_counter() - step_started) * 1000)}",
-                    )
-                )
+                    logger.info("    worker done: delegated goal complete; continuing until orchestrator done=true")
+                step_duration_ms = int((time.perf_counter() - step_started) * 1000)
+                logger.info(f"Step {self.state.step} end {step_duration_ms}ms")
                 prev_snapshot = snapshot
         finally:
             await close_browser(session)

@@ -61,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable JSONL metrics output",
     )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colored log output (auto-disabled when not a TTY)",
+    )
     return parser
 
 
@@ -77,6 +82,7 @@ def main() -> None:
         unchanged_abort_threshold=args.unchanged_abort_threshold,
         log_level=str(args.log_level),
         metrics_enabled=not bool(args.no_metrics),
+        color_logs=not bool(args.no_color),
     )
     llm_config = LLMConfig()
     browser_config = BrowserConfig(headless=bool(args.headless))

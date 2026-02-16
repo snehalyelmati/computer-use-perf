@@ -14,7 +14,7 @@ class LLMConfig:
 
     provider: ModelProvider = "openrouter"
     base_url: str = "https://openrouter.ai/api/v1"
-    model: str = "qwen/qwen3-235b-a22b-2507"
+    model: str = "moonshotai/kimi-k2-0905:exacto"
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     api_key_env: str = "OPENROUTER_API_KEY"
     timeout_seconds: int = 60
@@ -44,3 +44,4 @@ class AgentConfig:
     unchanged_abort_threshold: int = 3
     log_level: str = "INFO"
     metrics_enabled: bool = True
+    color_logs: bool = True
