@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -347,34 +348,12 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
     return ToolResult(ok=True, message=f"Dragged {source_id} -> {target_id}")
 
 
-async def select_all(context: ToolContext) -> ToolResult:
-    context.last_tool = "select_all"
+async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
+    context.last_tool = "wait"
     context.last_element_id = None
-    try:
-        await context.page.keyboard.press("ControlOrMeta+A")
-    except Exception as exc:  # pragma: no cover - runtime safety
-        return ToolResult(ok=False, message=f"Select all failed: {exc}")
-    return ToolResult(ok=True, message="Selected all")
-
-
-async def copy_selection(context: ToolContext) -> ToolResult:
-    context.last_tool = "copy_selection"
-    context.last_element_id = None
-    try:
-        await context.page.keyboard.press("ControlOrMeta+C")
-    except Exception as exc:  # pragma: no cover - runtime safety
-        return ToolResult(ok=False, message=f"Copy failed: {exc}")
-    return ToolResult(ok=True, message="Copied selection")
-
-
-async def paste(context: ToolContext) -> ToolResult:
-    context.last_tool = "paste"
-    context.last_element_id = None
-    try:
-        await context.page.keyboard.press("ControlOrMeta+V")
-    except Exception as exc:  # pragma: no cover - runtime safety
-        return ToolResult(ok=False, message=f"Paste failed: {exc}")
-    return ToolResult(ok=True, message="Pasted")
+    clamped = max(0, min(milliseconds, 10_000))
+    await asyncio.sleep(clamped / 1000)
+    return ToolResult(ok=True, message=f"Waited {clamped}ms")
 
 
 async def read_element_text(element_id: str, context: ToolContext) -> ToolResult:

@@ -12,7 +12,7 @@ import sys
 import time
 from typing import Any
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, ToolDefinition
 from pydantic_ai.models import Model
 from pydantic_ai.models.cerebras import CerebrasModel
 from pydantic_ai.models.openrouter import OpenRouterModel
@@ -221,6 +221,22 @@ class WorkerDeps:
     prior_tool: str | None
     prior_element_id: str | None
     tool_tracker: ToolCallTracker | None = None
+    allowed_tools: frozenset[str] | None = None
+
+
+DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
+    "click_element",
+    "find_elements",
+    "type_text",
+    "drag_and_drop",
+    "read_element_text",
+    "scroll",
+    "wait",
+    "switch_to_iframe",
+    "switch_to_main_frame",
+    "navigate_to",
+    "press_key_combination",
+})
 
 
 def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> None:
@@ -471,12 +487,20 @@ def build_snapshot_filter_agent(
 def build_browser_worker_agent(
     model: Model, *, model_settings: dict[str, Any]
 ) -> Agent[WorkerDeps, StepOutput]:
+    async def _filter_tools(
+        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
+    ) -> list[ToolDefinition]:
+        if ctx.deps.allowed_tools is None:
+            return tool_defs
+        return [t for t in tool_defs if t.name in ctx.deps.allowed_tools]
+
     agent: Agent[WorkerDeps, StepOutput] = Agent(
         model,
         deps_type=WorkerDeps,
         output_type=StepOutput,
         system_prompt=SYSTEM_PROMPT,
         model_settings=model_settings,
+        prepare_tools=_filter_tools,
         retries=1,
     )
 
@@ -626,90 +650,34 @@ def build_browser_worker_agent(
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
-    @agent.tool(name="select_all")
-    async def select_all(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
+    @agent.tool(name="wait")
+    async def wait(ctx: RunContext[WorkerDeps], milliseconds: int) -> ToolExecutionResult:
         start = time.perf_counter()
-        result = await semantic.select_all(ctx.deps.tool_context)
+        result = await semantic.wait(milliseconds, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
-                "select_all",
+                "wait",
                 result.ok,
                 duration_ms,
-                extra=None if result.ok else result.message,
+                extra=f"{milliseconds}ms",
             )
         )
         logger.debug(
-            "tool=select_all step=%s ok=%s duration_ms=%s",
+            "tool=wait step=%s ok=%s requested_ms=%s duration_ms=%s",
             ctx.deps.step,
             result.ok,
+            milliseconds,
             duration_ms,
         )
         ctx.deps.metrics.emit(
             "tool_call",
             step=ctx.deps.step,
-            tool="select_all",
+            tool="wait",
             ok=result.ok,
             duration_ms=duration_ms,
-        )
-        return ToolExecutionResult(ok=result.ok, message=result.message)
-
-    @agent.tool(name="copy_selection")
-    async def copy_selection(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
-        start = time.perf_counter()
-        result = await semantic.copy_selection(ctx.deps.tool_context)
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        _log_tool_header_if_needed(ctx.deps.tool_tracker)
-        logger.info(
-            _format_tool_log(
-                "copy_selection",
-                result.ok,
-                duration_ms,
-                extra=None if result.ok else result.message,
-            )
-        )
-        logger.debug(
-            "tool=copy_selection step=%s ok=%s duration_ms=%s",
-            ctx.deps.step,
-            result.ok,
-            duration_ms,
-        )
-        ctx.deps.metrics.emit(
-            "tool_call",
-            step=ctx.deps.step,
-            tool="copy_selection",
-            ok=result.ok,
-            duration_ms=duration_ms,
-        )
-        return ToolExecutionResult(ok=result.ok, message=result.message)
-
-    @agent.tool(name="paste")
-    async def paste(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
-        start = time.perf_counter()
-        result = await semantic.paste(ctx.deps.tool_context)
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        _log_tool_header_if_needed(ctx.deps.tool_tracker)
-        logger.info(
-            _format_tool_log(
-                "paste",
-                result.ok,
-                duration_ms,
-                extra=None if result.ok else result.message,
-            )
-        )
-        logger.debug(
-            "tool=paste step=%s ok=%s duration_ms=%s",
-            ctx.deps.step,
-            result.ok,
-            duration_ms,
-        )
-        ctx.deps.metrics.emit(
-            "tool_call",
-            step=ctx.deps.step,
-            tool="paste",
-            ok=result.ok,
-            duration_ms=duration_ms,
+            requested_ms=milliseconds,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
@@ -1283,6 +1251,7 @@ class BrowserAgent:
                     prior_tool=self.state.last_tool,
                     prior_element_id=self.state.last_element_id,
                     tool_tracker=tool_tracker,
+                    allowed_tools=DEFAULT_WORKER_TOOLS,
                 )
                 worker_prompt = (
                     STEP_PROMPT.format(goal=decision.worker_goal)

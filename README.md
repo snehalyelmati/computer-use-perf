@@ -105,8 +105,8 @@ The agent uses semantic tools that reference stable element IDs:
 - `find_elements(query: str, limit: int = 8)`
 - `type_text(element_id: str, text: str)`
 - `drag_and_drop(source_id: str, target_id: str)`
-- `select_all()`, `copy_selection()`, `paste()`
 - `read_element_text(element_id: str)`
+- `wait(milliseconds: int)` (capped at 10s)
 - `switch_to_iframe(iframe_id: str)`, `switch_to_main_frame()`
 - `navigate_to(url: str)`, `take_screenshot()`
 
