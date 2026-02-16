@@ -77,6 +77,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable colored log output (auto-disabled when not a TTY)",
     )
+    parser.add_argument(
+        "--worker-model",
+        dest="worker_model",
+        default=None,
+        help="Model for the browser worker agent (default: same as --model)",
+    )
+    parser.add_argument(
+        "--filter-model",
+        dest="filter_model",
+        default=None,
+        help="Model for the snapshot filter agent (default: same as --model)",
+    )
     return parser
 
 
@@ -100,6 +112,8 @@ def main() -> None:
     llm_config = LLMConfig(
         provider=provider,
         model=args.model or defaults["model"],
+        worker_model=args.worker_model or defaults.get("worker_model") or None,
+        filter_model=args.filter_model or defaults.get("filter_model") or None,
         api_key_env=defaults["api_key_env"],
     )
     browser_config = BrowserConfig(headless=bool(args.headless))

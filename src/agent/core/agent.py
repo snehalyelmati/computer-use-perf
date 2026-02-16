@@ -357,20 +357,21 @@ def _teardown_logging() -> None:
             pass
 
 
-def _build_model(config: LLMConfig) -> Model:
+def _build_model(config: LLMConfig, *, model_override: str | None = None) -> Model:
     import os
 
+    model_name = model_override or config.model
     if config.provider == "cerebras":
         if config.api_key_env != "CEREBRAS_API_KEY":
             if value := os.environ.get(config.api_key_env):
                 os.environ.setdefault("CEREBRAS_API_KEY", value)
-        model: Model = CerebrasModel(config.model)
+        model: Model = CerebrasModel(model_name)
     else:
         # OpenRouter (default)
         if config.api_key_env != "OPENROUTER_API_KEY":
             if value := os.environ.get(config.api_key_env):
                 os.environ.setdefault("OPENROUTER_API_KEY", value)
-        model = OpenRouterModel(config.model)
+        model = OpenRouterModel(model_name)
 
     if config.max_retries > 0:
         model = ResilientModel(model, max_retries=config.max_retries)
@@ -1070,18 +1071,32 @@ class BrowserAgent:
             model=self.llm_config.model,
         )
         logger.info(
-            "Run start run_id=%s url=%s max_steps=%s model=%s",
+            "Run start run_id=%s url=%s max_steps=%s model=%s worker_model=%s filter_model=%s",
             run_id,
             self.agent_config.target_url,
             self.agent_config.max_steps,
             self.llm_config.model,
+            self.llm_config.worker_model or self.llm_config.model,
+            self.llm_config.filter_model or self.llm_config.model,
         )
 
         model = _build_model(self.llm_config)
         model_settings = _model_settings(self.llm_config)
+
+        worker_model = (
+            _build_model(self.llm_config, model_override=self.llm_config.worker_model)
+            if self.llm_config.worker_model
+            else model
+        )
+        filter_model = (
+            _build_model(self.llm_config, model_override=self.llm_config.filter_model)
+            if self.llm_config.filter_model
+            else model
+        )
+
         orchestrator = build_orchestrator_agent(model, model_settings=model_settings)
-        snapshot_filter = build_snapshot_filter_agent(model, model_settings=model_settings)
-        browser_worker = build_browser_worker_agent(model, model_settings=model_settings)
+        snapshot_filter = build_snapshot_filter_agent(filter_model, model_settings=model_settings)
+        browser_worker = build_browser_worker_agent(worker_model, model_settings=model_settings)
 
         session = await launch_browser(self.browser_config)
         try:
@@ -1198,7 +1213,7 @@ class BrowserAgent:
                     filter_result = await snapshot_filter.run(filter_prompt)
                     filter_duration_ms = int((time.perf_counter() - filter_started) * 1000)
                     filter_usage = usage_stats_from_result(filter_result)
-                    filter_cost = cost_stats_from_result(filter_result, self.llm_config.model)
+                    filter_cost = cost_stats_from_result(filter_result, self.llm_config.filter_model or self.llm_config.model)
                     total_input_tokens += filter_usage.input_tokens
                     total_output_tokens += filter_usage.output_tokens
                     if filter_cost:
@@ -1357,7 +1372,7 @@ class BrowserAgent:
                     worker_result = await browser_worker.run(worker_prompt, deps=deps)
                 worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
                 worker_usage = usage_stats_from_result(worker_result)
-                worker_cost = cost_stats_from_result(worker_result, self.llm_config.model)
+                worker_cost = cost_stats_from_result(worker_result, self.llm_config.worker_model or self.llm_config.model)
                 total_input_tokens += worker_usage.input_tokens
                 total_output_tokens += worker_usage.output_tokens
                 if worker_cost:

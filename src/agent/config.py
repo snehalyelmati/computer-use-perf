@@ -8,8 +8,18 @@ from typing import Literal
 ModelProvider = Literal["openrouter", "cerebras"]
 
 PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
-    "openrouter": {"model": "moonshotai/kimi-k2-0905:exacto", "api_key_env": "OPENROUTER_API_KEY"},
-    "cerebras": {"model": "qwen-3-235b-a22b-instruct-2507", "api_key_env": "CEREBRAS_API_KEY"},
+    "openrouter": {
+        "model": "moonshotai/kimi-k2-0905:exacto",
+        "worker_model": "",
+        "filter_model": "",
+        "api_key_env": "OPENROUTER_API_KEY",
+    },
+    "cerebras": {
+        "model": "qwen-3-235b-a22b-instruct-2507",
+        "worker_model": "",
+        "filter_model": "",
+        "api_key_env": "CEREBRAS_API_KEY",
+    },
 }
 
 
@@ -38,6 +48,8 @@ class LLMConfig:
     provider: ModelProvider = "openrouter"
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "moonshotai/kimi-k2-0905:exacto"
+    worker_model: str | None = None
+    filter_model: str | None = None
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     api_key_env: str = "OPENROUTER_API_KEY"
     timeout_seconds: int = 60
