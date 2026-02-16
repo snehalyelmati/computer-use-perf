@@ -41,6 +41,7 @@ class LLMConfig:
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     api_key_env: str = "OPENROUTER_API_KEY"
     timeout_seconds: int = 60
+    max_retries: int = 2
 
 
 @dataclass(frozen=True)

@@ -17,6 +17,8 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.cerebras import CerebrasModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 
+from src.agent.core.resilient_model import ResilientModel
+
 from src.agent.browser.session import close_browser, launch_browser
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.snapshot import (
@@ -283,13 +285,17 @@ def _build_model(config: LLMConfig) -> Model:
         if config.api_key_env != "CEREBRAS_API_KEY":
             if value := os.environ.get(config.api_key_env):
                 os.environ.setdefault("CEREBRAS_API_KEY", value)
-        return CerebrasModel(config.model)
+        model: Model = CerebrasModel(config.model)
+    else:
+        # OpenRouter (default)
+        if config.api_key_env != "OPENROUTER_API_KEY":
+            if value := os.environ.get(config.api_key_env):
+                os.environ.setdefault("OPENROUTER_API_KEY", value)
+        model = OpenRouterModel(config.model)
 
-    # OpenRouter (default)
-    if config.api_key_env != "OPENROUTER_API_KEY":
-        if value := os.environ.get(config.api_key_env):
-            os.environ.setdefault("OPENROUTER_API_KEY", value)
-    return OpenRouterModel(config.model)
+    if config.max_retries > 0:
+        model = ResilientModel(model, max_retries=config.max_retries)
+    return model
 
 
 def _model_settings(config: LLMConfig) -> dict[str, Any]:
