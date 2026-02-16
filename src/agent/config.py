@@ -5,12 +5,35 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-ModelProvider = Literal["openrouter"]
+ModelProvider = Literal["openrouter", "cerebras"]
+
+PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
+    "openrouter": {"model": "moonshotai/kimi-k2-0905:exacto", "api_key_env": "OPENROUTER_API_KEY"},
+    "cerebras": {"model": "qwen-3-235b-a22b-instruct-2507", "api_key_env": "CEREBRAS_API_KEY"},
+}
+
+
+@dataclass(frozen=True)
+class ModelPricing:
+    """Price per million tokens (USD)."""
+
+    input_per_mtok: float
+    output_per_mtok: float
+
+
+MODEL_PRICES: dict[str, ModelPricing] = {
+    "qwen-3-235b-a22b-instruct-2507": ModelPricing(0.60, 1.20),
+    "zai-glm-4.7": ModelPricing(2.25, 2.75),
+}
 
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """LLM configuration for OpenRouter-backed models."""
+    """LLM configuration for the browser agent.
+
+    Supports multiple providers (OpenRouter, Cerebras).
+    Use PROVIDER_DEFAULTS to get default model and api_key_env per provider.
+    """
 
     provider: ModelProvider = "openrouter"
     base_url: str = "https://openrouter.ai/api/v1"

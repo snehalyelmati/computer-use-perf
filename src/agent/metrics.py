@@ -13,6 +13,8 @@ from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.usage import RunUsage
 
+from src.agent.config import MODEL_PRICES
+
 
 def new_run_id() -> str:
     return uuid.uuid4().hex
@@ -107,8 +109,21 @@ def usage_stats_from_result(result: AgentRunResult[Any]) -> UsageStats:
     return UsageStats.from_run_usage(result.usage)
 
 
-def cost_stats_from_result(result: AgentRunResult[Any]) -> CostStats | None:
-    return extract_openrouter_cost(result.new_messages())
+def compute_cost_from_usage(model: str, usage: UsageStats) -> CostStats | None:
+    """Compute cost from token counts using the local price map."""
+    pricing = MODEL_PRICES.get(model)
+    if not pricing:
+        return None
+    cost = (usage.input_tokens * pricing.input_per_mtok + usage.output_tokens * pricing.output_per_mtok) / 1_000_000
+    return CostStats(cost_usd=cost)
+
+
+def cost_stats_from_result(result: AgentRunResult[Any], model: str) -> CostStats | None:
+    cost = extract_openrouter_cost(result.new_messages())
+    if cost:
+        return cost
+    usage = usage_stats_from_result(result)
+    return compute_cost_from_usage(model, usage)
 
 
 class MetricsRecorder:

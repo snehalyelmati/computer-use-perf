@@ -13,7 +13,8 @@ import time
 from typing import Any
 
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.models import Model
+from pydantic_ai.models.cerebras import CerebrasModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 
 from src.agent.browser.session import close_browser, launch_browser
@@ -275,19 +276,20 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
         httpcore_logger.setLevel(logging.WARNING)
 
 
-def _build_openrouter_model(config: LLMConfig) -> OpenRouterModel:
-    # PydanticAI's OpenRouter provider uses OPENROUTER_API_KEY by default.
-    # We keep env var selection in our config for consistency.
-    # If the env var name differs from OPENROUTER_API_KEY, copy it over.
+def _build_model(config: LLMConfig) -> Model:
     import os
 
+    if config.provider == "cerebras":
+        if config.api_key_env != "CEREBRAS_API_KEY":
+            if value := os.environ.get(config.api_key_env):
+                os.environ.setdefault("CEREBRAS_API_KEY", value)
+        return CerebrasModel(config.model)
+
+    # OpenRouter (default)
     if config.api_key_env != "OPENROUTER_API_KEY":
         if value := os.environ.get(config.api_key_env):
             os.environ.setdefault("OPENROUTER_API_KEY", value)
-    try:
-        return OpenRouterModel(config.model)
-    except UserError:
-        raise
+    return OpenRouterModel(config.model)
 
 
 def _model_settings(config: LLMConfig) -> dict[str, Any]:
@@ -295,9 +297,10 @@ def _model_settings(config: LLMConfig) -> dict[str, Any]:
         "timeout": float(config.timeout_seconds),
         "parallel_tool_calls": False,
     }
-    settings["openrouter_usage"] = {"include": True}
-    if config.reasoning_effort and config.reasoning_effort != "none":
-        settings["openrouter_reasoning"] = {"effort": config.reasoning_effort}
+    if config.provider == "openrouter":
+        settings["openrouter_usage"] = {"include": True}
+        if config.reasoning_effort and config.reasoning_effort != "none":
+            settings["openrouter_reasoning"] = {"effort": config.reasoning_effort}
     return settings
 
 
@@ -438,7 +441,7 @@ def _snapshot_diff(prev: Any | None, curr: Any) -> tuple[str, list[str]]:
     return "\n".join(lines), detail_ids
 
 
-def build_orchestrator_agent(model: OpenRouterModel, *, model_settings: dict[str, Any]) -> Agent[None, OrchestratorDecision]:
+def build_orchestrator_agent(model: Model, *, model_settings: dict[str, Any]) -> Agent[None, OrchestratorDecision]:
     return Agent(
         model,
         output_type=OrchestratorDecision,
@@ -448,7 +451,7 @@ def build_orchestrator_agent(model: OpenRouterModel, *, model_settings: dict[str
     )
 
 def build_snapshot_filter_agent(
-    model: OpenRouterModel, *, model_settings: dict[str, Any]
+    model: Model, *, model_settings: dict[str, Any]
 ) -> Agent[None, SnapshotFilterOutput]:
     return Agent(
         model,
@@ -460,7 +463,7 @@ def build_snapshot_filter_agent(
 
 
 def build_browser_worker_agent(
-    model: OpenRouterModel, *, model_settings: dict[str, Any]
+    model: Model, *, model_settings: dict[str, Any]
 ) -> Agent[WorkerDeps, StepOutput]:
     agent: Agent[WorkerDeps, StepOutput] = Agent(
         model,
@@ -1002,7 +1005,7 @@ class BrowserAgent:
         run_started = time.perf_counter()
         total_input_tokens = 0
         total_output_tokens = 0
-        total_cost_usd = 0.0
+        total_cost_usd: float | None = None
         metrics.emit(
             "run_start",
             target_url=self.agent_config.target_url,
@@ -1018,7 +1021,7 @@ class BrowserAgent:
             self.llm_config.model,
         )
 
-        model = _build_openrouter_model(self.llm_config)
+        model = _build_model(self.llm_config)
         model_settings = _model_settings(self.llm_config)
         orchestrator = build_orchestrator_agent(model, model_settings=model_settings)
         snapshot_filter = build_snapshot_filter_agent(model, model_settings=model_settings)
@@ -1139,11 +1142,11 @@ class BrowserAgent:
                     filter_result = await snapshot_filter.run(filter_prompt)
                     filter_duration_ms = int((time.perf_counter() - filter_started) * 1000)
                     filter_usage = usage_stats_from_result(filter_result)
-                    filter_cost = cost_stats_from_result(filter_result)
+                    filter_cost = cost_stats_from_result(filter_result, self.llm_config.model)
                     total_input_tokens += filter_usage.input_tokens
                     total_output_tokens += filter_usage.output_tokens
                     if filter_cost:
-                        total_cost_usd += filter_cost.cost_usd
+                        total_cost_usd = (total_cost_usd or 0.0) + filter_cost.cost_usd
                     metrics.emit(
                         "agent_call",
                         step=self.state.step,
@@ -1209,11 +1212,11 @@ class BrowserAgent:
                 decision_result = await orchestrator.run(orchestrator_prompt)
                 orchestrator_duration_ms = int((time.perf_counter() - orchestrator_started) * 1000)
                 orchestrator_usage = usage_stats_from_result(decision_result)
-                orchestrator_cost = cost_stats_from_result(decision_result)
+                orchestrator_cost = cost_stats_from_result(decision_result, self.llm_config.model)
                 total_input_tokens += orchestrator_usage.input_tokens
                 total_output_tokens += orchestrator_usage.output_tokens
                 if orchestrator_cost:
-                    total_cost_usd += orchestrator_cost.cost_usd
+                    total_cost_usd = (total_cost_usd or 0.0) + orchestrator_cost.cost_usd
                 metrics.emit(
                     "agent_call",
                     step=self.state.step,
@@ -1297,11 +1300,11 @@ class BrowserAgent:
                     worker_result = await browser_worker.run(worker_prompt, deps=deps)
                 worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
                 worker_usage = usage_stats_from_result(worker_result)
-                worker_cost = cost_stats_from_result(worker_result)
+                worker_cost = cost_stats_from_result(worker_result, self.llm_config.model)
                 total_input_tokens += worker_usage.input_tokens
                 total_output_tokens += worker_usage.output_tokens
                 if worker_cost:
-                    total_cost_usd += worker_cost.cost_usd
+                    total_cost_usd = (total_cost_usd or 0.0) + worker_cost.cost_usd
                 metrics.emit(
                     "agent_call",
                     step=self.state.step,

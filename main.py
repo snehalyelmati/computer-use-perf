@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
+from src.agent.config import AgentConfig, BrowserConfig, LLMConfig, PROVIDER_DEFAULTS
 from src.agent.core.agent import run_agent_sync
 
 
@@ -22,6 +22,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="General-purpose browser agent")
     parser.add_argument("--url", dest="target_url", required=True, help="Target URL")
     parser.add_argument("--goal", required=True, help="High-level task for the agent to complete")
+    parser.add_argument(
+        "--provider",
+        choices=list(PROVIDER_DEFAULTS.keys()),
+        default="openrouter",
+        help="LLM provider (default: openrouter)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model name (overrides provider default)",
+    )
     parser.add_argument(
         "--max-steps",
         type=int,
@@ -84,7 +95,13 @@ def main() -> None:
         metrics_enabled=not bool(args.no_metrics),
         color_logs=not bool(args.no_color),
     )
-    llm_config = LLMConfig()
+    provider = args.provider
+    defaults = PROVIDER_DEFAULTS[provider]
+    llm_config = LLMConfig(
+        provider=provider,
+        model=args.model or defaults["model"],
+        api_key_env=defaults["api_key_env"],
+    )
     browser_config = BrowserConfig(headless=bool(args.headless))
 
     run_agent_sync(agent_config, llm_config, browser_config)
