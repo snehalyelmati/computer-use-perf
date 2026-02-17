@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig, PROVIDER_DEFAULTS
 from src.agent.core.agent import run_agent_sync
@@ -17,11 +18,17 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be >= 1")
     return parsed
 
+def _load_task(path: str) -> str:
+    content = Path(path).read_text(encoding="utf-8").strip()
+    if not content:
+        raise ValueError("task file is empty")
+    return content
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="General-purpose browser agent")
     parser.add_argument("--url", dest="target_url", required=True, help="Target URL")
-    parser.add_argument("--goal", required=True, help="High-level task for the agent to complete")
+    parser.add_argument("--task", required=True, help="Path to a markdown file describing the task")
     parser.add_argument(
         "--provider",
         choices=list(PROVIDER_DEFAULTS.keys()),
@@ -124,9 +131,14 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    try:
+        task_text = _load_task(args.task)
+    except (OSError, ValueError) as exc:
+        parser.error(f"Failed to read task file: {exc}")
+
     agent_config = AgentConfig(
         target_url=args.target_url,
-        goal=args.goal,
+        goal=task_text,
         max_steps=args.max_steps,
         max_elements=args.max_elements,
         stuck_threshold=args.stuck_threshold,

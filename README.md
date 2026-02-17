@@ -42,7 +42,9 @@ flowchart LR
 - Set `OPENROUTER_API_KEY` for OpenRouter access
 
 ## Run
-- `uv run main.py --url <target> --goal "<task>" [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--max-tokens 2048] [--log-level INFO] [--no-metrics] [--no-handlers]`
+- `uv run main.py --url <target> --task TASK.md [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--max-tokens 2048] [--log-level INFO] [--no-metrics] [--no-handlers]`
+
+`TASK.md` should contain the full task instructions as plain markdown text.
 
 ### Outputs
 - Logs: `logs/agent.log`
@@ -120,7 +122,7 @@ The agent uses semantic tools that reference stable element IDs:
 - `scroll(delta_x: int, delta_y: int, element_id: str | None = None)`
 - `wait(milliseconds: int)` (capped at 10s)
 - `switch_to_iframe(iframe_id: str)`, `switch_to_main_frame()`
-- `navigate_to(url: str)`, `press_key_combination(keys: list[str])`
+- `press_key_combination(keys: list[str])`
 
 ### Available but not in default worker set
 

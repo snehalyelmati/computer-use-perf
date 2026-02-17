@@ -281,7 +281,6 @@ DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
     "wait",
     "switch_to_iframe",
     "switch_to_main_frame",
-    "navigate_to",
     "press_key_combination",
 })
 
