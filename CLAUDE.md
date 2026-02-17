@@ -15,8 +15,11 @@ A general-purpose browser agent. Python 3.14, managed with [uv](https://docs.ast
 ## Observability
 
 - Logs: `logs/agent.log`
+- Debug log: `logs/agent_debug.log` (always captures full DEBUG output)
 - Metrics: `logs/metrics.jsonl` (disable with `--no-metrics`)
 - Run summary: `logs/run_summary.json`
+- Page captures: `logs/pages/*.html` (enable with `--save-pages`)
+- Page manifest: `logs/pages/manifest.jsonl`
 
 ## Dependencies
 

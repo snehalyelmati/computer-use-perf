@@ -22,6 +22,7 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 from src.agent.core.resilient_model import ResilientModel
 
 from src.agent.browser.session import close_browser, launch_browser
+from src.agent.capture.page_saver import PageSaver
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.handlers import cleanup_handler_attributes, extract_handlers
 from src.agent.context.snapshot import (
@@ -294,10 +295,15 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     normalized_level = level.upper()
-    root.setLevel(normalized_level)
+    configured_level = getattr(logging, normalized_level, logging.INFO)
+    # Root logger must be at DEBUG so debug file handler receives everything
+    root.setLevel(logging.DEBUG)
     plain_formatter = logging.Formatter("%(levelname)s %(name)s: %(message)s")
+    debug_formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     color_formatter = _ColorFormatter("%(levelname)s %(name)s: %(message)s") if use_color else plain_formatter
     short_name_filter = _ShortNameFilter()
+
+    # ── agent.log: user-configured level ──
     log_path = str(Path(log_dir) / "agent.log")
     has_file = any(
         isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == log_path
@@ -305,28 +311,46 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
     )
     if not has_file:
         file_handler = logging.FileHandler(log_path)
-        file_handler.setFormatter(plain_formatter)  # File handler always uses plain formatter
+        file_handler.setFormatter(plain_formatter)
+        file_handler.setLevel(configured_level)
         file_handler.addFilter(short_name_filter)
         root.addHandler(file_handler)
     else:
         for handler in root.handlers:
             if isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == log_path:
+                handler.setLevel(configured_level)
                 if not any(isinstance(f, _ShortNameFilter) for f in handler.filters):
                     handler.addFilter(short_name_filter)
 
+    # ── agent_debug.log: always DEBUG ──
+    debug_log_path = str(Path(log_dir) / "agent_debug.log")
+    has_debug_file = any(
+        isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == debug_log_path
+        for handler in root.handlers
+    )
+    if not has_debug_file:
+        debug_file_handler = logging.FileHandler(debug_log_path)
+        debug_file_handler.setFormatter(debug_formatter)
+        debug_file_handler.setLevel(logging.DEBUG)
+        debug_file_handler.addFilter(short_name_filter)
+        root.addHandler(debug_file_handler)
+
+    # ── Console: user-configured level ──
     has_stream = any(
         isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
         for handler in root.handlers
     )
     if not has_stream:
         stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(color_formatter)  # Stream handler uses color formatter
+        stream_handler.setFormatter(color_formatter)
+        stream_handler.setLevel(configured_level)
         stream_handler.addFilter(short_name_filter)
         root.addHandler(stream_handler)
     else:
         for handler in root.handlers:
             if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
-                handler.setFormatter(color_formatter)  # Update formatter to color version
+                handler.setFormatter(color_formatter)
+                handler.setLevel(configured_level)
                 if not any(isinstance(f, _ShortNameFilter) for f in handler.filters):
                     handler.addFilter(short_name_filter)
 
@@ -613,11 +637,12 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=click_element step=%s ok=%s element_id=%s duration_ms=%s",
+            "tool=click_element step=%s ok=%s element_id=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             element_id,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -691,12 +716,13 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=type_text step=%s ok=%s element_id=%s text_len=%s duration_ms=%s",
+            "tool=type_text step=%s ok=%s element_id=%s text_len=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             element_id,
             len(text),
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -728,12 +754,13 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=drag_and_drop step=%s ok=%s source_id=%s target_id=%s duration_ms=%s",
+            "tool=drag_and_drop step=%s ok=%s source_id=%s target_id=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             source_id,
             target_id,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -762,11 +789,12 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=wait step=%s ok=%s requested_ms=%s duration_ms=%s",
+            "tool=wait step=%s ok=%s requested_ms=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             milliseconds,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -797,11 +825,12 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=inspect_element step=%s ok=%s element_id=%s duration_ms=%s",
+            "tool=inspect_element step=%s ok=%s element_id=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             element_id,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -830,11 +859,12 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=search_page_attributes step=%s ok=%s query=%s duration_ms=%s",
+            "tool=search_page_attributes step=%s ok=%s query=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             query,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -869,12 +899,13 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=scroll step=%s ok=%s delta_x=%s delta_y=%s duration_ms=%s",
+            "tool=scroll step=%s ok=%s delta_x=%s delta_y=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             delta_x,
             delta_y,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -906,11 +937,12 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=switch_to_iframe step=%s ok=%s iframe_id=%s duration_ms=%s",
+            "tool=switch_to_iframe step=%s ok=%s iframe_id=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             iframe_id,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -938,10 +970,11 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=switch_to_main_frame step=%s ok=%s duration_ms=%s",
+            "tool=switch_to_main_frame step=%s ok=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -970,11 +1003,12 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=navigate_to step=%s ok=%s url=%s duration_ms=%s",
+            "tool=navigate_to step=%s ok=%s url=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             url,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -1002,10 +1036,11 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=take_screenshot step=%s ok=%s duration_ms=%s",
+            "tool=take_screenshot step=%s ok=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -1033,11 +1068,12 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=execute_js step=%s ok=%s code_len=%s duration_ms=%s",
+            "tool=execute_js step=%s ok=%s code_len=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             len(code),
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -1067,11 +1103,12 @@ def build_browser_worker_agent(
             )
         )
         logger.debug(
-            "tool=press_key_combination step=%s ok=%s keys=%s duration_ms=%s",
+            "tool=press_key_combination step=%s ok=%s keys=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             keys_str,
             duration_ms,
+            result.message,
         )
         ctx.deps.metrics.emit(
             "tool_call",
@@ -1117,6 +1154,7 @@ class BrowserAgent:
             run_id=run_id,
             enabled=self.agent_config.metrics_enabled,
         )
+        page_saver = PageSaver(self.agent_config.log_dir, run_id) if self.agent_config.save_pages else None
         run_started = time.perf_counter()
         total_input_tokens = 0
         total_output_tokens = 0
@@ -1228,11 +1266,22 @@ class BrowserAgent:
                 )
                 diff_text, _diff_ids = _snapshot_diff(prev_snapshot, snapshot)
                 page_fingerprint = _page_fingerprint(snapshot)
+                logger.debug("page_fingerprint=%s", page_fingerprint)
+                logger.debug("diff_text:\n%s", diff_text)
                 if self.state.last_page_fingerprint == page_fingerprint:
                     self.state.no_progress_steps += 1
                 else:
                     self.state.no_progress_steps = 0
                 self.state.last_page_fingerprint = page_fingerprint
+
+                if page_saver:
+                    await page_saver.capture_page(
+                        session.page,
+                        self.state.step,
+                        snapshot.url or "",
+                        snapshot.title or "",
+                        page_fingerprint,
+                    )
 
                 if self.state.no_progress_steps >= self.agent_config.unchanged_abort_threshold:
                     stop_reason = "unchanged_fingerprint_abort"
@@ -1273,9 +1322,10 @@ class BrowserAgent:
                         f"Execution trace:\n{trace_text}\n"
                     )
                     logger.debug(
-                        "oracle prompt step=%s chars=%s",
+                        "oracle prompt step=%s chars=%s:\n%s",
                         self.state.step,
                         len(oracle_prompt),
+                        oracle_prompt,
                     )
                     oracle_started = time.perf_counter()
                     try:
@@ -1308,6 +1358,14 @@ class BrowserAgent:
                         logger.info(
                             f"  oracle: {oracle_duration_ms}ms all_clear={advice.all_clear} diagnosis={advice.diagnosis[:80]}"
                         )
+                        logger.debug(
+                            "oracle output step=%s all_clear=%s diagnosis=%s recommendation=%s avoid=%s",
+                            self.state.step,
+                            advice.all_clear,
+                            advice.diagnosis,
+                            advice.recommendation,
+                            advice.avoid,
+                        )
                         if not advice.all_clear:
                             oracle_hint = (
                                 f"\n\nORACLE DIRECTIVE:\n"
@@ -1329,6 +1387,7 @@ class BrowserAgent:
                 if self.state.last_filter_fingerprint != page_fingerprint or filter_output is None:
                     # Full tree for filter — no max_elements cap, no query ranking
                     full_tree_text = format_snapshot_for_llm(snapshot)
+                    logger.debug("full_tree_text (filter input):\n%s", full_tree_text)
                     raw_lines = _select_raw_text_lines(list(snapshot.raw_text), limit=120)
                     raw_text_block = "\n".join(raw_lines) if raw_lines else "None."
                     last_summary = self.state.last_summary or "None."
@@ -1344,9 +1403,10 @@ class BrowserAgent:
                     )
 
                     logger.debug(
-                        "snapshot_filter prompt step=%s chars=%s",
+                        "snapshot_filter prompt step=%s chars=%s:\n%s",
                         self.state.step,
                         len(filter_prompt),
+                        filter_prompt,
                     )
                     filter_started = time.perf_counter()
                     filter_result = await snapshot_filter.run(filter_prompt)
@@ -1386,6 +1446,13 @@ class BrowserAgent:
                         f"useful_lines={len(filter_output.useful_text_lines or [])} "
                         f"priority_ids={len(priority_ids)} total_elements={len(snapshot.elements)}"
                     )
+                    logger.debug(
+                        "filter output step=%s useful_text_lines=%s notes=%s priority_element_ids=%s",
+                        self.state.step,
+                        filter_output.useful_text_lines,
+                        filter_output.notes,
+                        filter_output.priority_element_ids,
+                    )
 
                 # ── Build pruned snapshot ──
                 useful_lines = filter_output.useful_text_lines if filter_output else []
@@ -1414,9 +1481,10 @@ class BrowserAgent:
                     f"{oracle_hint}"
                 )
                 logger.debug(
-                    "orchestrator prompt step=%s chars=%s",
+                    "orchestrator prompt step=%s chars=%s:\n%s",
                     self.state.step,
                     len(orchestrator_prompt),
+                    orchestrator_prompt,
                 )
                 orchestrator_started = time.perf_counter()
                 decision_result = await orchestrator.run(orchestrator_prompt)
@@ -1451,12 +1519,13 @@ class BrowserAgent:
                 if decision.rationale:
                     logger.info(f"    rationale: {decision.rationale}")
                 logger.debug(
-                    "orchestrator step=%s duration_ms=%s input_tokens=%s output_tokens=%s cost_usd=%s",
+                    "orchestrator output step=%s worker=%s worker_goal=%s done=%s rationale=%s allowed_tools=%s",
                     self.state.step,
-                    orchestrator_duration_ms,
-                    orchestrator_usage.input_tokens,
-                    orchestrator_usage.output_tokens,
-                    (orchestrator_cost.cost_usd if orchestrator_cost else None),
+                    decision.worker,
+                    decision.worker_goal,
+                    decision.done,
+                    decision.rationale,
+                    getattr(decision, "allowed_tools", None),
                 )
                 if decision.done:
                     logger.info(f"  orchestrator done: {decision.rationale or 'task complete'}")
@@ -1485,9 +1554,10 @@ class BrowserAgent:
                     + f"Page snapshot:\n{snapshot_text_worker}\n"
                 )
                 logger.debug(
-                    "worker prompt step=%s chars=%s",
+                    "worker prompt step=%s chars=%s:\n%s",
                     self.state.step,
                     len(worker_prompt),
+                    worker_prompt,
                 )
                 worker_started = time.perf_counter()
                 with browser_worker.sequential_tool_calls():
@@ -1517,6 +1587,7 @@ class BrowserAgent:
                 self.state.memory.append(step_output.summary)
                 self.state.last_tool = tool_context.last_tool
                 self.state.last_element_id = tool_context.last_element_id
+                logger.debug("memory step=%s entries=%s", self.state.step, self.state.memory)
 
                 # ── Populate step trace ──
                 self.state.step_trace.append({
@@ -1527,17 +1598,17 @@ class BrowserAgent:
                     "diff_summary": diff_text.split("\n")[0] if diff_text else "",
                     "url_changed": prev_url != (getattr(session.page, "url", "") or ""),
                 })
+                logger.debug("step_trace step=%s entries=%s", self.state.step, self.state.step_trace)
 
                 logger.info(f"  worker: {worker_duration_ms}ms done={step_output.done}")
                 if step_output.summary:
                     logger.info(f"    summary: {step_output.summary}")
                 logger.debug(
-                    "worker step=%s duration_ms=%s input_tokens=%s output_tokens=%s cost_usd=%s",
+                    "worker output step=%s done=%s summary=%s next_goal=%s",
                     self.state.step,
-                    worker_duration_ms,
-                    worker_usage.input_tokens,
-                    worker_usage.output_tokens,
-                    (worker_cost.cost_usd if worker_cost else None),
+                    step_output.done,
+                    step_output.summary,
+                    getattr(step_output, "next_goal", None),
                 )
                 metrics.emit(
                     "step_end",

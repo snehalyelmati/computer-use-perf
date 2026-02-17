@@ -112,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable JS event handler extraction from DOM elements",
     )
+    parser.add_argument(
+        "--save-pages",
+        action="store_true",
+        help="Save page HTML snapshots to logs/pages/ for local replay",
+    )
     return parser
 
 
@@ -131,6 +136,7 @@ def main() -> None:
         metrics_enabled=not bool(args.no_metrics),
         color_logs=not bool(args.no_color),
         handlers_enabled=not bool(args.no_handlers),
+        save_pages=bool(args.save_pages),
     )
     provider = args.provider
     defaults = PROVIDER_DEFAULTS[provider]

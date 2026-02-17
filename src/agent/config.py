@@ -85,3 +85,4 @@ class AgentConfig:
     metrics_enabled: bool = True
     color_logs: bool = True
     handlers_enabled: bool = True
+    save_pages: bool = False
