@@ -50,6 +50,7 @@ def build_tool_context(
     )
 
 _DEFAULT_SETTLE_MS = 80
+_WAIT_BUFFER_MS = 500
 
 _OBSERVER_INJECT_JS = """
 (() => {
@@ -475,6 +476,59 @@ def _format_verification(mutations: dict | None, base_message: str) -> str:
 
     return ". ".join(parts)
 
+def _format_wait_message(wait_ms: int, mutations: dict | None) -> str:
+    wait_seconds = wait_ms / 1000.0
+    parts = [f"Waited {wait_ms}ms"]
+
+    if not mutations:
+        parts.append(f"No changes during wait of {wait_seconds:.1f} seconds.")
+        return "\n".join(parts)
+
+    detail_lines: list[str] = []
+    start_url = mutations.get("startUrl", "")
+    current_url = mutations.get("currentUrl", "")
+    if start_url and current_url and start_url != current_url:
+        detail_lines.append(f"Page navigated to: {current_url}")
+
+    attr_changes = mutations.get("attrChanges", [])
+    if attr_changes:
+        attr_lines = []
+        for change in attr_changes:
+            tag = change.get("tag", "?")
+            attr = change.get("attr", "?")
+            old = change.get("old") or "null"
+            new = change.get("new") or "null"
+            attr_lines.append(f"{tag}[{attr}]: {old} -> {new}")
+        detail_lines.append("Attribute changes: " + "; ".join(attr_lines))
+
+    added_text = mutations.get("addedText", [])
+    if added_text:
+        items = [t[:250] for t in added_text]
+        detail_lines.append("New text appeared: " + " | ".join(items))
+
+    removed_text = mutations.get("removedText", [])
+    if removed_text:
+        items = [t[:250] for t in removed_text]
+        detail_lines.append("Text removed: " + " | ".join(items))
+
+    added_elements = mutations.get("addedElements", [])
+    if added_elements:
+        items = [t[:80] for t in added_elements]
+        detail_lines.append("Elements added: " + " | ".join(items))
+
+    removed_elements = mutations.get("removedElements", [])
+    if removed_elements:
+        items = [t[:80] for t in removed_elements]
+        detail_lines.append("Elements removed: " + " | ".join(items))
+
+    if not detail_lines:
+        parts.append(f"No changes during wait of {wait_seconds:.1f} seconds.")
+        return "\n".join(parts)
+
+    parts.append(f"Changes during wait of {wait_seconds:.1f} seconds:")
+    parts.extend(detail_lines)
+    return "\n".join(parts)
+
 
 async def _read_input_value(
     backend_node_id: int, session: CDPSession
@@ -647,8 +701,11 @@ async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
     context.last_tool = "wait"
     context.last_element_id = None
     clamped = max(0, min(milliseconds, 10_000))
-    await asyncio.sleep(clamped / 1000)
-    return ToolResult(ok=True, message=f"Waited {clamped}ms")
+    buffered = min(clamped + _WAIT_BUFFER_MS, 10_000)
+    injected = await _inject_observer(context.cdp_session)
+    await asyncio.sleep(buffered / 1000)
+    mutations = await _collect_mutations(context.cdp_session) if injected else None
+    return ToolResult(ok=True, message=_format_wait_message(buffered, mutations))
 
 
 def _truncate_attr(value: str, max_len: int = 200) -> str:
