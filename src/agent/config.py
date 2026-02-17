@@ -84,3 +84,4 @@ class AgentConfig:
     log_level: str = "INFO"
     metrics_enabled: bool = True
     color_logs: bool = True
+    handlers_enabled: bool = True

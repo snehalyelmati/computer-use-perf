@@ -21,12 +21,15 @@ flowchart LR
     end
 
     subgraph Browser[Execution Environment]
+        HE[Handler Extraction]
         CDP[CDP Snapshot]
         PW[Playwright Actions]
+        HE -->|"data-agent-hid stamps"| CDP
         CDP --> PW
     end
 
-    CDP -->|Full Snapshot| FILT
+    HE -->|Handler Map| CDP
+    CDP -->|Full Snapshot + handlers| FILT
     FILT -->|Pruned Snapshot + useful text| ORCH
     ORAC -->|Directive when off-track| ORCH
     ORCH -->|Delegated Goal| WORK
@@ -39,7 +42,7 @@ flowchart LR
 - Set `OPENROUTER_API_KEY` for OpenRouter access
 
 ## Run
-- `uv run main.py --url <target> --goal "<task>" [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--max-tokens 2048] [--log-level INFO] [--no-metrics]`
+- `uv run main.py --url <target> --goal "<task>" [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--max-tokens 2048] [--log-level INFO] [--no-metrics] [--no-handlers]`
 
 ### Outputs
 - Logs: `logs/agent.log`
@@ -82,6 +85,7 @@ This project is a general-purpose browser agent built around a clear separation 
 
 ```mermaid
 sequenceDiagram
+    participant HE as Handler Extraction
     participant CDP as CDP Snapshotter
     participant Filter as Filter (Pruner)
     participant Oracle as Oracle (Auditor)
@@ -90,7 +94,11 @@ sequenceDiagram
     participant PW as Playwright Executor
 
     CDP->>CDP: wait_for_load_state(networkidle)
-    CDP->>Filter: Full snapshot + raw text + diff
+    HE->>HE: page.evaluate (stamp data-agent-hid)
+    HE->>CDP: handler map
+    CDP->>CDP: capture snapshot (correlate handlers)
+    HE->>HE: cleanup data-agent-hid
+    CDP->>Filter: Full snapshot + handlers + raw text + diff
     Filter-->>Orchestrator: Pruned snapshot + useful text
     Oracle-->>Orchestrator: Directive (when off-track)
     Orchestrator->>Worker: Goal + pruned snapshot
@@ -135,14 +143,15 @@ The agent uses semantic tools that reference stable element IDs:
 ## Recommended Agent Loop
 
 1. **Wait for page settlement** (`domcontentloaded` + `networkidle`) to handle SPA transitions.
-2. **Extract context via CDP** into a structured snapshot with full element tree.
-3. **Oracle health check** (periodic every N steps + when stuck): reviews the execution trace and issues directives. Invalidates filter cache when intervention is needed.
-4. **Filter (tree pruner)**: receives full snapshot + diff + Oracle advice. Conservatively removes only obvious filler elements; keeps everything plausibly useful. Cached when the page fingerprint is unchanged.
-5. **Build pruned snapshot**: only filter-kept elements survive. Orchestrator and worker never see pruned elements.
-6. **Orchestrator**: plans the next sub-goal using stable element IDs from the pruned snapshot. Follows Oracle directives when present.
-7. **Worker**: executes the goal using semantic tools against the pruned snapshot. Receives only the goal + snapshot (no memory, no progress info).
-8. **Update step trace + memory + stop criteria** (`done`, `max_steps`, or unchanged fingerprint abort).
-9. **Repeat** until the overall goal is complete.
+2. **Extract JS handlers** via `page.evaluate()` — stamps elements with `data-agent-hid`, returns handler map. Disabled with `--no-handlers`.
+3. **Extract context via CDP** into a structured snapshot with full element tree. Handler map is correlated via `data-agent-hid`, then marker attributes are cleaned up.
+4. **Oracle health check** (periodic every N steps + when stuck): reviews the execution trace and issues directives. Invalidates filter cache when intervention is needed.
+5. **Filter (tree pruner)**: receives full snapshot + diff + Oracle advice. Conservatively removes only obvious filler elements; keeps everything plausibly useful. Cached when the page fingerprint is unchanged.
+6. **Build pruned snapshot**: only filter-kept elements survive. Orchestrator and worker never see pruned elements.
+7. **Orchestrator**: plans the next sub-goal using stable element IDs from the pruned snapshot. Follows Oracle directives when present.
+8. **Worker**: executes the goal using semantic tools against the pruned snapshot. Receives only the goal + snapshot (no memory, no progress info).
+9. **Update step trace + memory + stop criteria** (`done`, `max_steps`, or unchanged fingerprint abort).
+10. **Repeat** until the overall goal is complete.
 
 ## Guardrails
 

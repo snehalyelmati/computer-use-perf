@@ -26,7 +26,8 @@ Architecture:
 - Uses PydanticAI for orchestration and structured outputs.
 - Uses OpenRouter (OpenAI-compatible) or Cerebras for LLM access.
 - Uses CDP for context extraction and Playwright for action execution.
-- Four-agent pipeline: **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor, sees only goal + pruned snapshot).
+- Pipeline: **Handler extraction** (optional JS introspection) → **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor, sees only goal + pruned snapshot).
+- Handler extraction runs a single `page.evaluate()` before snapshot capture; stamps elements with `data-agent-hid` for correlation, cleaned up after snapshot. Disable with `--no-handlers`.
 - Oracle advice + diff are fed into the filter; filter cache is invalidated when Oracle intervenes with `all_clear=false`.
 - No database or server components.
 
@@ -58,6 +59,7 @@ Tool Docstrings:
 Snapshot Scope:
 - `capture_snapshot` only includes interactive elements — non-interactive elements need live DOM search via `page.evaluate()`.
 - All HTML attributes are stored in `ElementSnapshot.attributes`, but only 9 are shown to the LLM in `format_snapshot_for_llm()`.
+- Handler introspection (`src/agent/context/handlers.py`): extracts JS event handler source from inline handlers and framework internals (React/Vue/Angular). Handler hints appear as `[click:fn(); change:fn()]` in the LLM snapshot.
 
 Browser Interaction Principles:
 - DOM-first: use DOM methods (`.click()`, `.focus()`, `.innerText`) — they work through any visual layer (overlays, modals, z-index stacking).

@@ -107,6 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=2048,
         help="Max completion tokens per LLM call (prevents runaway repetition)",
     )
+    parser.add_argument(
+        "--no-handlers",
+        action="store_true",
+        help="Disable JS event handler extraction from DOM elements",
+    )
     return parser
 
 
@@ -125,6 +130,7 @@ def main() -> None:
         log_level=str(args.log_level),
         metrics_enabled=not bool(args.no_metrics),
         color_logs=not bool(args.no_color),
+        handlers_enabled=not bool(args.no_handlers),
     )
     provider = args.provider
     defaults = PROVIDER_DEFAULTS[provider]

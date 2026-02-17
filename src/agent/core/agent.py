@@ -23,6 +23,7 @@ from src.agent.core.resilient_model import ResilientModel
 
 from src.agent.browser.session import close_browser, launch_browser
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
+from src.agent.context.handlers import cleanup_handler_attributes, extract_handlers
 from src.agent.context.snapshot import (
     ElementSnapshot,
     PageSnapshot,
@@ -1179,9 +1180,30 @@ class BrowserAgent:
                     await session.page.wait_for_load_state("networkidle", timeout=3000)
                 except Exception:
                     pass
+                # ── Handler extraction ──
+                handler_map: dict[str, dict[str, str]] | None = None
+                handlers_count = 0
+                if self.agent_config.handlers_enabled:
+                    handler_started = time.perf_counter()
+                    handler_map = await extract_handlers(session.page)
+                    handler_duration_ms = int((time.perf_counter() - handler_started) * 1000)
+                    handlers_count = len(handler_map) if handler_map else 0
+                    metrics.emit(
+                        "handler_extraction",
+                        step=self.state.step,
+                        duration_ms=handler_duration_ms,
+                        handlers=handlers_count,
+                    )
+
                 snapshot_started = time.perf_counter()
-                snapshot = await capture_snapshot(session.page, session.cdp_session)
+                snapshot = await capture_snapshot(
+                    session.page, session.cdp_session, handler_map=handler_map,
+                )
                 snapshot_duration_ms = int((time.perf_counter() - snapshot_started) * 1000)
+
+                if handler_map:
+                    await cleanup_handler_attributes(session.page)
+
                 metrics.emit(
                     "snapshot",
                     step=self.state.step,
@@ -1189,6 +1211,7 @@ class BrowserAgent:
                     url=snapshot.url,
                     title=snapshot.title,
                     elements=len(snapshot.elements),
+                    handlers=handlers_count,
                 )
                 if snapshot.diagnostics:
                     for name, duration_ms in (snapshot.diagnostics.durations_ms or {}).items():
@@ -1200,7 +1223,8 @@ class BrowserAgent:
                             **(snapshot.diagnostics.size_hints or {}),
                         )
                 logger.info(
-                    f"  snapshot: {snapshot_duration_ms}ms elements={len(snapshot.elements)} url={snapshot.url}"
+                    f"  snapshot: {snapshot_duration_ms}ms elements={len(snapshot.elements)}"
+                    f" handlers={handlers_count} url={snapshot.url}"
                 )
                 diff_text, _diff_ids = _snapshot_diff(prev_snapshot, snapshot)
                 page_fingerprint = _page_fingerprint(snapshot)

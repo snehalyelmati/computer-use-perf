@@ -13,6 +13,8 @@ from typing import Any, Iterable, Sequence
 
 from playwright.async_api import CDPSession, Page
 
+from src.agent.context.handlers import format_handlers_for_llm, prioritize_handlers
+
 INTERACTIVE_ROLES = {
     "button",
     "checkbox",
@@ -61,6 +63,7 @@ class ElementSnapshot:
     in_viewport: bool | None = None
     area: float | None = None
     parent_chain: tuple[tuple[int, str, str], ...] | None = None
+    handlers: dict[str, str] | None = None  # {event_name: truncated_source}
 
 
 @dataclass(frozen=True)
@@ -345,7 +348,11 @@ def unique_stable_id(stable_id: str, counts: dict[str, int]) -> str:
         return stable_id
     return f"{stable_id}-{count + 1}"
 
-async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
+async def capture_snapshot(
+    page: Page,
+    cdp_session: CDPSession,
+    handler_map: dict[str, dict[str, str]] | None = None,
+) -> PageSnapshot:
     """Capture a DOM + accessibility snapshot using CDP."""
 
     durations_ms: dict[str, int] = {}
@@ -492,6 +499,15 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
                 if chain:
                     parent_chain = tuple(reversed(chain))
 
+            # Look up handler data via data-agent-hid marker attribute
+            element_handlers: dict[str, str] | None = None
+            if handler_map:
+                hid = node_attributes.get("data-agent-hid")
+                if hid and hid in handler_map:
+                    element_handlers = prioritize_handlers(handler_map[hid])
+                # Strip the marker so it doesn't leak into attributes / [+attrs] hint
+                node_attributes.pop("data-agent-hid", None)
+
             bbox = bounds_map.get(index)
             in_viewport = _in_viewport(bbox, viewport_width=viewport_width, viewport_height=viewport_height)
             area = None
@@ -517,6 +533,7 @@ async def capture_snapshot(page: Page, cdp_session: CDPSession) -> PageSnapshot:
                     in_viewport=in_viewport,
                     area=area,
                     parent_chain=parent_chain,
+                    handlers=element_handlers,
                 )
             )
 
@@ -630,7 +647,10 @@ def format_snapshot_for_llm(
         if has_extra:
             hints_parts.append("[+attrs]")
         hints = (" " + " ".join(hints_parts)) if hints_parts else ""
-        return f"- {element.stable_id}: {label}{hints}"
+        handler_str = ""
+        if element.handlers:
+            handler_str = " " + format_handlers_for_llm(element.handlers)
+        return f"- {element.stable_id}: {label}{hints}{handler_str}"
 
     # --- Try tree output ---
     has_chains = any(el.parent_chain for el in elements)

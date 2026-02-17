@@ -246,7 +246,7 @@ async def _dispatch_click(session: CDPSession, x: float, y: float) -> bool:
     return True
 
 _SCROLL_JS = """
-(dx, dy) => {
+([dx, dy]) => {
     function findScrollable() {
         const se = document.scrollingElement;
         if (se && se.scrollHeight > se.clientHeight + 1) return se;
