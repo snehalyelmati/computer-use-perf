@@ -57,7 +57,7 @@ async def test_run_does_not_stop_on_worker_done(monkeypatch: pytest.MonkeyPatch,
     async def fake_close_browser(_session: _StubSession) -> None:
         return None
 
-    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any) -> PageSnapshot:
+    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any, **_kwargs: Any) -> PageSnapshot:
         return PageSnapshot(url=_page.url, title="Test", elements=[], raw_text=[])
 
     captured_summary: dict[str, Any] = {}

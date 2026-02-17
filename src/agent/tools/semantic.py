@@ -245,24 +245,50 @@ async def _dispatch_click(session: CDPSession, x: float, y: float) -> bool:
         return False
     return True
 
-_SCROLL_JS = """
+_SCROLL_PAGE_JS = """
 ([dx, dy]) => {
-    function findScrollable() {
-        const se = document.scrollingElement;
-        if (se && se.scrollHeight > se.clientHeight + 1) return se;
-        for (const el of document.querySelectorAll('*')) {
-            const style = getComputedStyle(el);
-            const oy = style.overflowY;
-            if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 1)
-                return el;
-        }
-        return document.documentElement;
+    const before = { x: window.scrollX, y: window.scrollY };
+    window.scrollBy(dx, dy);
+    const after = { x: window.scrollX, y: window.scrollY };
+    return { before, after, targetTag: 'window' };
+}
+""".strip()
+
+_SCROLL_ELEMENT_JS = """
+([dx, dy]) => {
+    function canScroll(el) {
+        const style = getComputedStyle(el);
+        const oy = style.overflowY;
+        const ox = style.overflowX;
+        const canY = dy !== 0 && (oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 1;
+        const canX = dx !== 0 && (ox === 'auto' || ox === 'scroll') && el.scrollWidth > el.clientWidth + 1;
+        return canY || canX;
     }
-    const target = findScrollable();
-    const before = { x: target.scrollLeft, y: target.scrollTop };
-    target.scrollBy(dx, dy);
-    const after = { x: target.scrollLeft, y: target.scrollTop };
-    return { before, after };
+    let target = this;
+    while (target && target !== document.documentElement) {
+        if (canScroll(target)) break;
+        target = target.parentElement;
+    }
+    const root = document.scrollingElement || document.documentElement;
+    if (!target || target === document.documentElement) {
+        target = root;
+    }
+    const useWindow = target === root;
+    const before = {
+        x: useWindow ? window.scrollX : target.scrollLeft,
+        y: useWindow ? window.scrollY : target.scrollTop,
+    };
+    if (useWindow) {
+        window.scrollBy(dx, dy);
+    } else {
+        target.scrollBy(dx, dy);
+    }
+    const after = {
+        x: useWindow ? window.scrollX : target.scrollLeft,
+        y: useWindow ? window.scrollY : target.scrollTop,
+    };
+    const tag = useWindow ? 'window' : (target.tagName || 'element');
+    return { before, after, targetTag: tag };
 }
 """.strip()
 
@@ -715,22 +741,49 @@ async def search_page_attributes(query: str, context: ToolContext) -> ToolResult
         lines.append(f"<{match['tag']} {attrs_str}>{text_hint}")
     return ToolResult(ok=True, message="\n".join(lines))
 
-async def scroll(delta_x: int, delta_y: int, context: ToolContext) -> ToolResult:
-    """Scroll the page by finding the actual scrollable container and calling scrollBy."""
+async def scroll(
+    delta_x: int,
+    delta_y: int,
+    context: ToolContext,
+    *,
+    element_id: str | None = None,
+) -> ToolResult:
+    """Scroll the page by a pixel offset, optionally anchored to a target element."""
     context.last_tool = "scroll"
-    context.last_element_id = None
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context) if element_id else None
+    frame_error = _active_frame_error(element, context) if element_id else None
+    if frame_error:
+        return frame_error
+    session = context.cdp_session
+    if element_id and element and element.frame_id:
+        session = await _session_for_element(element, context)
     try:
-        result = await context.page.evaluate(_SCROLL_JS, [delta_x, delta_y])
+        if element_id and element and element.backend_node_id:
+            result = await _call_on_node(
+                element.backend_node_id,
+                session,
+                _SCROLL_ELEMENT_JS,
+                args=[{"value": [delta_x, delta_y]}],
+            )
+            if not result:
+                return ToolResult(ok=False, message="Scroll failed: element not found")
+            result = result.get("result", {}).get("value")
+        else:
+            result = await context.page.evaluate(_SCROLL_PAGE_JS, [delta_x, delta_y])
     except Exception as exc:
         return ToolResult(ok=False, message=f"Scroll failed: {exc}")
     if not result:
         return ToolResult(ok=True, message=f"Scrolled dx={delta_x} dy={delta_y}")
     before = result.get("before", {})
     after = result.get("after", {})
+    target = result.get("targetTag")
     dx = round(after.get("x", 0) - before.get("x", 0))
     dy = round(after.get("y", 0) - before.get("y", 0))
-    msg = (
-        f"Scrolled dx={delta_x} dy={delta_y}"
+    msg = f"Scrolled dx={delta_x} dy={delta_y}"
+    if target:
+        msg += f" on {target}"
+    msg += (
         f". Scroll position changed by ({dx}, {dy})px,"
         f" now at ({round(after.get('x', 0))}, {round(after.get('y', 0))})"
     )

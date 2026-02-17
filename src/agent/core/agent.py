@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import logging
 import os
@@ -581,7 +581,7 @@ def build_snapshot_filter_agent(
     return Agent(
         model,
         output_type=SnapshotFilterOutput,
-        system_prompt=(SYSTEM_PROMPT, FILTER_PROMPT),
+        system_prompt=FILTER_PROMPT,
         model_settings=model_settings,
         retries=1,
     )
@@ -591,7 +591,7 @@ def build_oracle_agent(model: Model, *, model_settings: dict[str, Any]) -> Agent
     return Agent(
         model,
         output_type=OracleAdvice,
-        system_prompt=(SYSTEM_PROMPT, ORACLE_PROMPT),
+        system_prompt=ORACLE_PROMPT,
         model_settings=model_settings,
         retries=1,
     )
@@ -600,9 +600,15 @@ def build_oracle_agent(model: Model, *, model_settings: dict[str, Any]) -> Agent
 def build_browser_worker_agent(
     model: Model, *, model_settings: dict[str, Any]
 ) -> Agent[WorkerDeps, StepOutput]:
+    async def _normalize_strict(
+        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
+    ) -> list[ToolDefinition]:
+        return [replace(t, strict=False) for t in tool_defs]
+
     async def _filter_tools(
         ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
     ) -> list[ToolDefinition]:
+        tool_defs = [replace(t, strict=False) for t in tool_defs]
         if ctx.deps.allowed_tools is None:
             return tool_defs
         return [t for t in tool_defs if t.name in ctx.deps.allowed_tools]
@@ -614,6 +620,7 @@ def build_browser_worker_agent(
         system_prompt=SYSTEM_PROMPT,
         model_settings=model_settings,
         prepare_tools=_filter_tools,
+        prepare_output_tools=_normalize_strict,
         retries=1,
     )
 
@@ -877,10 +884,20 @@ def build_browser_worker_agent(
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="scroll")
-    async def scroll(ctx: RunContext[WorkerDeps], delta_x: int = 0, delta_y: int = 0) -> ToolExecutionResult:
-        """Scroll the viewport by a pixel offset. Positive delta_y scrolls down, positive delta_x scrolls right."""
+    async def scroll(
+        ctx: RunContext[WorkerDeps],
+        delta_x: int = 0,
+        delta_y: int = 0,
+        element_id: str | None = None,
+    ) -> ToolExecutionResult:
+        """Scroll the viewport by a pixel offset, optionally anchored to a target element. Use element_id from the page snapshot."""
         start = time.perf_counter()
-        result = await semantic.scroll(delta_x, delta_y, ctx.deps.tool_context)
+        result = await semantic.scroll(
+            delta_x,
+            delta_y,
+            ctx.deps.tool_context,
+            element_id=element_id,
+        )
         duration_ms = int((time.perf_counter() - start) * 1000)
         direction_parts = []
         if delta_x != 0:
@@ -894,16 +911,18 @@ def build_browser_worker_agent(
                 "scroll",
                 result.ok,
                 duration_ms,
+                element_id=element_id,
                 extra=direction if result.ok else result.message,
                 feedback=_compact_feedback(result.message, f"Scrolled dx={delta_x} dy={delta_y}") if result.ok else None,
             )
         )
         logger.debug(
-            "tool=scroll step=%s ok=%s delta_x=%s delta_y=%s duration_ms=%s full_message=%s",
+            "tool=scroll step=%s ok=%s delta_x=%s delta_y=%s element_id=%s duration_ms=%s full_message=%s",
             ctx.deps.step,
             result.ok,
             delta_x,
             delta_y,
+            element_id,
             duration_ms,
             result.message,
         )
@@ -915,6 +934,7 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             delta_x=delta_x,
             delta_y=delta_y,
+            element_id=element_id,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
@@ -1307,6 +1327,9 @@ class BrowserAgent:
 
                 priority_ids: list[str] = []
 
+                # Compute full tree text once — used by both Oracle and Filter
+                full_tree_text = format_snapshot_for_llm(snapshot)
+
                 # ── Oracle (dual trigger: periodic + stuck) ──
                 oracle_hint = ""
                 should_call_oracle = (
@@ -1319,7 +1342,8 @@ class BrowserAgent:
                         f"Overall goal: {self.agent_config.goal}\n\n"
                         f"Current step: {self.state.step}\n"
                         f"No-progress steps: {self.state.no_progress_steps}\n\n"
-                        f"Execution trace:\n{trace_text}\n"
+                        f"Execution trace:\n{trace_text}\n\n"
+                        f"Page snapshot (full interactive element tree):\n{full_tree_text}\n"
                     )
                     logger.debug(
                         "oracle prompt step=%s chars=%s:\n%s",
@@ -1385,8 +1409,6 @@ class BrowserAgent:
                 # ── Filter (tree pruner) ──
                 filter_output = self.state.last_filter_output
                 if self.state.last_filter_fingerprint != page_fingerprint or filter_output is None:
-                    # Full tree for filter — no max_elements cap, no query ranking
-                    full_tree_text = format_snapshot_for_llm(snapshot)
                     logger.debug("full_tree_text (filter input):\n%s", full_tree_text)
                     raw_lines = _select_raw_text_lines(list(snapshot.raw_text), limit=120)
                     raw_text_block = "\n".join(raw_lines) if raw_lines else "None."
@@ -1604,11 +1626,10 @@ class BrowserAgent:
                 if step_output.summary:
                     logger.info(f"    summary: {step_output.summary}")
                 logger.debug(
-                    "worker output step=%s done=%s summary=%s next_goal=%s",
+                    "worker output step=%s done=%s summary=%s",
                     self.state.step,
                     step_output.done,
                     step_output.summary,
-                    getattr(step_output, "next_goal", None),
                 )
                 metrics.emit(
                     "step_end",

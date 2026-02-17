@@ -92,7 +92,7 @@ async def test_filter_is_cached_when_fingerprint_unchanged(monkeypatch: pytest.M
     async def fake_close_browser(_session: _StubSession) -> None:
         return None
 
-    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any) -> PageSnapshot:
+    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any, **_kwargs: Any) -> PageSnapshot:
         return snapshots.pop(0)
 
     captured_summary: dict[str, Any] = {}
@@ -162,7 +162,7 @@ async def test_filter_reruns_when_fingerprint_changes(monkeypatch: pytest.Monkey
     async def fake_close_browser(_session: _StubSession) -> None:
         return None
 
-    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any) -> PageSnapshot:
+    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any, **_kwargs: Any) -> PageSnapshot:
         return snapshots.pop(0)
 
     filter_calls = {"count": 0}
@@ -216,7 +216,7 @@ async def test_abort_when_fingerprint_unchanged_for_threshold(monkeypatch: pytes
     async def fake_close_browser(_session: _StubSession) -> None:
         return None
 
-    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any) -> PageSnapshot:
+    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any, **_kwargs: Any) -> PageSnapshot:
         return snapshots.pop(0)
 
     captured_summary: dict[str, Any] = {}
@@ -266,4 +266,3 @@ async def test_abort_when_fingerprint_unchanged_for_threshold(monkeypatch: pytes
     # Step 1: sets fingerprint. Steps 2-5: unchanged (no_progress 1,2,3,4).
     # At step 6: no_progress=5 >= threshold=5 → abort.
     assert captured_summary.get("steps") == 6
-

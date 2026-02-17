@@ -117,7 +117,7 @@ The agent uses semantic tools that reference stable element IDs:
 - `click_element(element_id: str)`
 - `type_text(element_id: str, text: str)`
 - `drag_and_drop(source_id: str, target_id: str)`
-- `scroll(delta_x: int, delta_y: int)`
+- `scroll(delta_x: int, delta_y: int, element_id: str | None = None)`
 - `wait(milliseconds: int)` (capped at 10s)
 - `switch_to_iframe(iframe_id: str)`, `switch_to_main_frame()`
 - `navigate_to(url: str)`, `press_key_combination(keys: list[str])`
