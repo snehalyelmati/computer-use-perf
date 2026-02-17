@@ -454,10 +454,13 @@ def _element_fingerprint_line(element: ElementSnapshot) -> str:
     ]
     return "\t".join(parts)
 
-def _page_fingerprint(snapshot: Any) -> str:
+def _page_fingerprint(snapshot: Any, *, raw_text_limit: int = 200) -> str:
     elements = list(getattr(snapshot, "elements", []) or [])
     elements.sort(key=lambda el: el.stable_id)
-    raw_lines = _select_raw_text_lines(list(getattr(snapshot, "raw_text", []) or []), limit=60)
+    raw_lines = _select_raw_text_lines(
+        list(getattr(snapshot, "raw_text", []) or []),
+        limit=raw_text_limit,
+    )
     lines = [snapshot.url or "", snapshot.title or ""]
     for element in elements[:120]:
         lines.append(_element_fingerprint_line(element))
@@ -511,31 +514,59 @@ def _format_element_brief(element: ElementSnapshot) -> str:
     hints = f"{bbox_hint}{(' ' + frame_hint) if frame_hint else ''}{reason_hint}{viewport_hint}"
     return f"{element.stable_id}: {label}{hints}"
 
-def _select_raw_text_lines(raw_text: list[str] | tuple[str, ...] | Any, *, limit: int = 120) -> list[str]:
+def _select_raw_text_lines(
+    raw_text: list[str] | tuple[str, ...] | Any,
+    *,
+    limit: int = 300,
+    scan_cap: int = 20000,
+    max_len: int = 800,
+    dedupe_prefix_len: int = 240,
+    dedupe_suffix_len: int = 120,
+) -> list[str]:
     if not raw_text:
         return []
     seen: set[str] = set()
     candidates: list[tuple[float, int, str]] = []
-    for idx, line in enumerate(list(raw_text)[:5000]):
+    for idx, line in enumerate(list(raw_text)[:scan_cap]):
         normalized = " ".join(str(line).split())
-        if len(normalized) < 3 or len(normalized) > 220:
+        if len(normalized) < 3 or len(normalized) > max_len:
             continue
         key = normalized.lower()
-        if key in seen:
+        prefix = key[:dedupe_prefix_len] if dedupe_prefix_len > 0 else key
+        suffix = key[-dedupe_suffix_len:] if dedupe_suffix_len > 0 else key
+        dedupe_key = f"{prefix}::{suffix}"
+        if dedupe_key in seen:
             continue
-        seen.add(key)
+        seen.add(dedupe_key)
         has_digit = any(ch.isdigit() for ch in normalized)
         symbol_count = sum(1 for ch in normalized if ch in ":=/@#_-")
         alpha_count = sum(1 for ch in normalized if ch.isalpha())
+        lowered = normalized.lower()
+        instruction_hits = sum(
+            1
+            for token in ("click", "select", "reveal", "times", "submit", "enter", "press")
+            if token in lowered
+        )
         score = 0.0
         score += 2.0 if has_digit else 0.0
         score += min(2.0, float(symbol_count) / 2.0)
         score += min(3.0, float(alpha_count) / 40.0)
+        score += min(4.0, float(instruction_hits))
         candidates.append((score, idx, normalized))
     candidates.sort(key=lambda item: (-item[0], item[1]))
     return [item[2] for item in candidates[:limit]]
 
-def _snapshot_diff(prev: Any | None, curr: Any) -> tuple[str, list[str]]:
+def _snapshot_diff(
+    prev: Any | None,
+    curr: Any,
+    *,
+    raw_text_limit: int = 80,
+    raw_text_detail_limit: int = 8,
+    raw_text_scan_cap: int = 20000,
+    raw_text_line_max_len: int = 800,
+    raw_text_dedupe_prefix_len: int = 240,
+    raw_text_dedupe_suffix_len: int = 120,
+) -> tuple[str, list[str]]:
     if not prev:
         return "First snapshot (no prior snapshot to diff).", []
     prev_map = {el.stable_id: el for el in list(getattr(prev, "elements", []) or [])}
@@ -562,6 +593,34 @@ def _snapshot_diff(prev: Any | None, curr: Any) -> tuple[str, list[str]]:
     for sid in removed_ids[:8]:
         detail_ids.append(sid)
         lines.append(f"- {sid}: (removed)")
+    prev_lines = _select_raw_text_lines(
+        list(getattr(prev, "raw_text", []) or []),
+        limit=raw_text_limit,
+        scan_cap=raw_text_scan_cap,
+        max_len=raw_text_line_max_len,
+        dedupe_prefix_len=raw_text_dedupe_prefix_len,
+        dedupe_suffix_len=raw_text_dedupe_suffix_len,
+    )
+    curr_lines = _select_raw_text_lines(
+        list(getattr(curr, "raw_text", []) or []),
+        limit=raw_text_limit,
+        scan_cap=raw_text_scan_cap,
+        max_len=raw_text_line_max_len,
+        dedupe_prefix_len=raw_text_dedupe_prefix_len,
+        dedupe_suffix_len=raw_text_dedupe_suffix_len,
+    )
+    prev_set = {line.lower() for line in prev_lines}
+    curr_set = {line.lower() for line in curr_lines}
+    added = [line for line in curr_lines if line.lower() not in prev_set]
+    removed = [line for line in prev_lines if line.lower() not in curr_set]
+    if added or removed:
+        lines.append(
+            f"text_changes=+{len(added)} -{len(removed)} (showing up to {raw_text_detail_limit} each)"
+        )
+        for line in added[:raw_text_detail_limit]:
+            lines.append(f"+text {line}")
+        for line in removed[:raw_text_detail_limit]:
+            lines.append(f"-text {line}")
     return "\n".join(lines), detail_ids
 
 
@@ -1283,8 +1342,20 @@ class BrowserAgent:
                     f"  snapshot: {snapshot_duration_ms}ms elements={len(snapshot.elements)}"
                     f" handlers={handlers_count} url={snapshot.url}"
                 )
-                diff_text, _diff_ids = _snapshot_diff(prev_snapshot, snapshot)
-                page_fingerprint = _page_fingerprint(snapshot)
+                diff_text, _diff_ids = _snapshot_diff(
+                    prev_snapshot,
+                    snapshot,
+                    raw_text_limit=self.agent_config.raw_text_limit_diff,
+                    raw_text_detail_limit=self.agent_config.raw_text_diff_detail_limit,
+                    raw_text_scan_cap=self.agent_config.raw_text_scan_cap,
+                    raw_text_line_max_len=self.agent_config.raw_text_line_max_len,
+                    raw_text_dedupe_prefix_len=self.agent_config.raw_text_dedupe_prefix_len,
+                    raw_text_dedupe_suffix_len=self.agent_config.raw_text_dedupe_suffix_len,
+                )
+                page_fingerprint = _page_fingerprint(
+                    snapshot,
+                    raw_text_limit=self.agent_config.raw_text_limit_fingerprint,
+                )
                 logger.debug("page_fingerprint=%s", page_fingerprint)
                 logger.debug("diff_text:\n%s", diff_text)
                 if self.state.last_page_fingerprint == page_fingerprint:
@@ -1327,7 +1398,10 @@ class BrowserAgent:
                 priority_ids: list[str] = []
 
                 # Compute full tree text once — used by both Oracle and Filter
-                full_tree_text = format_snapshot_for_llm(snapshot)
+                full_tree_text = format_snapshot_for_llm(
+                    snapshot,
+                    max_elements=self.agent_config.max_elements,
+                )
 
                 # ── Oracle (dual trigger: periodic + stuck) ──
                 oracle_hint = ""
@@ -1337,11 +1411,13 @@ class BrowserAgent:
                 )
                 if should_call_oracle and self.state.step_trace:
                     trace_text = _format_step_trace(self.state.step_trace)
+                    tool_list = ", ".join(sorted(DEFAULT_WORKER_TOOLS))
                     oracle_prompt = (
                         f"Overall goal: {self.agent_config.goal}\n\n"
                         f"Current step: {self.state.step}\n"
                         f"No-progress steps: {self.state.no_progress_steps}\n\n"
                         f"Execution trace:\n{trace_text}\n\n"
+                        f"Worker tools: {tool_list}\n\n"
                         f"Page snapshot (full interactive element tree):\n{full_tree_text}\n"
                     )
                     logger.debug(
@@ -1409,7 +1485,14 @@ class BrowserAgent:
                 filter_output = self.state.last_filter_output
                 if self.state.last_filter_fingerprint != page_fingerprint or filter_output is None:
                     logger.debug("full_tree_text (filter input):\n%s", full_tree_text)
-                    raw_lines = _select_raw_text_lines(list(snapshot.raw_text), limit=120)
+                    raw_lines = _select_raw_text_lines(
+                        list(snapshot.raw_text),
+                        limit=self.agent_config.raw_text_limit_prompt,
+                        scan_cap=self.agent_config.raw_text_scan_cap,
+                        max_len=self.agent_config.raw_text_line_max_len,
+                        dedupe_prefix_len=self.agent_config.raw_text_dedupe_prefix_len,
+                        dedupe_suffix_len=self.agent_config.raw_text_dedupe_suffix_len,
+                    )
                     raw_text_block = "\n".join(raw_lines) if raw_lines else "None."
                     last_summary = self.state.last_summary or "None."
                     last_worker_goal = self.state.last_worker_goal or "None."
@@ -1491,13 +1574,18 @@ class BrowserAgent:
                 )
 
                 # ── Orchestrator ──
-                snapshot_text_orchestrator = format_snapshot_for_llm(pruned_snapshot)
+                snapshot_text_orchestrator = format_snapshot_for_llm(
+                    pruned_snapshot,
+                    max_elements=self.agent_config.max_elements,
+                )
                 memory_text = _format_memory(self.state.memory, limit=self.agent_config.memory_steps)
+                tool_list = ", ".join(sorted(DEFAULT_WORKER_TOOLS))
                 orchestrator_prompt = (
                     f"Overall goal: {self.agent_config.goal}\n\n"
                     f"Filtered useful lines:\n{useful_block}\n\n"
                     f"Diff since prior snapshot:\n{diff_text}\n\n"
                     f"Memory (recent):\n{memory_text}\n\n"
+                    f"Worker tools: {tool_list}\n\n"
                     f"Page snapshot:\n{snapshot_text_orchestrator}\n"
                     f"{oracle_hint}"
                 )
@@ -1559,7 +1647,10 @@ class BrowserAgent:
                     break
 
                 # ── Worker ──
-                snapshot_text_worker = format_snapshot_for_llm(pruned_snapshot)
+                snapshot_text_worker = format_snapshot_for_llm(
+                    pruned_snapshot,
+                    max_elements=self.agent_config.max_elements,
+                )
                 tool_tracker = ToolCallTracker()
                 deps = WorkerDeps(
                     tool_context=tool_context,

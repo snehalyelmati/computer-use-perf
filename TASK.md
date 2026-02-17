@@ -7,4 +7,4 @@ Instructions:
 - Do not navigate away or manually navigate once the site loads. Progress resets if you navigate.
 - When a challenge is complete, the page will automatically advance to the next challenge.
 - Continue until all 30 challenges are complete and you reach the confirmation page.
-- Never invent codes. Each step has its own code visible on the page if you look carefully.
+- Never invent codes, never use old codes. Each step has its own code visible on the page if you look carefully.

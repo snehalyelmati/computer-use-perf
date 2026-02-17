@@ -76,7 +76,7 @@ class AgentConfig:
     goal: str | None = None
     max_steps: int = 100
     log_dir: str = "logs"
-    max_elements: int = 60
+    max_elements: int = 200
     memory_steps: int = 10
     stuck_threshold: int = 3
     unchanged_abort_threshold: int = 5
@@ -86,3 +86,11 @@ class AgentConfig:
     color_logs: bool = True
     handlers_enabled: bool = True
     save_pages: bool = False
+    raw_text_limit_prompt: int = 300
+    raw_text_limit_fingerprint: int = 200
+    raw_text_limit_diff: int = 80
+    raw_text_diff_detail_limit: int = 8
+    raw_text_line_max_len: int = 800
+    raw_text_scan_cap: int = 20000
+    raw_text_dedupe_prefix_len: int = 240
+    raw_text_dedupe_suffix_len: int = 120

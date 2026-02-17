@@ -161,6 +161,24 @@ def _interactive_reason(
         return True, "cursor_pointer", 0.35
     return False, None, 0.0
 
+def _should_include_non_interactive(
+    node_name: str | None,
+    attributes: dict[str, str],
+) -> bool:
+    if (node_name or "").upper() == "META":
+        return True
+    for key, value in attributes.items():
+        key_lower = key.lower()
+        value_lower = (value or "").lower()
+        if key_lower.startswith("data-") or key_lower.startswith("aria-"):
+            if value_lower or key_lower in {"aria-hidden", "aria-label", "aria-describedby"}:
+                return True
+        if key_lower in {"hidden", "content", "name", "property", "http-equiv"}:
+            return True
+        if key_lower == "style" and any(token in value_lower for token in ("display:none", "visibility:hidden")):
+            return True
+    return False
+
 def _frame_tree_lookup(frame_tree: dict[str, Any]) -> dict[str, dict[str, str]]:
     lookup: dict[str, dict[str, str]] = {}
 
@@ -413,6 +431,7 @@ async def capture_snapshot(
 
         node_count = len(node_names)
         size_hints["dom_total_nodes"] = size_hints.get("dom_total_nodes", 0) + int(node_count)
+        last_text_parent_index: int | None = None
         for index in range(node_count):
             node_name = _decode_string(node_names[index], strings)
             node_value = _decode_string(node_values[index], strings) if index < len(node_values) else ""
@@ -423,7 +442,16 @@ async def capture_snapshot(
             text_value = _decode_string(text_value_raw, strings)
             text = _normalize_text(text_value or node_value)
             if node_name == "#text" and text:
-                raw_text.append(text)
+                parent_index = None
+                if isinstance(parent_indices, list) and index < len(parent_indices):
+                    parent_index = parent_indices[index]
+                if parent_index is not None and parent_index == last_text_parent_index and raw_text:
+                    raw_text[-1] = f"{raw_text[-1]} {text}".strip()
+                else:
+                    raw_text.append(text)
+                last_text_parent_index = parent_index
+            else:
+                last_text_parent_index = None
 
             node_attributes = {}
             if index < len(attributes):
@@ -460,7 +488,9 @@ async def capture_snapshot(
             is_interactive, interactive_reason, interactive_confidence = _interactive_reason(
                 node_name, role, node_attributes, cursor
             )
-            if not is_interactive:
+            if not is_interactive and not _should_include_non_interactive(
+                node_name, node_attributes,
+            ):
                 continue
 
             stable_id_base: str
@@ -528,12 +558,12 @@ async def capture_snapshot(
                     frame_id=element_frame_id,
                     frame_url=frame_url,
                     frame_name=frame_name,
-                    interactive_reason=interactive_reason,
-                    interactive_confidence=float(interactive_confidence),
+                    interactive_reason=interactive_reason if is_interactive else "non_interactive_hint",
+                    interactive_confidence=float(interactive_confidence) if is_interactive else 0.25,
                     in_viewport=in_viewport,
                     area=area,
                     parent_chain=parent_chain,
-                    handlers=element_handlers,
+                    handlers=element_handlers if is_interactive else None,
                 )
             )
 
@@ -556,7 +586,7 @@ async def capture_snapshot(
 def format_snapshot_for_llm(
     snapshot: PageSnapshot,
     *,
-    max_elements: int = 60,
+    max_elements: int = 200,
     query: str | None = None,
     priority_ids: Sequence[str] | None = None,
 ) -> str:
@@ -592,7 +622,29 @@ def format_snapshot_for_llm(
 
     # --- Build element label ---
     _IMPORTANT_ATTR_KEYS = [
-        "id", "name", "type", "placeholder", "aria-label", "title", "alt", "href", "value",
+        "id",
+        "name",
+        "type",
+        "placeholder",
+        "aria-label",
+        "aria-describedby",
+        "aria-details",
+        "aria-labelledby",
+        "aria-hidden",
+        "aria-value",
+        "aria-valuetext",
+        "aria-valuenow",
+        "aria-valuemin",
+        "aria-valuemax",
+        "title",
+        "alt",
+        "href",
+        "value",
+        "class",
+        "role",
+        "content",
+        "property",
+        "http-equiv",
     ]
     _SHOWN_ATTRS = set(_IMPORTANT_ATTR_KEYS)
     _SEMANTIC_TAGS = frozenset({
@@ -619,6 +671,9 @@ def format_snapshot_for_llm(
         important_attrs = {
             k: attrs.get(k) for k in _IMPORTANT_ATTR_KEYS if attrs.get(k)
         }
+        for k, v in attrs.items():
+            if k.startswith("data-") and v and k not in important_attrs:
+                important_attrs[k] = v
         attr_str = (
             " ".join(f'{k}="{v}"' for k, v in important_attrs.items())
             if important_attrs else ""
@@ -640,11 +695,11 @@ def format_snapshot_for_llm(
             hints_parts.append(f"bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}")
         if element.in_viewport is False:
             hints_parts.append("offscreen")
-        has_extra = any(
-            k.startswith("data-") or (k.startswith("aria-") and k not in _SHOWN_ATTRS)
+        has_extra_aria = any(
+            k.startswith("aria-") and k not in _SHOWN_ATTRS
             for k in attrs
         )
-        if has_extra:
+        if has_extra_aria:
             hints_parts.append("[+attrs]")
         hints = (" " + " ".join(hints_parts)) if hints_parts else ""
         handler_str = ""
