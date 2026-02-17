@@ -54,6 +54,15 @@ class OrchestratorDecision(BaseModel):
     )
 
 
+class OracleAdvice(BaseModel):
+    """Structured output from the Oracle advisor."""
+
+    all_clear: bool = Field(False, description="Set true when progress is healthy and no intervention is needed")
+    diagnosis: str = Field(..., description="Why the agent is stuck — identify the pattern of failure")
+    recommendation: str = Field(..., description="What the orchestrator should do differently")
+    avoid: list[str] = Field(default_factory=list, description="Specific approaches or elements to stop trying")
+
+
 class SnapshotFilterOutput(BaseModel):
     """Structured output returned by the snapshot filter stage."""
 

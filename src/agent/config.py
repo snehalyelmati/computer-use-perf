@@ -50,10 +50,12 @@ class LLMConfig:
     model: str = "moonshotai/kimi-k2-0905:exacto"
     worker_model: str | None = None
     filter_model: str | None = None
+    oracle_model: str | None = None
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     api_key_env: str = "OPENROUTER_API_KEY"
     timeout_seconds: int = 60
     max_retries: int = 2
+    max_tokens: int = 2048
 
 
 @dataclass(frozen=True)
@@ -76,8 +78,9 @@ class AgentConfig:
     log_dir: str = "logs"
     max_elements: int = 60
     memory_steps: int = 10
-    stuck_threshold: int = 2
-    unchanged_abort_threshold: int = 3
+    stuck_threshold: int = 3
+    unchanged_abort_threshold: int = 5
+    oracle_interval: int = 5
     log_level: str = "INFO"
     metrics_enabled: bool = True
     color_logs: bool = True

@@ -16,7 +16,7 @@ from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.snapshot import ElementSnapshot, PageSnapshot
 from src.agent.core import agent as agent_mod
 from src.agent.metrics import UsageStats
-from src.agent.models.actions import OrchestratorDecision, SnapshotFilterOutput, StepOutput
+from src.agent.models.actions import OracleAdvice, OrchestratorDecision, SnapshotFilterOutput, StepOutput
 
 
 @dataclass
@@ -25,6 +25,9 @@ class _StubPage:
 
     async def goto(self, url: str) -> None:
         self.url = url
+
+    async def wait_for_load_state(self, state: str = "load", **kwargs: object) -> None:
+        pass
 
 
 @dataclass
@@ -123,6 +126,11 @@ async def test_filter_is_cached_when_fingerprint_unchanged(monkeypatch: pytest.M
     monkeypatch.setattr(agent_mod, "build_snapshot_filter_agent", lambda *_a, **_k: _StubAgent(filter_runner))
     monkeypatch.setattr(agent_mod, "build_orchestrator_agent", lambda *_a, **_k: _StubAgent(orchestrator_runner))
     monkeypatch.setattr(agent_mod, "build_browser_worker_agent", lambda *_a, **_k: _StubAgent(worker_runner))
+    monkeypatch.setattr(
+        agent_mod,
+        "build_oracle_agent",
+        lambda *_a, **_k: _StubAgent(lambda *_: OracleAdvice(all_clear=False, diagnosis="stuck", recommendation="try something else", avoid=[])),
+    )
 
     agent = agent_mod.BrowserAgent(
         AgentConfig(
@@ -176,6 +184,11 @@ async def test_filter_reruns_when_fingerprint_changes(monkeypatch: pytest.Monkey
     monkeypatch.setattr(agent_mod, "build_snapshot_filter_agent", lambda *_a, **_k: _StubAgent(filter_runner))
     monkeypatch.setattr(agent_mod, "build_orchestrator_agent", lambda *_a, **_k: _StubAgent(lambda *_: OrchestratorDecision(done=False, worker_goal="noop")))
     monkeypatch.setattr(agent_mod, "build_browser_worker_agent", lambda *_a, **_k: _StubAgent(lambda *_: StepOutput(done=False, summary="noop", next_goal=None)))
+    monkeypatch.setattr(
+        agent_mod,
+        "build_oracle_agent",
+        lambda *_a, **_k: _StubAgent(lambda *_: OracleAdvice(all_clear=False, diagnosis="stuck", recommendation="try something else", avoid=[])),
+    )
 
     agent = agent_mod.BrowserAgent(
         AgentConfig(
@@ -229,13 +242,18 @@ async def test_abort_when_fingerprint_unchanged_for_threshold(monkeypatch: pytes
     )
     monkeypatch.setattr(agent_mod, "build_orchestrator_agent", lambda *_a, **_k: _StubAgent(lambda *_: OrchestratorDecision(done=False, worker_goal="noop")))
     monkeypatch.setattr(agent_mod, "build_browser_worker_agent", lambda *_a, **_k: _StubAgent(lambda *_: StepOutput(done=False, summary="noop", next_goal=None)))
+    monkeypatch.setattr(
+        agent_mod,
+        "build_oracle_agent",
+        lambda *_a, **_k: _StubAgent(lambda *_: OracleAdvice(all_clear=False, diagnosis="stuck", recommendation="try something else", avoid=[])),
+    )
 
     agent = agent_mod.BrowserAgent(
         AgentConfig(
             target_url="https://example.com",
             goal="Test goal",
             max_steps=10,
-            unchanged_abort_threshold=3,
+            unchanged_abort_threshold=5,
             log_dir=str(tmp_path),
             metrics_enabled=False,
         ),
@@ -245,5 +263,7 @@ async def test_abort_when_fingerprint_unchanged_for_threshold(monkeypatch: pytes
     await agent.run()
 
     assert captured_summary.get("stop_reason") == "unchanged_fingerprint_abort"
-    assert captured_summary.get("steps") == 4
+    # Step 1: sets fingerprint. Steps 2-5: unchanged (no_progress 1,2,3,4).
+    # At step 6: no_progress=5 >= threshold=5 → abort.
+    assert captured_summary.get("steps") == 6
 

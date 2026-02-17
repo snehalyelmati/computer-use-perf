@@ -25,6 +25,7 @@ from src.agent.browser.session import close_browser, launch_browser
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.snapshot import (
     ElementSnapshot,
+    PageSnapshot,
     build_element_index,
     capture_snapshot,
     format_snapshot_for_llm,
@@ -37,8 +38,8 @@ from src.agent.metrics import (
     usage_stats_from_result,
     write_run_summary,
 )
-from src.agent.models.actions import OrchestratorDecision, SnapshotFilterOutput, StepOutput, ToolExecutionResult
-from src.agent.prompts.system import FILTER_PROMPT, ORCHESTRATOR_PROMPT, STEP_PROMPT, SYSTEM_PROMPT
+from src.agent.models.actions import OracleAdvice, OrchestratorDecision, SnapshotFilterOutput, StepOutput, ToolExecutionResult
+from src.agent.prompts.system import FILTER_PROMPT, ORACLE_PROMPT, ORCHESTRATOR_PROMPT, STEP_PROMPT, SYSTEM_PROMPT
 from src.agent.tools import semantic
 
 logger = logging.getLogger(__name__)
@@ -252,6 +253,7 @@ class AgentState:
     last_filter_fingerprint: str | None = None
     last_filter_output: SnapshotFilterOutput | None = None
     last_worker_goal: str | None = None
+    step_trace: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -265,13 +267,6 @@ class WorkerDeps:
     tool_context: semantic.ToolContext
     metrics: MetricsRecorder
     step: int
-    overall_goal: str
-    worker_goal: str
-    recent_memory: tuple[str, ...]
-    no_progress_steps: int
-    stuck_threshold: int
-    prior_tool: str | None
-    prior_element_id: str | None
     tool_tracker: ToolCallTracker | None = None
     allowed_tools: frozenset[str] | None = None
 
@@ -280,7 +275,6 @@ DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
     "click_element",
     "type_text",
     "drag_and_drop",
-    "inspect_element",
     "scroll",
     "wait",
     "switch_to_iframe",
@@ -381,6 +375,9 @@ def _model_settings(config: LLMConfig) -> dict[str, Any]:
     settings: dict[str, Any] = {
         "timeout": float(config.timeout_seconds),
         "parallel_tool_calls": False,
+        "max_tokens": config.max_tokens,
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.3,
     }
     if config.provider == "openrouter":
         settings["openrouter_usage"] = {"include": True}
@@ -395,6 +392,24 @@ def _format_memory(memory: list[str], *, limit: int = 10) -> str:
     recent = memory[-limit:]
     lines = [f"{idx + 1}. {item}" for idx, item in enumerate(recent)]
     return "\n".join(lines)
+
+def _format_step_trace(trace: list[dict[str, Any]]) -> str:
+    if not trace:
+        return "No steps yet."
+    lines: list[str] = []
+    for entry in trace:
+        url_changed = "yes" if entry.get("url_changed") else "no"
+        lines.append(
+            f"Step {entry['step']}: [{entry.get('url', '')}] goal={entry.get('goal', '')}"
+        )
+        lines.append(
+            f"  Result: {entry.get('summary', '')}"
+        )
+        lines.append(
+            f"  Diff: {entry.get('diff_summary', '')} | url_changed={url_changed}"
+        )
+    return "\n".join(lines)
+
 
 def _normalize_label(value: str | None) -> str:
     return " ".join((value or "").split()).strip().lower()
@@ -542,6 +557,16 @@ def build_snapshot_filter_agent(
         model,
         output_type=SnapshotFilterOutput,
         system_prompt=(SYSTEM_PROMPT, FILTER_PROMPT),
+        model_settings=model_settings,
+        retries=1,
+    )
+
+
+def build_oracle_agent(model: Model, *, model_settings: dict[str, Any]) -> Agent[None, OracleAdvice]:
+    return Agent(
+        model,
+        output_type=OracleAdvice,
+        system_prompt=(SYSTEM_PROMPT, ORACLE_PROMPT),
         model_settings=model_settings,
         retries=1,
     )
@@ -1103,13 +1128,14 @@ class BrowserAgent:
             model=self.llm_config.model,
         )
         logger.info(
-            "Run start run_id=%s url=%s max_steps=%s model=%s worker_model=%s filter_model=%s",
+            "Run start run_id=%s url=%s max_steps=%s model=%s worker_model=%s filter_model=%s oracle_model=%s",
             run_id,
             self.agent_config.target_url,
             self.agent_config.max_steps,
             self.llm_config.model,
             self.llm_config.worker_model or self.llm_config.model,
             self.llm_config.filter_model or self.llm_config.model,
+            self.llm_config.oracle_model or self.llm_config.model,
         )
 
         model = _build_model(self.llm_config)
@@ -1125,9 +1151,15 @@ class BrowserAgent:
             if self.llm_config.filter_model
             else model
         )
+        oracle_model = (
+            _build_model(self.llm_config, model_override=self.llm_config.oracle_model)
+            if self.llm_config.oracle_model
+            else model
+        )
 
         orchestrator = build_orchestrator_agent(model, model_settings=model_settings)
         snapshot_filter = build_snapshot_filter_agent(filter_model, model_settings=model_settings)
+        oracle_agent = build_oracle_agent(oracle_model, model_settings=model_settings)
         browser_worker = build_browser_worker_agent(worker_model, model_settings=model_settings)
 
         session = await launch_browser(self.browser_config)
@@ -1142,6 +1174,11 @@ class BrowserAgent:
                 logger.info("")
                 logger.info(_STEP_SEPARATOR)
                 logger.info(f"Step {self.state.step} start")
+                try:
+                    await session.page.wait_for_load_state("domcontentloaded")
+                    await session.page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
                 snapshot_started = time.perf_counter()
                 snapshot = await capture_snapshot(session.page, session.cdp_session)
                 snapshot_duration_ms = int((time.perf_counter() - snapshot_started) * 1000)
@@ -1195,45 +1232,91 @@ class BrowserAgent:
                     active_frame_id=self.state.active_frame_id,
                 )
 
-                memory_text = _format_memory(self.state.memory, limit=self.agent_config.memory_steps)
-                progress_text = (
-                    "Progress: "
-                    f"no_progress_steps={self.state.no_progress_steps} "
-                    f"(stuck_threshold={self.agent_config.stuck_threshold}) "
-                    f"last_tool={self.state.last_tool or 'None'} "
-                    f"last_element_id={self.state.last_element_id or 'None'}"
-                )
-                stuck_hint = ""
-                if self.state.no_progress_steps >= self.agent_config.stuck_threshold:
-                    stuck_hint = (
-                        "\n\nSTUCK RECOVERY: The page snapshot appears unchanged for multiple steps. "
-                        "Do NOT repeat the previous action; instead, explore alternatives by reading element text, "
-                        "shortlisting candidates (find_elements), switching frames, navigating, or using a different "
-                        "candidate with the same label but a different bbox/frame."
-                    )
+                priority_ids: list[str] = []
 
+                # ── Oracle (dual trigger: periodic + stuck) ──
+                oracle_hint = ""
+                should_call_oracle = (
+                    (self.agent_config.oracle_interval > 0 and self.state.step % self.agent_config.oracle_interval == 0)
+                    or self.state.no_progress_steps >= self.agent_config.stuck_threshold
+                )
+                if should_call_oracle and self.state.step_trace:
+                    trace_text = _format_step_trace(self.state.step_trace)
+                    oracle_prompt = (
+                        f"Overall goal: {self.agent_config.goal}\n\n"
+                        f"Current step: {self.state.step}\n"
+                        f"No-progress steps: {self.state.no_progress_steps}\n\n"
+                        f"Execution trace:\n{trace_text}\n"
+                    )
+                    logger.debug(
+                        "oracle prompt step=%s chars=%s",
+                        self.state.step,
+                        len(oracle_prompt),
+                    )
+                    oracle_started = time.perf_counter()
+                    try:
+                        oracle_result = await oracle_agent.run(oracle_prompt)
+                        oracle_duration_ms = int((time.perf_counter() - oracle_started) * 1000)
+                        oracle_usage = usage_stats_from_result(oracle_result)
+                        oracle_cost = cost_stats_from_result(
+                            oracle_result, self.llm_config.oracle_model or self.llm_config.model
+                        )
+                        total_input_tokens += oracle_usage.input_tokens
+                        total_output_tokens += oracle_usage.output_tokens
+                        if oracle_cost:
+                            total_cost_usd = (total_cost_usd or 0.0) + oracle_cost.cost_usd
+                        metrics.emit(
+                            "agent_call",
+                            step=self.state.step,
+                            agent="oracle",
+                            duration_ms=oracle_duration_ms,
+                            input_tokens=oracle_usage.input_tokens,
+                            output_tokens=oracle_usage.output_tokens,
+                            requests=oracle_usage.requests,
+                            tool_calls=oracle_usage.tool_calls,
+                            cost_usd=(oracle_cost.cost_usd if oracle_cost else None),
+                            upstream_inference_cost_usd=(
+                                oracle_cost.upstream_inference_cost_usd if oracle_cost else None
+                            ),
+                        )
+                        advice = oracle_result.output
+                        avoid_str = ", ".join(advice.avoid) if advice.avoid else "None"
+                        logger.info(
+                            f"  oracle: {oracle_duration_ms}ms all_clear={advice.all_clear} diagnosis={advice.diagnosis[:80]}"
+                        )
+                        if not advice.all_clear:
+                            oracle_hint = (
+                                f"\n\nORACLE DIRECTIVE:\n"
+                                f"Diagnosis: {advice.diagnosis}\n"
+                                f"Recommendation: {advice.recommendation}\n"
+                                f"Avoid: {avoid_str}"
+                            )
+                            # Invalidate filter cache so it re-runs with Oracle context
+                            self.state.last_filter_fingerprint = None
+                            logger.info(f"    recommendation: {advice.recommendation[:120]}")
+                            if advice.avoid:
+                                logger.info(f"    avoid: {avoid_str[:120]}")
+                    except Exception:
+                        oracle_duration_ms = int((time.perf_counter() - oracle_started) * 1000)
+                        logger.warning("Oracle advisor failed", exc_info=True)
+
+                # ── Filter (tree pruner) ──
                 filter_output = self.state.last_filter_output
                 if self.state.last_filter_fingerprint != page_fingerprint or filter_output is None:
+                    # Full tree for filter — no max_elements cap, no query ranking
+                    full_tree_text = format_snapshot_for_llm(snapshot)
                     raw_lines = _select_raw_text_lines(list(snapshot.raw_text), limit=120)
-                    page_url = getattr(session.page, "url", "") or ""
-                    candidates = search_elements(
-                        list(snapshot.elements),
-                        query=self.agent_config.goal,
-                        limit=min(80, max(20, self.agent_config.max_elements)),
-                        page_url=page_url,
-                    )
-                    candidate_lines = "\n".join(_format_element_brief(el) for el in candidates) if candidates else "None."
                     raw_text_block = "\n".join(raw_lines) if raw_lines else "None."
                     last_summary = self.state.last_summary or "None."
                     last_worker_goal = self.state.last_worker_goal or "None."
                     filter_prompt = (
                         f"Overall goal: {self.agent_config.goal}\n\n"
-                        f"{progress_text}\n"
                         f"Last worker goal: {last_worker_goal}\n"
                         f"Last step summary: {last_summary}\n\n"
                         f"Diff since prior snapshot:\n{diff_text}\n\n"
-                        f"Candidate interactive elements (stable ids + labels):\n{candidate_lines}\n\n"
-                        f"Candidate page text lines:\n{raw_text_block}\n"
+                        + (f"Oracle advice:\n{oracle_hint}\n\n" if oracle_hint else "")
+                        + f"Page snapshot (full interactive element tree):\n{full_tree_text}\n\n"
+                        f"Page text lines:\n{raw_text_block}\n"
                     )
 
                     logger.debug(
@@ -1264,7 +1347,6 @@ class BrowserAgent:
                     )
                     filter_output = filter_result.output
                     valid_ids = set(element_index.elements.keys())
-                    priority_ids: list[str] = []
                     for sid in filter_output.priority_element_ids or []:
                         if sid in valid_ids and sid not in priority_ids:
                             priority_ids.append(sid)
@@ -1278,33 +1360,34 @@ class BrowserAgent:
                     logger.info(
                         f"  filter: {filter_duration_ms}ms "
                         f"useful_lines={len(filter_output.useful_text_lines or [])} "
-                        f"priority_ids={len(priority_ids)}"
+                        f"priority_ids={len(priority_ids)} total_elements={len(snapshot.elements)}"
                     )
 
+                # ── Build pruned snapshot ──
                 useful_lines = filter_output.useful_text_lines if filter_output else []
                 useful_block = "\n".join(useful_lines) if useful_lines else "None."
-                priority_ids = (filter_output.priority_element_ids if filter_output else [])[:20]
-                priority_lines = (
-                    "\n".join(_format_element_brief(element_index.elements[sid]) for sid in priority_ids if sid in element_index.elements)
-                    if priority_ids
-                    else "None."
+                priority_ids = list(filter_output.priority_element_ids if filter_output else [])
+                kept_ids = set(priority_ids)
+                pruned_elements = [el for el in snapshot.elements if el.stable_id in kept_ids]
+                pruned_snapshot = PageSnapshot(
+                    url=snapshot.url,
+                    title=snapshot.title,
+                    elements=pruned_elements,
+                    raw_text=snapshot.raw_text,
+                    viewport_width=snapshot.viewport_width,
+                    viewport_height=snapshot.viewport_height,
                 )
 
-                snapshot_text_orchestrator = format_snapshot_for_llm(
-                    snapshot,
-                    max_elements=self.agent_config.max_elements,
-                    query=self.agent_config.goal,
-                    priority_ids=priority_ids,
-                )
+                # ── Orchestrator ──
+                snapshot_text_orchestrator = format_snapshot_for_llm(pruned_snapshot)
+                memory_text = _format_memory(self.state.memory, limit=self.agent_config.memory_steps)
                 orchestrator_prompt = (
                     f"Overall goal: {self.agent_config.goal}\n\n"
-                    f"{progress_text}\n\n"
                     f"Filtered useful lines:\n{useful_block}\n\n"
                     f"Diff since prior snapshot:\n{diff_text}\n\n"
-                    f"Priority interactive elements:\n{priority_lines}\n\n"
                     f"Memory (recent):\n{memory_text}\n\n"
                     f"Page snapshot:\n{snapshot_text_orchestrator}\n"
-                    f"{stuck_hint}"
+                    f"{oracle_hint}"
                 )
                 logger.debug(
                     "orchestrator prompt step=%s chars=%s",
@@ -1361,38 +1444,21 @@ class BrowserAgent:
                     )
                     break
 
-                snapshot_text_worker = format_snapshot_for_llm(
-                    snapshot,
-                    max_elements=self.agent_config.max_elements,
-                    query=decision.worker_goal,
-                    priority_ids=priority_ids,
-                )
+                # ── Worker ──
+                snapshot_text_worker = format_snapshot_for_llm(pruned_snapshot)
                 tool_tracker = ToolCallTracker()
                 deps = WorkerDeps(
                     tool_context=tool_context,
                     metrics=metrics,
                     step=self.state.step,
-                    overall_goal=self.agent_config.goal,
-                    worker_goal=decision.worker_goal,
-                    recent_memory=tuple(self.state.memory[-self.agent_config.memory_steps :]),
-                    no_progress_steps=self.state.no_progress_steps,
-                    stuck_threshold=self.agent_config.stuck_threshold,
-                    prior_tool=self.state.last_tool,
-                    prior_element_id=self.state.last_element_id,
                     tool_tracker=tool_tracker,
                     allowed_tools=DEFAULT_WORKER_TOOLS,
                 )
+                prev_url = getattr(session.page, "url", "") or ""
                 worker_prompt = (
                     STEP_PROMPT.format(goal=decision.worker_goal)
                     + "\n\n"
-                    + f"Overall goal: {self.agent_config.goal}\n\n"
-                    + f"{progress_text}\n\n"
-                    + f"Filtered useful lines:\n{useful_block}\n\n"
-                    + f"Diff since prior snapshot:\n{diff_text}\n\n"
-                    + f"Priority interactive elements:\n{priority_lines}\n\n"
-                    + f"Memory (recent):\n{memory_text}\n\n"
                     + f"Page snapshot:\n{snapshot_text_worker}\n"
-                    + (stuck_hint + "\n" if stuck_hint else "")
                 )
                 logger.debug(
                     "worker prompt step=%s chars=%s",
@@ -1427,6 +1493,17 @@ class BrowserAgent:
                 self.state.memory.append(step_output.summary)
                 self.state.last_tool = tool_context.last_tool
                 self.state.last_element_id = tool_context.last_element_id
+
+                # ── Populate step trace ──
+                self.state.step_trace.append({
+                    "step": self.state.step,
+                    "url": getattr(session.page, "url", "") or "",
+                    "goal": decision.worker_goal,
+                    "summary": step_output.summary,
+                    "diff_summary": diff_text.split("\n")[0] if diff_text else "",
+                    "url_changed": prev_url != (getattr(session.page, "url", "") or ""),
+                })
+
                 logger.info(f"  worker: {worker_duration_ms}ms done={step_output.done}")
                 if step_output.summary:
                     logger.info(f"    summary: {step_output.summary}")

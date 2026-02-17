@@ -51,13 +51,6 @@ async def test_browser_worker_registers_semantic_tools() -> None:
         tool_context=tool_context,
         metrics=metrics,
         step=1,
-        overall_goal="test overall",
-        worker_goal="test worker",
-        recent_memory=(),
-        no_progress_steps=0,
-        stuck_threshold=2,
-        prior_tool=None,
-        prior_element_id=None,
     )
     result = await agent.run("goal: test\nsnapshot: none", deps=deps)
     assert result.output.summary == "noop"

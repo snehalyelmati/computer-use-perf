@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.snapshot import PageSnapshot
 from src.agent.core import agent as agent_mod
-from src.agent.models.actions import OrchestratorDecision, SnapshotFilterOutput, StepOutput
+from src.agent.models.actions import OracleAdvice, OrchestratorDecision, SnapshotFilterOutput, StepOutput
 
 
 @dataclass
@@ -24,6 +24,9 @@ class _StubPage:
 
     async def goto(self, url: str) -> None:
         self.url = url
+
+    async def wait_for_load_state(self, state: str = "load", **kwargs: object) -> None:
+        pass
 
 
 @dataclass
@@ -63,9 +66,15 @@ async def test_run_does_not_stop_on_worker_done(monkeypatch: pytest.MonkeyPatch,
         captured_summary.update(summary)
         return tmp_path / filename
 
+    oracle_test_model = TestModel(
+        call_tools=[],
+        custom_output_args=OracleAdvice(all_clear=False, diagnosis="stuck", recommendation="try something else", avoid=[]),
+    )
+
     orig_build_orchestrator = agent_mod.build_orchestrator_agent
     orig_build_worker = agent_mod.build_browser_worker_agent
     orig_build_filter = agent_mod.build_snapshot_filter_agent
+    orig_build_oracle = agent_mod.build_oracle_agent
 
     monkeypatch.setattr(agent_mod, "launch_browser", fake_launch_browser)
     monkeypatch.setattr(agent_mod, "close_browser", fake_close_browser)
@@ -89,6 +98,11 @@ async def test_run_does_not_stop_on_worker_done(monkeypatch: pytest.MonkeyPatch,
         agent_mod,
         "build_browser_worker_agent",
         lambda _model, *, model_settings: orig_build_worker(worker_model, model_settings=model_settings),
+    )
+    monkeypatch.setattr(
+        agent_mod,
+        "build_oracle_agent",
+        lambda _model, *, model_settings: orig_build_oracle(oracle_test_model, model_settings=model_settings),
     )
 
     agent = agent_mod.BrowserAgent(

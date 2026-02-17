@@ -48,13 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stuck-threshold",
         type=int,
-        default=2,
-        help="Steps with no progress before forcing recovery behavior",
+        default=3,
+        help="Steps with no progress before firing the Oracle advisor",
     )
     parser.add_argument(
         "--unchanged-abort-threshold",
         type=_positive_int,
-        default=3,
+        default=5,
         help="Abort if the page fingerprint is unchanged for this many consecutive steps",
     )
     parser.add_argument(
@@ -89,6 +89,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Model for the snapshot filter agent (default: same as --model)",
     )
+    parser.add_argument(
+        "--oracle-model",
+        dest="oracle_model",
+        default=None,
+        help="Model for the Oracle advisor agent (default: same as --model)",
+    )
+    parser.add_argument(
+        "--oracle-interval",
+        type=int,
+        default=5,
+        help="Call Oracle every N steps as a health check (0 disables periodic checks)",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=2048,
+        help="Max completion tokens per LLM call (prevents runaway repetition)",
+    )
     return parser
 
 
@@ -103,6 +121,7 @@ def main() -> None:
         max_elements=args.max_elements,
         stuck_threshold=args.stuck_threshold,
         unchanged_abort_threshold=args.unchanged_abort_threshold,
+        oracle_interval=args.oracle_interval,
         log_level=str(args.log_level),
         metrics_enabled=not bool(args.no_metrics),
         color_logs=not bool(args.no_color),
@@ -114,7 +133,9 @@ def main() -> None:
         model=args.model or defaults["model"],
         worker_model=args.worker_model or defaults.get("worker_model") or None,
         filter_model=args.filter_model or defaults.get("filter_model") or None,
+        oracle_model=args.oracle_model or defaults.get("oracle_model") or None,
         api_key_env=defaults["api_key_env"],
+        max_tokens=args.max_tokens,
     )
     browser_config = BrowserConfig(headless=bool(args.headless))
 
