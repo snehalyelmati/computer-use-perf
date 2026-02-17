@@ -36,10 +36,6 @@ class StepOutput(BaseModel):
         ),
     )
     summary: str = Field(..., description="Concise summary of what happened in this step")
-    next_goal: str | None = Field(
-        None,
-        description="Optional next sub-goal the agent will pursue on the next step",
-    )
 
 
 class OrchestratorDecision(BaseModel):
