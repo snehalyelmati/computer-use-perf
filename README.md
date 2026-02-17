@@ -9,11 +9,13 @@ General-purpose browser agent (scaffold).
 ```mermaid
 flowchart LR
     subgraph LLM[LLM Infrastructure]
-        OR[OpenRouter]
-        FILT[PydanticAI Snapshot Filter]
-        ORCH[PydanticAI Orchestrator]
-        WORK[PydanticAI Browser Worker]
+        OR[OpenRouter / Cerebras]
+        FILT[Filter — Snapshot Pruner]
+        ORAC[Oracle — Execution Auditor]
+        ORCH[Orchestrator — Goal Planner]
+        WORK[Worker — Browser Executor]
         OR --> FILT
+        OR --> ORAC
         OR --> ORCH
         OR --> WORK
     end
@@ -24,11 +26,11 @@ flowchart LR
         CDP --> PW
     end
 
-    CDP -->|Context Snapshot| FILT
-    FILT -->|Filtered lines + priority ids| ORCH
-    CDP -->|Context Snapshot| ORCH
-    CDP -->|Context Snapshot| WORK
+    CDP -->|Full Snapshot| FILT
+    FILT -->|Pruned Snapshot + useful text| ORCH
+    ORAC -->|Directive when off-track| ORCH
     ORCH -->|Delegated Goal| WORK
+    FILT -->|Pruned Snapshot| WORK
     WORK -->|"Semantic Tool Calls (stable ids)"| PW
 ```
 
@@ -37,7 +39,7 @@ flowchart LR
 - Set `OPENROUTER_API_KEY` for OpenRouter access
 
 ## Run
-- `uv run main.py --url <target> --goal "<task>" [--headless] [--max-elements 60] [--stuck-threshold 2] [--unchanged-abort-threshold 3] [--log-level INFO] [--no-metrics]`
+- `uv run main.py --url <target> --goal "<task>" [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--max-tokens 2048] [--log-level INFO] [--no-metrics]`
 
 ### Outputs
 - Logs: `logs/agent.log`
@@ -80,19 +82,22 @@ This project is a general-purpose browser agent built around a clear separation 
 
 ```mermaid
 sequenceDiagram
-    participant Filter as PydanticAI Snapshot Filter
-    participant Orchestrator as PydanticAI Orchestrator
-    participant Worker as PydanticAI Browser Worker
     participant CDP as CDP Snapshotter
+    participant Filter as Filter (Pruner)
+    participant Oracle as Oracle (Auditor)
+    participant Orchestrator as Orchestrator
+    participant Worker as Worker
     participant PW as Playwright Executor
 
-    Filter->>CDP: Request context snapshot
-    CDP-->>Filter: Structured snapshot + element ids
-    Filter-->>Orchestrator: Filtered lines + priority ids
-    Orchestrator->>Worker: Delegated sub-goal + snapshot
+    CDP->>CDP: wait_for_load_state(networkidle)
+    CDP->>Filter: Full snapshot + raw text + diff
+    Filter-->>Orchestrator: Pruned snapshot + useful text
+    Oracle-->>Orchestrator: Directive (when off-track)
+    Orchestrator->>Worker: Goal + pruned snapshot
     Worker->>PW: Semantic tool calls (stable ids)
-    PW-->>Worker: Tool results
+    PW-->>Worker: Tool results + DOM change feedback
     Worker-->>Orchestrator: Step summary + done?
+    Worker-->>Oracle: Step trace entry
 ```
 
 ## Tooling Principles
@@ -102,14 +107,19 @@ sequenceDiagram
 The agent uses semantic tools that reference stable element IDs:
 
 - `click_element(element_id: str)`
-- `find_elements(query: str, limit: int = 8)`
 - `type_text(element_id: str, text: str)`
 - `drag_and_drop(source_id: str, target_id: str)`
-- `inspect_element(element_id: str)` — returns text content + all HTML attributes
-- `search_page_attributes(query: str)` — searches all DOM elements for matching attributes
+- `scroll(delta_x: int, delta_y: int)`
 - `wait(milliseconds: int)` (capped at 10s)
 - `switch_to_iframe(iframe_id: str)`, `switch_to_main_frame()`
-- `navigate_to(url: str)`, `take_screenshot()`
+- `navigate_to(url: str)`, `press_key_combination(keys: list[str])`
+
+### Available but not in default worker set
+
+- `find_elements(query: str, limit: int = 8)` — search for elements by text, label, or role
+- `inspect_element(element_id: str)` — returns text content + all HTML attributes
+- `search_page_attributes(query: str)` — searches all DOM elements for matching attributes
+- `take_screenshot()`, `execute_js(code: str)`
 
 ### Reference-Based, Not Selectors
 
@@ -124,20 +134,25 @@ The agent uses semantic tools that reference stable element IDs:
 
 ## Recommended Agent Loop
 
-1. **Extract context via CDP** into a structured snapshot.
-2. **Filter snapshot content** into high-signal lines + a priority shortlist (cached when the page fingerprint is unchanged).
-3. **Ask the orchestrator** for the next delegated sub-goal using filtered context + diffs.
-4. **Ask the browser worker** to execute that sub-goal using semantic tools.
-5. **Update memory + stop criteria** (`done`, `max_steps`, or unchanged fingerprint abort).
-6. **Repeat** until the overall goal is complete.
+1. **Wait for page settlement** (`domcontentloaded` + `networkidle`) to handle SPA transitions.
+2. **Extract context via CDP** into a structured snapshot with full element tree.
+3. **Oracle health check** (periodic every N steps + when stuck): reviews the execution trace and issues directives. Invalidates filter cache when intervention is needed.
+4. **Filter (tree pruner)**: receives full snapshot + diff + Oracle advice. Conservatively removes only obvious filler elements; keeps everything plausibly useful. Cached when the page fingerprint is unchanged.
+5. **Build pruned snapshot**: only filter-kept elements survive. Orchestrator and worker never see pruned elements.
+6. **Orchestrator**: plans the next sub-goal using stable element IDs from the pruned snapshot. Follows Oracle directives when present.
+7. **Worker**: executes the goal using semantic tools against the pruned snapshot. Receives only the goal + snapshot (no memory, no progress info).
+8. **Update step trace + memory + stop criteria** (`done`, `max_steps`, or unchanged fingerprint abort).
+9. **Repeat** until the overall goal is complete.
 
 ## Guardrails
 
 - Avoid hardcoding site-specific selectors or strings.
 - Pass stable element IDs, never raw selectors, to the LLM.
 - Keep tools generic and reusable across websites.
-- When the page appears unchanged for multiple steps, the agent forces recovery behavior (do not repeat the previous click; shortlist candidates via `find_elements`, read text, or try alternatives).
-- If the page fingerprint is unchanged for multiple steps (default: 3), the agent aborts early with a clear stop reason.
+- The Oracle fires periodically (default: every 5 steps) and when stuck (default: 3 unchanged steps). It reviews the full execution trace and issues directives that the orchestrator must follow.
+- When the Oracle fires with `all_clear=false`, the filter cache is invalidated to force re-evaluation with Oracle context.
+- If the page fingerprint is unchanged for multiple steps (default: 5), the agent aborts early with a clear stop reason.
+- LLM output is capped at `max_tokens` (default: 2048) with `frequency_penalty` (0.3) to prevent degenerate repetition.
 
 ## Roadmap
 

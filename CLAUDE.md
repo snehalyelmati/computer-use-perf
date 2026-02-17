@@ -57,3 +57,6 @@ A general-purpose browser agent. Python 3.14, managed with [uv](https://docs.ast
 - Core modules live in `src/agent/`
 - Uses PydanticAI for orchestration and OpenRouter for LLM access
 - Uses CDP for context extraction and Playwright for action execution
+- Four-agent pipeline: **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor, sees only goal + pruned snapshot)
+- Oracle advice + diff are fed into the filter; filter cache is invalidated when Oracle intervenes
+- Per-role model support: `--worker-model`, `--filter-model`, `--oracle-model`

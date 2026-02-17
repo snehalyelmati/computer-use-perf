@@ -7,6 +7,8 @@ Build/Test/Lint:
 
 Common Commands:
 - `uv run main.py --url <target> --goal "<task>"` - run the agent
+- `uv run main.py --url <target> --goal "<task>" --oracle-interval 5 --max-tokens 2048` - run with explicit defaults
+- `uv run main.py --url <target> --goal "<task>" --worker-model <model> --filter-model <model> --oracle-model <model>` - per-role models
 - `uv add <package>` - add a dependency
 
 Observability:
@@ -22,9 +24,17 @@ Dependencies:
 Architecture:
 - Root entrypoint in `main.py`; core modules live under `src/agent/`.
 - Uses PydanticAI for orchestration and structured outputs.
-- Uses OpenRouter (OpenAI-compatible) for LLM access.
+- Uses OpenRouter (OpenAI-compatible) or Cerebras for LLM access.
 - Uses CDP for context extraction and Playwright for action execution.
+- Four-agent pipeline: **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor, sees only goal + pruned snapshot).
+- Oracle advice + diff are fed into the filter; filter cache is invalidated when Oracle intervenes with `all_clear=false`.
 - No database or server components.
+
+Agent Responsibilities:
+- **Filter**: Receives full snapshot tree + diff + Oracle advice. Conservatively removes only obvious filler elements. Cached when page fingerprint is unchanged.
+- **Oracle**: Reviews the execution trace (step history with URLs, goals, outcomes, diff stats). Fires periodically (every N steps) and when stuck. Issues directives the orchestrator must follow.
+- **Orchestrator**: Plans the next sub-goal using stable element IDs from the pruned snapshot. Follows Oracle directives when present.
+- **Worker**: Executes the goal using semantic tools. Receives only the goal + pruned snapshot (no memory, no progress info).
 
 Code Guidelines:
 - DO NOT hardcode values, selectors, keywords, or patterns specific to particular websites/challenges.

@@ -21,7 +21,7 @@ Event types:
 - `run_start`: `target_url`, `goal`, `max_steps`, `model`
 - `snapshot`: `step`, `duration_ms`, `url`, `title`, `elements`
 - `cdp_call`: `step`, `name`, `duration_ms` plus lightweight size hints (e.g. `dom_total_nodes`, `dom_strings`, `ax_nodes`, `frames`)
-- `agent_call`: `step`, `agent` (`snapshot_filter`, `orchestrator`, or `browser_worker`), `duration_ms`, token fields (`input_tokens`, `output_tokens`, `requests`, `tool_calls`), and cost fields when available (`cost_usd`, `upstream_inference_cost_usd`)
+- `agent_call`: `step`, `agent` (`snapshot_filter`, `oracle`, `orchestrator`, or `browser_worker`), `duration_ms`, token fields (`input_tokens`, `output_tokens`, `requests`, `tool_calls`), and cost fields when available (`cost_usd`, `upstream_inference_cost_usd`)
 - `tool_call`: `step`, `tool`, `ok`, `duration_ms` plus safe tool metadata (e.g. `element_id`, `text_len`, `code_len`, `query_len`, `limit`)
 - `step_end`: `step`, `done`, `duration_ms` (and `worker_done` when available)
 - `run_end`: `duration_ms`
