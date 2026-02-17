@@ -49,7 +49,7 @@ def build_tool_context(
         active_frame_id=active_frame_id,
     )
 
-_DEFAULT_SETTLE_MS = 80
+_DEFAULT_SETTLE_MS = 200
 _WAIT_BUFFER_MS = 500
 
 _OBSERVER_INJECT_JS = """
