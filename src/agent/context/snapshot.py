@@ -153,6 +153,8 @@ def _interactive_reason(
         return True, "contenteditable", 0.9
     if "tabindex" in attributes:
         return True, "tabindex", 0.75
+    if attributes.get("draggable") == "true":
+        return True, "draggable", 0.85
     if "onclick" in attributes:
         return True, "onclick", 0.65
     if "href" in attributes and (node_name or "").upper() == "A":

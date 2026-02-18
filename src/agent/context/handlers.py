@@ -31,6 +31,12 @@ _EVENT_PRIORITY = [
     "mousedown",
     "mouseup",
     "mouseover",
+    "dragstart",
+    "dragover",
+    "drop",
+    "dragenter",
+    "mouseenter",
+    "mouseleave",
 ]
 
 _EXTRACT_HANDLERS_JS = """
@@ -40,11 +46,15 @@ _EXTRACT_HANDLERS_JS = """
     'onclick', 'onchange', 'oninput', 'onsubmit', 'onkeydown', 'onkeyup',
     'onkeypress', 'onfocus', 'onblur', 'onmousedown', 'onmouseup', 'onmouseover',
     'ondblclick', 'oncontextmenu',
+    'ondragstart', 'ondragover', 'ondrop', 'ondragenter',
+    'onmouseenter', 'onmouseleave',
   ];
   const REACT_EVENTS = [
     'onClick', 'onChange', 'onInput', 'onSubmit', 'onKeyDown', 'onKeyUp',
     'onKeyPress', 'onFocus', 'onBlur', 'onMouseDown', 'onMouseUp', 'onMouseOver',
     'onDoubleClick', 'onContextMenu',
+    'onDragStart', 'onDragOver', 'onDrop', 'onDragEnter',
+    'onMouseEnter', 'onMouseLeave',
   ];
 
   function truncate(src) {

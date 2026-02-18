@@ -106,7 +106,7 @@ def extract_openrouter_cost(messages: Sequence[ModelMessage]) -> CostStats | Non
 
 
 def usage_stats_from_result(result: AgentRunResult[Any]) -> UsageStats:
-    return UsageStats.from_run_usage(result.usage)
+    return UsageStats.from_run_usage(result.usage())
 
 
 def compute_cost_from_usage(model: str, usage: UsageStats) -> CostStats | None:

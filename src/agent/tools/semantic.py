@@ -580,6 +580,55 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     return ToolResult(ok=True, message=message)
 
 
+async def hover_element(element_id: str, context: ToolContext, *, duration_ms: int = 1000) -> ToolResult:
+    context.last_tool = "hover_element"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+
+    # CDP coordinate hover — triggers CSS :hover pseudo-class
+    info = await _viewport_info(element.backend_node_id, session)
+    if info:
+        value = info.get("result", {}).get("value")
+        if value:
+            try:
+                await session.send(
+                    "Input.dispatchMouseEvent",
+                    {"type": "mouseMoved", "x": value["x"], "y": value["y"]},
+                )
+            except Exception:
+                pass  # Fall through to DOM events
+
+    # DOM synthetic events — triggers JS mouseover/mouseenter handlers
+    await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function () {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const opts = {bubbles: true, cancelable: true};
+            this.dispatchEvent(new MouseEvent('mouseenter', {...opts, bubbles: false}));
+            this.dispatchEvent(new MouseEvent('mouseover', opts));
+            return true;
+        }
+        """,
+    )
+
+    # Hold hover for the requested duration
+    clamped = max(100, min(duration_ms, 5000))
+    await asyncio.sleep(clamped / 1000)
+
+    mutations = await _collect_mutations(session)
+    message = _format_verification(mutations, f"Hovered {element_id} for {clamped}ms")
+    return ToolResult(ok=True, message=message)
+
+
 async def type_text(element_id: str, text: str, context: ToolContext) -> ToolResult:
     context.last_tool = "type_text"
     context.last_element_id = element_id
@@ -636,65 +685,94 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
 
     await _inject_observer(session)
 
-    # Try CDP coordinate-based drag if both elements are on top
+    base_msg = f"Dragged {source_id} -> {target_id}"
+
+    # CDP coordinate-based drag — only when both elements are on top (no overlays).
+    # CDP mouse events can't complete HTML5 DnD through overlays (browser's drag
+    # state machine doesn't handle mouseReleased as a drop when overlay intercepts).
     if source_value.get("onTop") and target_value.get("onTop"):
         try:
+            sx, sy = source_value["x"], source_value["y"]
+            tx, ty = target_value["x"], target_value["y"]
             await session.send(
                 "Input.dispatchMouseEvent",
-                {"type": "mouseMoved", "x": source_value["x"], "y": source_value["y"], "button": "left"},
+                {"type": "mouseMoved", "x": sx, "y": sy, "button": "left"},
             )
             await session.send(
                 "Input.dispatchMouseEvent",
-                {"type": "mousePressed", "x": source_value["x"], "y": source_value["y"], "button": "left", "clickCount": 1},
+                {"type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1},
             )
+            await asyncio.sleep(0.05)
             await session.send(
                 "Input.dispatchMouseEvent",
-                {"type": "mouseMoved", "x": target_value["x"], "y": target_value["y"], "button": "left", "buttons": 1},
+                {"type": "mouseMoved", "x": sx + 10, "y": sy + 10, "button": "left", "buttons": 1},
             )
+            await asyncio.sleep(0.05)
             await session.send(
                 "Input.dispatchMouseEvent",
-                {"type": "mouseReleased", "x": target_value["x"], "y": target_value["y"], "button": "left", "clickCount": 1},
+                {"type": "mouseMoved", "x": tx, "y": ty, "button": "left", "buttons": 1},
+            )
+            await asyncio.sleep(0.05)
+            await session.send(
+                "Input.dispatchMouseEvent",
+                {"type": "mouseReleased", "x": tx, "y": ty, "button": "left", "clickCount": 1},
             )
             mutations = await _collect_mutations(session)
-            base_msg = f"Dragged {source_id} -> {target_id}"
             message = _format_verification(mutations, base_msg)
             return ToolResult(ok=True, message=message)
         except Exception:
             pass  # Fall through to DOM fallback
 
-    # DOM fallback — dispatch synthetic mouse events directly on elements
+    # DOM fallback — split-phase DragEvent dispatch for overlay bypass.
+    # Dispatches directly on DOM nodes (bypasses visual layering).
+    # Split into two phases with async gap so framework state (React setState)
+    # can flush between dragstart and drop.
     target_object_id = await _resolve_object_id(target.backend_node_id, session)
     if not target_object_id:
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Drag failed: cannot resolve target")
-    result = await _call_on_node(
+
+    phase1 = await _call_on_node(
         source.backend_node_id,
         session,
         """
-        function (targetEl) {
-            const srcRect = this.getBoundingClientRect();
-            const tgtRect = targetEl.getBoundingClientRect();
-            const srcX = srcRect.left + srcRect.width / 2;
-            const srcY = srcRect.top + srcRect.height / 2;
-            const tgtX = tgtRect.left + tgtRect.width / 2;
-            const tgtY = tgtRect.top + tgtRect.height / 2;
-            const opts = {bubbles: true, cancelable: true};
-            this.dispatchEvent(new MouseEvent('mousedown', {...opts, clientX: srcX, clientY: srcY}));
-            this.dispatchEvent(new MouseEvent('mousemove', {...opts, clientX: tgtX, clientY: tgtY}));
-            targetEl.dispatchEvent(new MouseEvent('mousemove', {...opts, clientX: tgtX, clientY: tgtY}));
-            targetEl.dispatchEvent(new MouseEvent('mouseup', {...opts, clientX: tgtX, clientY: tgtY}));
+        function () {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const dt = new DataTransfer();
+            this.dispatchEvent(new DragEvent('dragstart', {bubbles: true, cancelable: true, dataTransfer: dt}));
             return true;
         }
         """,
-        [{"objectId": target_object_id}],
+    )
+    if not phase1:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Drag failed: cannot initiate drag")
+
+    await asyncio.sleep(0.1)
+
+    source_object_id = await _resolve_object_id(source.backend_node_id, session)
+    result = await _call_on_node(
+        target.backend_node_id,
+        session,
+        """
+        function (sourceEl) {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const dt = new DataTransfer();
+            const opts = {bubbles: true, cancelable: true, dataTransfer: dt};
+            this.dispatchEvent(new DragEvent('dragenter', opts));
+            this.dispatchEvent(new DragEvent('dragover', opts));
+            this.dispatchEvent(new DragEvent('drop', opts));
+            if (sourceEl) sourceEl.dispatchEvent(new DragEvent('dragend', opts));
+            return true;
+        }
+        """,
+        [{"objectId": source_object_id or target_object_id}],
     )
     if not result:
         await _collect_mutations(session, settle_ms=50)
-        return ToolResult(ok=False, message="Drag failed: element obscured")
+        return ToolResult(ok=False, message="Drag failed: drop not accepted")
     mutations = await _collect_mutations(session)
-    base_msg = f"Dragged {source_id} -> {target_id}"
-    message = _format_verification(mutations, base_msg)
-    return ToolResult(ok=True, message=message)
+    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
 
 async def wait(milliseconds: int, context: ToolContext) -> ToolResult:

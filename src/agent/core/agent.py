@@ -275,6 +275,7 @@ class WorkerDeps:
 
 DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
     "click_element",
+    "hover_element",
     "type_text",
     "drag_and_drop",
     "scroll",
@@ -715,6 +716,44 @@ def build_browser_worker_agent(
             tool="click_element",
             ok=result.ok,
             duration_ms=duration_ms,
+            element_id=element_id,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message)
+
+    @agent.tool(name="hover_element")
+    async def hover_element(ctx: RunContext[WorkerDeps], element_id: str, duration_ms: int = 1000) -> ToolExecutionResult:
+        """Hover over an element for a duration. Use for revealing tooltips, dropdown menus, or hidden content triggered by mouse hover. Use element_id from the page snapshot."""
+        start = time.perf_counter()
+        result = await semantic.hover_element(element_id, ctx.deps.tool_context, duration_ms=duration_ms)
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "hover_element",
+                result.ok,
+                elapsed_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=f"duration={duration_ms}ms" if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Hovered {element_id}") if result.ok else None,
+            )
+        )
+        logger.debug(
+            "tool=hover_element step=%s ok=%s element_id=%s duration_ms=%s elapsed_ms=%s full_message=%s",
+            ctx.deps.step,
+            result.ok,
+            element_id,
+            duration_ms,
+            elapsed_ms,
+            result.message,
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="hover_element",
+            ok=result.ok,
+            duration_ms=elapsed_ms,
             element_id=element_id,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
