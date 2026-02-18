@@ -538,6 +538,12 @@ async def capture_snapshot(
                 # Strip the marker so it doesn't leak into attributes / [+attrs] hint
                 node_attributes.pop("data-agent-hid", None)
 
+            # Upgrade non-interactive elements with detected handlers to interactive
+            if element_handlers and not is_interactive:
+                is_interactive = True
+                interactive_reason = "detected_handler"
+                interactive_confidence = 0.55
+
             bbox = bounds_map.get(index)
             in_viewport = _in_viewport(bbox, viewport_width=viewport_width, viewport_height=viewport_height)
             area = None
@@ -563,7 +569,7 @@ async def capture_snapshot(
                     in_viewport=in_viewport,
                     area=area,
                     parent_chain=parent_chain,
-                    handlers=element_handlers if is_interactive else None,
+                    handlers=element_handlers,
                 )
             )
 
