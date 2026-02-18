@@ -278,6 +278,7 @@ DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
     "hover_element",
     "type_text",
     "drag_and_drop",
+    "draw",
     "scroll",
     "wait",
     "switch_to_iframe",
@@ -874,6 +875,45 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             source_id=source_id,
             target_id=target_id,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message)
+
+    @agent.tool(name="draw")
+    async def draw(ctx: RunContext[WorkerDeps], element_id: str, path: list[list[float]]) -> ToolExecutionResult:
+        """Draw a freeform path on a canvas or drawing surface by moving the mouse through a series of coordinate points with the button held. Points are [x, y] pairs relative to the element's top-left corner. Use element_id from the page snapshot."""
+        start = time.perf_counter()
+        result = await semantic.draw(element_id, path, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "draw",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=f"points={len(path)}" if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Drew path with {len(path)} points on {element_id}") if result.ok else None,
+            )
+        )
+        logger.debug(
+            "tool=draw step=%s ok=%s element_id=%s points=%s duration_ms=%s full_message=%s",
+            ctx.deps.step,
+            result.ok,
+            element_id,
+            len(path),
+            duration_ms,
+            result.message,
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="draw",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            element_id=element_id,
+            points_count=len(path),
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 

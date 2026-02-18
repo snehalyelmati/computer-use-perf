@@ -27,6 +27,10 @@ A general-purpose browser agent. Python 3.14, managed with [uv](https://docs.ast
 - **openai** — OpenAI-compatible client for OpenRouter
 - **playwright** — browser automation
 
+## Verification
+
+- When possible, write a local debug script (e.g. `debug_<feature>.py`) to verify changes against a minimal test page before running the full agent end-to-end
+
 ## Code Guidelines
 
 - **DO NOT HARDCODE** values, selectors, keywords, or patterns specific to particular websites/challenges
@@ -39,7 +43,7 @@ A general-purpose browser agent. Python 3.14, managed with [uv](https://docs.ast
 ## Browser Interaction Principles
 
 - **DOM-first**: Use DOM methods (`.click()`, `.focus()`, `.innerText`) for element interactions — they work through any visual layer (overlays, modals, z-index stacking)
-- **CDP coordinates only when required**: Only use `Input.dispatchMouseEvent` (coordinate-based) for actions that genuinely need screen positions (e.g., drag-and-drop). Never gate click/type/read on visibility checks.
+- **CDP coordinates only when required**: Only use `Input.dispatchMouseEvent` (coordinate-based) for actions that genuinely need screen positions (e.g., drag-and-drop, draw). Never gate click/type/read on visibility checks.
 - **Minimize CDP round-trips**: Combine operations into single `_call_on_node` calls instead of chaining multiple CDP commands
 - **No `onTop` gates for DOM operations**: Don't check `document.elementFromPoint()` or `onTop` before DOM interactions — they bypass visual layering by design
 

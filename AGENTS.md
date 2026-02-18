@@ -37,6 +37,9 @@ Agent Responsibilities:
 - **Orchestrator**: Plans the next sub-goal using stable element IDs from the pruned snapshot. Follows Oracle directives when present.
 - **Worker**: Executes the goal using semantic tools. Receives only the goal + pruned snapshot (no memory, no progress info).
 
+Verification:
+- When possible, write a local debug script (e.g. `debug_<feature>.py`) to verify changes against a minimal test page before running the full agent end-to-end.
+
 Code Guidelines:
 - DO NOT hardcode values, selectors, keywords, or patterns specific to particular websites/challenges.
 - The agent must be general-purpose and work on any website without site-specific logic.
@@ -63,6 +66,6 @@ Snapshot Scope:
 
 Browser Interaction Principles:
 - DOM-first: use DOM methods (`.click()`, `.focus()`, `.innerText`) — they work through any visual layer (overlays, modals, z-index stacking).
-- CDP coordinates only when required: only use `Input.dispatchMouseEvent` for actions needing screen positions (e.g., drag-and-drop). Never gate click/type/read on visibility checks.
+- CDP coordinates only when required: only use `Input.dispatchMouseEvent` for actions needing screen positions (e.g., drag-and-drop, draw). Never gate click/type/read on visibility checks.
 - Minimize CDP round-trips: combine operations into single `_call_on_node` calls.
 - No `onTop` gates for DOM operations: don't check `elementFromPoint()` before DOM interactions.
