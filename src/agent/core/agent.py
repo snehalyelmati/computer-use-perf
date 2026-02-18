@@ -12,11 +12,13 @@ import re
 import signal
 import sys
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic_ai import Agent, RunContext, ToolDefinition
 from pydantic_ai.models import Model
 from pydantic_ai.models.cerebras import CerebrasModel
+from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 
 from src.agent.core.resilient_model import ResilientModel
@@ -385,6 +387,11 @@ def _build_model(config: LLMConfig, *, model_override: str | None = None) -> Mod
             if value := os.environ.get(config.api_key_env):
                 os.environ.setdefault("CEREBRAS_API_KEY", value)
         model: Model = CerebrasModel(model_name)
+    elif config.provider == "groq":
+        if config.api_key_env != "GROQ_API_KEY":
+            if value := os.environ.get(config.api_key_env):
+                os.environ.setdefault("GROQ_API_KEY", value)
+        model = GroqModel(model_name)
     else:
         # OpenRouter (default)
         if config.api_key_env != "OPENROUTER_API_KEY":
@@ -562,6 +569,8 @@ def _snapshot_diff(
     prev: Any | None,
     curr: Any,
     *,
+    priority_ids: Sequence[str] | None = None,
+    changed_limit: int = 100,
     raw_text_limit: int = 80,
     raw_text_detail_limit: int = 8,
     raw_text_scan_cap: int = 20000,
@@ -583,13 +592,22 @@ def _snapshot_diff(
         b_key = (_normalize_label(b.role), _normalize_label(b.name), _normalize_label(b.text), _normalize_label(b.node_name))
         if a_key != b_key:
             changed.append(sid)
+    # Sort changed elements: priority IDs first (in priority order), then the rest capped
+    if priority_ids:
+        prio_set = set(priority_ids)
+        prio_order = {sid: idx for idx, sid in enumerate(priority_ids)}
+        prio_changed = sorted([sid for sid in changed if sid in prio_set], key=lambda s: prio_order[s])
+        rest_changed = [sid for sid in changed if sid not in prio_set][:changed_limit]
+        changed = prio_changed + rest_changed
+    else:
+        changed = changed[:changed_limit]
     lines: list[str] = []
     lines.append(f"new_elements={len(new_ids)} changed_labels={len(changed)} removed_elements={len(removed_ids)}")
     detail_ids: list[str] = []
     for sid in new_ids[:8]:
         detail_ids.append(sid)
         lines.append(f"+ {_format_element_brief(curr_map[sid])}")
-    for sid in changed[:8]:
+    for sid in changed:
         detail_ids.append(sid)
         lines.append(f"~ {_format_element_brief(curr_map[sid])}")
     for sid in removed_ids[:8]:
@@ -1421,9 +1439,16 @@ class BrowserAgent:
                     f"  snapshot: {snapshot_duration_ms}ms elements={len(snapshot.elements)}"
                     f" handlers={handlers_count} url={snapshot.url}"
                 )
+                prev_priority_ids = (
+                    self.state.last_filter_output.priority_element_ids
+                    if self.state.last_filter_output
+                    else None
+                )
                 diff_text, _diff_ids = _snapshot_diff(
                     prev_snapshot,
                     snapshot,
+                    priority_ids=prev_priority_ids,
+                    changed_limit=self.agent_config.diff_changed_limit,
                     raw_text_limit=self.agent_config.raw_text_limit_diff,
                     raw_text_detail_limit=self.agent_config.raw_text_diff_detail_limit,
                     raw_text_scan_cap=self.agent_config.raw_text_scan_cap,
@@ -1742,6 +1767,7 @@ class BrowserAgent:
                 worker_prompt = (
                     STEP_PROMPT.format(goal=decision.worker_goal)
                     + "\n\n"
+                    + f"Page context:\n{useful_block}\n\n"
                     + f"Page snapshot:\n{snapshot_text_worker}\n"
                 )
                 logger.debug(

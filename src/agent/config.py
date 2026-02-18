@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-ModelProvider = Literal["openrouter", "cerebras"]
+ModelProvider = Literal["openrouter", "cerebras", "groq"]
 
 PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "openrouter": {
@@ -19,6 +19,12 @@ PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
         "worker_model": "",
         "filter_model": "",
         "api_key_env": "CEREBRAS_API_KEY",
+    },
+    "groq": {
+        "model": "moonshotai/kimi-k2-instruct-0905",
+        "worker_model": "",
+        "filter_model": "",
+        "api_key_env": "GROQ_API_KEY",
     },
 }
 
@@ -43,7 +49,7 @@ MODEL_PRICES: dict[str, ModelPricing] = {
 class LLMConfig:
     """LLM configuration for the browser agent.
 
-    Supports multiple providers (OpenRouter, Cerebras).
+    Supports multiple providers (OpenRouter, Cerebras, Groq).
     Use PROVIDER_DEFAULTS to get default model and api_key_env per provider.
     """
 
@@ -92,6 +98,7 @@ class AgentConfig:
     raw_text_limit_fingerprint: int = 200
     raw_text_limit_diff: int = 80
     raw_text_diff_detail_limit: int = 8
+    diff_changed_limit: int = 100
     raw_text_line_max_len: int = 800
     raw_text_scan_cap: int = 20000
     raw_text_dedupe_prefix_len: int = 240
