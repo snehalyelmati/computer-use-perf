@@ -624,6 +624,33 @@ async def hover_element(element_id: str, context: ToolContext, *, duration_ms: i
     clamped = max(100, min(duration_ms, 5000))
     await asyncio.sleep(clamped / 1000)
 
+    # Complete the hover cycle — fire mouseleave/mouseout so JS handlers that
+    # accumulate hover duration (e.g. time-gated reveals) get the leave event.
+    await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function () {
+            const opts = {bubbles: true, cancelable: true};
+            this.dispatchEvent(new MouseEvent('mouseleave', {...opts, bubbles: false}));
+            this.dispatchEvent(new MouseEvent('mouseout', opts));
+            return true;
+        }
+        """,
+    )
+
+    # Also move CDP cursor away so CSS :hover pseudo-class clears
+    if info:
+        value = info.get("result", {}).get("value")
+        if value:
+            try:
+                await session.send(
+                    "Input.dispatchMouseEvent",
+                    {"type": "mouseMoved", "x": 0, "y": 0},
+                )
+            except Exception:
+                pass
+
     mutations = await _collect_mutations(session)
     message = _format_verification(mutations, f"Hovered {element_id} for {clamped}ms")
     return ToolResult(ok=True, message=message)
