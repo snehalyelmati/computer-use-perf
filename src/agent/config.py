@@ -103,3 +103,9 @@ class AgentConfig:
     raw_text_scan_cap: int = 20000
     raw_text_dedupe_prefix_len: int = 240
     raw_text_dedupe_suffix_len: int = 120
+    # Tool timing (ms)
+    settle_ms: int = 200
+    draw_settle_ms: int = 400
+    draw_point_interval_ms: int = 20
+    drag_phase_interval_ms: int = 50
+    networkidle_timeout_ms: int = 3000

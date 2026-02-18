@@ -20,6 +20,16 @@ class ToolResult:
     message: str
 
 
+@dataclass(frozen=True)
+class ToolTimingConfig:
+    """Timing parameters for tool actions (milliseconds)."""
+
+    settle_ms: int = 200
+    draw_settle_ms: int = 400
+    draw_point_interval_ms: int = 20
+    drag_phase_interval_ms: int = 50
+
+
 @dataclass
 class ToolContext:
     """Execution context for semantic tools."""
@@ -31,6 +41,7 @@ class ToolContext:
     active_frame_id: str | None = None
     last_tool: str | None = None
     last_element_id: str | None = None
+    timing: ToolTimingConfig = field(default_factory=ToolTimingConfig)
 
 
 def build_tool_context(
@@ -38,6 +49,7 @@ def build_tool_context(
     element_index: ElementIndex,
     *,
     active_frame_id: str | None = None,
+    timing: ToolTimingConfig | None = None,
 ) -> ToolContext:
     """Build a tool context tied to the browser session lifecycle."""
 
@@ -47,9 +59,9 @@ def build_tool_context(
         element_index=element_index,
         frame_sessions=session.frame_sessions,
         active_frame_id=active_frame_id,
+        timing=timing or ToolTimingConfig(),
     )
 
-_DEFAULT_SETTLE_MS = 200
 _WAIT_BUFFER_MS = 500
 
 _OBSERVER_INJECT_JS = """
@@ -401,7 +413,7 @@ async def _inject_observer(session: CDPSession) -> bool:
 
 
 async def _collect_mutations(
-    session: CDPSession, settle_ms: int = _DEFAULT_SETTLE_MS
+    session: CDPSession, settle_ms: int = 200
 ) -> dict | None:
     """Wait for DOM mutations to settle, then collect and disconnect the observer."""
     await asyncio.sleep(settle_ms / 1000.0)
@@ -575,7 +587,7 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     if not result:
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Click failed")
-    mutations = await _collect_mutations(session)
+    mutations = await _collect_mutations(session, context.timing.settle_ms)
     message = _format_verification(mutations, f"Clicked {element_id}")
     return ToolResult(ok=True, message=message)
 
@@ -651,7 +663,7 @@ async def hover_element(element_id: str, context: ToolContext, *, duration_ms: i
             except Exception:
                 pass
 
-    mutations = await _collect_mutations(session)
+    mutations = await _collect_mutations(session, context.timing.settle_ms)
     message = _format_verification(mutations, f"Hovered {element_id} for {clamped}ms")
     return ToolResult(ok=True, message=message)
 
@@ -673,7 +685,7 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
     if not await _insert_text(session, text):
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Type failed")
-    mutations = await _collect_mutations(session)
+    mutations = await _collect_mutations(session, context.timing.settle_ms)
     current_value = await _read_input_value(element.backend_node_id, session)
     base_msg = f"Typed into {element_id}"
     if current_value is not None:
@@ -729,22 +741,22 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
                 "Input.dispatchMouseEvent",
                 {"type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1},
             )
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(context.timing.drag_phase_interval_ms / 1000)
             await session.send(
                 "Input.dispatchMouseEvent",
                 {"type": "mouseMoved", "x": sx + 10, "y": sy + 10, "button": "left", "buttons": 1},
             )
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(context.timing.drag_phase_interval_ms / 1000)
             await session.send(
                 "Input.dispatchMouseEvent",
                 {"type": "mouseMoved", "x": tx, "y": ty, "button": "left", "buttons": 1},
             )
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(context.timing.drag_phase_interval_ms / 1000)
             await session.send(
                 "Input.dispatchMouseEvent",
                 {"type": "mouseReleased", "x": tx, "y": ty, "button": "left", "clickCount": 1},
             )
-            mutations = await _collect_mutations(session)
+            mutations = await _collect_mutations(session, context.timing.settle_ms)
             message = _format_verification(mutations, base_msg)
             return ToolResult(ok=True, message=message)
         except Exception:
@@ -775,7 +787,7 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Drag failed: cannot initiate drag")
 
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(context.timing.drag_phase_interval_ms * 2 / 1000)
 
     source_object_id = await _resolve_object_id(source.backend_node_id, session)
     result = await _call_on_node(
@@ -798,7 +810,7 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
     if not result:
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Drag failed: drop not accepted")
-    mutations = await _collect_mutations(session)
+    mutations = await _collect_mutations(session, context.timing.settle_ms)
     return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
 
@@ -854,14 +866,14 @@ async def draw(
                     "Input.dispatchMouseEvent",
                     {"type": "mouseMoved", "x": px, "y": py, "button": "left", "buttons": 1},
                 )
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(context.timing.draw_point_interval_ms / 1000)
             last_x = el_left + path[-1][0]
             last_y = el_top + path[-1][1]
             await session.send(
                 "Input.dispatchMouseEvent",
                 {"type": "mouseReleased", "x": last_x, "y": last_y, "button": "left", "clickCount": 1},
             )
-            mutations = await _collect_mutations(session)
+            mutations = await _collect_mutations(session, context.timing.draw_settle_ms)
             return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
         except Exception:
             pass  # Fall through to DOM fallback
@@ -896,7 +908,7 @@ async def draw(
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Draw failed: DOM event dispatch error")
 
-    mutations = await _collect_mutations(session)
+    mutations = await _collect_mutations(session, context.timing.draw_settle_ms)
     return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
 
@@ -907,7 +919,7 @@ async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
     buffered = min(clamped + _WAIT_BUFFER_MS, 10_000)
     injected = await _inject_observer(context.cdp_session)
     await asyncio.sleep(buffered / 1000)
-    mutations = await _collect_mutations(context.cdp_session) if injected else None
+    mutations = await _collect_mutations(context.cdp_session, context.timing.settle_ms) if injected else None
     return ToolResult(ok=True, message=_format_wait_message(buffered, mutations))
 
 
@@ -1123,7 +1135,7 @@ async def press_key_combination(keys: list[str], context: ToolContext) -> ToolRe
     except Exception as exc:  # pragma: no cover - runtime safety
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Key press failed: {exc}")
-    mutations = await _collect_mutations(session)
+    mutations = await _collect_mutations(session, context.timing.settle_ms)
     base_msg = f"Pressed {'+'.join(keys)}"
     message = _format_verification(mutations, base_msg)
     return ToolResult(ok=True, message=message)

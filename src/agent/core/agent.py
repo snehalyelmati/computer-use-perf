@@ -1381,6 +1381,12 @@ class BrowserAgent:
             await session.page.goto(self.agent_config.target_url)
             prev_snapshot = None
             stop_reason: str | None = None
+            tool_timing = semantic.ToolTimingConfig(
+                settle_ms=self.agent_config.settle_ms,
+                draw_settle_ms=self.agent_config.draw_settle_ms,
+                draw_point_interval_ms=self.agent_config.draw_point_interval_ms,
+                drag_phase_interval_ms=self.agent_config.drag_phase_interval_ms,
+            )
             for step in range(self.agent_config.max_steps):
                 self.state.step = step + 1
                 step_started = time.perf_counter()
@@ -1390,7 +1396,9 @@ class BrowserAgent:
                 logger.info(f"Step {self.state.step} start")
                 try:
                     await session.page.wait_for_load_state("domcontentloaded")
-                    await session.page.wait_for_load_state("networkidle", timeout=3000)
+                    await session.page.wait_for_load_state(
+                        "networkidle", timeout=self.agent_config.networkidle_timeout_ms
+                    )
                 except Exception:
                     pass
                 # ── Handler extraction ──
@@ -1497,6 +1505,7 @@ class BrowserAgent:
                     session,
                     element_index,
                     active_frame_id=self.state.active_frame_id,
+                    timing=tool_timing,
                 )
 
                 priority_ids: list[str] = []
