@@ -29,6 +29,8 @@ class ModelPricing:
 
     input_per_mtok: float
     output_per_mtok: float
+    cache_write_per_mtok: float | None = None  # None → same as input_per_mtok
+    cache_read_per_mtok: float | None = None  # None → same as input_per_mtok
 
 
 MODEL_PRICES: dict[str, ModelPricing] = {

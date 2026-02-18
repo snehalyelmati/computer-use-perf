@@ -114,7 +114,19 @@ def compute_cost_from_usage(model: str, usage: UsageStats) -> CostStats | None:
     pricing = MODEL_PRICES.get(model)
     if not pricing:
         return None
-    cost = (usage.input_tokens * pricing.input_per_mtok + usage.output_tokens * pricing.output_per_mtok) / 1_000_000
+
+    cache_write_rate = pricing.cache_write_per_mtok if pricing.cache_write_per_mtok is not None else pricing.input_per_mtok
+    cache_read_rate = pricing.cache_read_per_mtok if pricing.cache_read_per_mtok is not None else pricing.input_per_mtok
+
+    uncached_input = max(usage.input_tokens - usage.cache_write_tokens - usage.cache_read_tokens, 0)
+
+    input_cost = (
+        uncached_input * pricing.input_per_mtok
+        + usage.cache_write_tokens * cache_write_rate
+        + usage.cache_read_tokens * cache_read_rate
+    )
+    output_cost = usage.output_tokens * pricing.output_per_mtok
+    cost = (input_cost + output_cost) / 1_000_000
     return CostStats(cost_usd=cost)
 
 
