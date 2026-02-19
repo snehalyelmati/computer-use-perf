@@ -488,8 +488,8 @@ def _model_settings(config: LLMConfig) -> dict[str, Any]:
         "timeout": float(config.timeout_seconds),
         "parallel_tool_calls": False,
         "max_tokens": config.max_tokens,
-        "frequency_penalty": 0.5,
-        "presence_penalty": 0.3,
+        "temperature": 0.7,
+        "top_p": 0.8,
     }
     if config.provider == "openrouter":
         settings["openrouter_usage"] = {"include": True}
@@ -502,7 +502,21 @@ def _format_memory(memory: list[str], *, limit: int = 10) -> str:
     if not memory:
         return "None."
     recent = memory[-limit:]
-    lines = [f"{idx + 1}. {item}" for idx, item in enumerate(recent)]
+    # Collapse consecutive entries with identical content after the step number
+    collapsed: list[tuple[str, int]] = []  # (entry, repeat_count)
+    for entry in recent:
+        # Strip "[step N, " prefix to get comparable content
+        comparable = re.sub(r"^\[step \d+, ", "[step _, ", entry)
+        if collapsed and collapsed[-1][0] == comparable:
+            collapsed[-1] = (comparable, collapsed[-1][1] + 1)
+        else:
+            collapsed.append((comparable, 1))
+    lines: list[str] = []
+    for idx, (entry, count) in enumerate(collapsed):
+        if count > 1:
+            lines.append(f"{idx + 1}. {entry} (x{count})")
+        else:
+            lines.append(f"{idx + 1}. {entry}")
     return "\n".join(lines)
 
 def _format_step_trace(trace: list[dict[str, Any]], *, window: int = 0) -> str:
@@ -2152,8 +2166,14 @@ class BrowserAgent:
                     allowed_tools=DEFAULT_WORKER_TOOLS,
                 )
                 prev_url = getattr(session.page, "url", "") or ""
+                # Build worker cross-step context
+                worker_context = ""
+                if self.state.memory and self.agent_config.worker_context_steps > 0:
+                    recent = self.state.memory[-self.agent_config.worker_context_steps:]
+                    worker_context = "\n\nRecent steps:\n" + "\n".join(f"- {m}" for m in recent)
                 worker_prompt = (
                     STEP_PROMPT.format(goal=decision.worker_goal)
+                    + worker_context
                     + "\n\n"
                     + f"Page context:\n{useful_block}\n\n"
                     + f"Page snapshot:\n{snapshot_text_worker}\n"
@@ -2210,8 +2230,10 @@ class BrowserAgent:
                         update={"done": False, "summary": f"[no successful tools] {step_output.summary}"}
                     )
                 self.state.active_frame_id = tool_context.active_frame_id
-                self.state.last_summary = step_output.summary
-                self.state.memory.append(step_output.summary)
+                tool_status = f"{tool_tracker.success_count} ok, {tool_tracker.failure_count} failed"
+                memory_entry = f"[step {self.state.step}, {tool_status}] {step_output.summary}"
+                self.state.last_summary = memory_entry
+                self.state.memory.append(memory_entry)
                 self.state.last_tool = tool_context.last_tool
                 self.state.last_element_id = tool_context.last_element_id
                 logger.debug("memory step=%s entries=%s", self.state.step, self.state.memory)

@@ -87,6 +87,7 @@ class AgentConfig:
     max_log_runs: int = 10
     max_elements: int = 200
     memory_steps: int = 10
+    worker_context_steps: int = 3
     stuck_threshold: int = 3
     unchanged_abort_threshold: int = 5
     oracle_interval: int = 5

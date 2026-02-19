@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max interactive elements to include in LLM snapshot context",
     )
     parser.add_argument(
+        "--worker-context-steps",
+        type=int,
+        default=3,
+        help="Number of recent step summaries shown to the worker (default: 3)",
+    )
+    parser.add_argument(
         "--stuck-threshold",
         type=int,
         default=3,
@@ -216,6 +222,7 @@ def main() -> None:
         goal=task_text,
         max_steps=args.max_steps,
         max_elements=args.max_elements,
+        worker_context_steps=int(args.worker_context_steps),
         stuck_threshold=args.stuck_threshold,
         unchanged_abort_threshold=args.unchanged_abort_threshold,
         oracle_interval=args.oracle_interval,

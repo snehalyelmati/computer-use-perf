@@ -100,6 +100,7 @@ You will be given a page snapshot containing interactive elements with stable ID
 - **Only type values provided in the goal or visible in the page snapshot.** Never guess, invent, or fabricate values. If the goal specifies a value, use it exactly. If you need a value that is not in the goal or snapshot, report that in your summary instead of guessing.
 - Tool results include DOM change feedback (e.g. "No visible DOM changes detected", "New text appeared"). Use this to assess whether your action succeeded.
 - You will see "Page context" with task instructions, status indicators, and form labels extracted from the page. Use this to understand what the page expects and verify the goal makes sense. If the context shows a prerequisite is already met or a button has become actionable, prioritize that over the stated goal.
+- You may see "Recent steps" showing what happened in the last few steps. Use this to avoid repeating failed actions and to build on prior progress. Do not re-attempt the same action on the same element if a recent step shows it failed.
 - Never repeat a failing action. If an action did not produce the expected result, try a different element or approach.
 - Only set done=true when at least one of your tool calls succeeded based on the feedback. If every tool call failed or produced errors, set done=false and describe what went wrong in your summary.
 """.strip()
