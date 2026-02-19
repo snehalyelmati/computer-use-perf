@@ -9,7 +9,7 @@ import math
 import re
 import time
 from urllib.parse import urlparse
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Literal, Sequence
 
 from playwright.async_api import CDPSession, Page
 
@@ -41,6 +41,59 @@ INTERACTIVE_TAGS = {
 }
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_CLASS_DROP_CHARS: frozenset[str] = frozenset("[](){}:/\\@%=")
+
+
+def sanitize_class_value(
+    value: str | None,
+    *,
+    mode: Literal["off", "aggressive"] = "aggressive",
+    max_tokens: int = 6,
+    max_chars: int = 80,
+    fallback_tokens: int = 2,
+) -> str | None:
+    """Sanitize class strings to preserve only a small semantic hint.
+
+    Uses deterministic, shape-only heuristics and avoids site-specific logic.
+    """
+    if not value:
+        return None
+    tokens = [t for t in str(value).split() if t]
+    if not tokens:
+        return None
+    if mode == "off":
+        kept = tokens
+    else:
+        kept: list[str] = []
+        for token in tokens:
+            if any(ch.isdigit() for ch in token):
+                continue
+            if any(ch in _CLASS_DROP_CHARS for ch in token):
+                continue
+            non_alnum = sum(1 for ch in token if not ch.isalnum())
+            if non_alnum > 2:
+                continue
+            if len(token) > 32:
+                continue
+            kept.append(token)
+        if not kept:
+            kept = tokens[: max(0, int(fallback_tokens))]
+    max_tokens = max(0, int(max_tokens))
+    kept = kept[:max_tokens] if max_tokens else []
+    if not kept:
+        return None
+    out = " ".join(kept).strip()
+    max_chars = max(0, int(max_chars))
+    if max_chars and len(out) > max_chars:
+        out = out[:max_chars].rstrip()
+    return out or None
+
+
+def truncate_attr_value(value: str, *, max_len: int) -> str:
+    max_len = max(0, int(max_len))
+    if max_len and len(value) > max_len:
+        return value[:max_len].rstrip()
+    return value
 
 
 @dataclass
@@ -64,6 +117,7 @@ class ElementSnapshot:
     area: float | None = None
     parent_chain: tuple[tuple[int, str, str], ...] | None = None
     handlers: dict[str, str] | None = None  # {event_name: truncated_source}
+    descendant_text: str | None = None  # short preview for unlabeled containers
 
 
 @dataclass(frozen=True)
@@ -159,6 +213,8 @@ def _interactive_reason(
         return True, "onclick", 0.65
     if "href" in attributes and (node_name or "").upper() == "A":
         return True, "href", 0.98
+    if attributes.get("data-agent-scroll"):
+        return True, "scroll_container", 0.6
     if cursor == "pointer":
         return True, "cursor_pointer", 0.35
     return False, None, 0.0
@@ -271,6 +327,8 @@ def element_text_blob(element: ElementSnapshot) -> str:
     for value in [element.role, element.name, element.text, element.node_name]:
         if value:
             parts.append(str(value))
+    if element.descendant_text:
+        parts.append(str(element.descendant_text))
     attrs = element.attributes or {}
     for key in [
         "id",
@@ -371,7 +429,15 @@ def unique_stable_id(stable_id: str, counts: dict[str, int]) -> str:
 async def capture_snapshot(
     page: Page,
     cdp_session: CDPSession,
+    *,
     handler_map: dict[str, dict[str, str]] | None = None,
+    desc_text_preview_enabled: bool = True,
+    desc_text_preview_max_chars: int = 240,
+    desc_text_preview_max_nodes: int = 200,
+    class_sanitize_mode: Literal["off", "aggressive"] = "aggressive",
+    class_sanitize_max_tokens: int = 6,
+    class_sanitize_max_chars: int = 80,
+    class_sanitize_fallback_tokens: int = 2,
 ) -> PageSnapshot:
     """Capture a DOM + accessibility snapshot using CDP."""
 
@@ -432,7 +498,58 @@ async def capture_snapshot(
         bounds_map = _layout_bounds(document.get("layout", {}))
 
         node_count = len(node_names)
+        children_by_parent: list[list[int]] = [[] for _ in range(node_count)]
+        if isinstance(parent_indices, list):
+            for child_idx, parent_idx in enumerate(parent_indices):
+                if isinstance(parent_idx, int) and 0 <= parent_idx < node_count:
+                    children_by_parent[parent_idx].append(child_idx)
         size_hints["dom_total_nodes"] = size_hints.get("dom_total_nodes", 0) + int(node_count)
+
+        preview_enabled = bool(desc_text_preview_enabled)
+        preview_max_chars = max(20, int(desc_text_preview_max_chars))
+        preview_max_nodes = max(50, int(desc_text_preview_max_nodes))
+        preview_container_tags = {"DIV", "SECTION", "ARTICLE", "MAIN", "NAV", "ASIDE", "SPAN"}
+
+        def _descendant_text_preview(start_index: int) -> str | None:
+            if not preview_enabled:
+                return None
+            if not (0 <= start_index < node_count):
+                return None
+            if not children_by_parent[start_index]:
+                return None
+            visited = 0
+            total_chars = 0
+            pieces: list[str] = []
+            last_piece = ""
+            stack: list[int] = [start_index]
+            while stack and visited < preview_max_nodes and total_chars < preview_max_chars:
+                idx = stack.pop()
+                visited += 1
+                node_name_local = _decode_string(node_names[idx], strings)
+                if node_name_local == "#text":
+                    node_value_local = _decode_string(node_values[idx], strings) if idx < len(node_values) else ""
+                    if isinstance(text_values, dict):
+                        text_value_raw_local = text_values.get(idx, "")
+                    else:
+                        text_value_raw_local = text_values[idx] if idx < len(text_values) else ""
+                    text_value_local = _decode_string(text_value_raw_local, strings)
+                    normalized = _normalize_text(text_value_local or node_value_local)
+                    if normalized and normalized != last_piece:
+                        remaining = preview_max_chars - total_chars
+                        if remaining <= 0:
+                            break
+                        snippet = normalized if len(normalized) <= remaining else normalized[:remaining]
+                        snippet = snippet.strip()
+                        if snippet:
+                            pieces.append(snippet)
+                            total_chars += len(snippet) + 1
+                            last_piece = normalized
+                children = children_by_parent[idx] if 0 <= idx < len(children_by_parent) else []
+                if children:
+                    for child in reversed(children):
+                        stack.append(child)
+            out = " ".join(pieces).strip()
+            return out or None
         last_text_parent_index: int | None = None
         for index in range(node_count):
             node_name = _decode_string(node_names[index], strings)
@@ -488,7 +605,10 @@ async def capture_snapshot(
             name = _normalize_text(ax_info.get("name") or None)
 
             is_interactive, interactive_reason, interactive_confidence = _interactive_reason(
-                node_name, role, node_attributes, cursor
+                node_name,
+                role,
+                node_attributes,
+                cursor,
             )
             if not is_interactive and not _should_include_non_interactive(
                 node_name, node_attributes,
@@ -521,7 +641,20 @@ async def capture_snapshot(
                     if p_name and p_name.upper() in {"HTML", "#DOCUMENT"}:
                         break
                     p_attrs = attribute_map(attributes[pi], strings) if pi < len(attributes) else {}
-                    p_label = p_attrs.get("id") or p_attrs.get("class", "").split()[0] if p_attrs.get("class") else ""
+                    p_label = p_attrs.get("id") or ""
+                    if not p_label and (class_value := p_attrs.get("class")):
+                        sanitized = sanitize_class_value(
+                            class_value,
+                            mode=class_sanitize_mode,
+                            max_tokens=class_sanitize_max_tokens,
+                            max_chars=class_sanitize_max_chars,
+                            fallback_tokens=class_sanitize_fallback_tokens,
+                        )
+                        if sanitized:
+                            p_label = sanitized.split()[0] if sanitized.split() else ""
+                        if not p_label:
+                            parts = str(class_value).split()
+                            p_label = parts[0] if parts else ""
                     if p_name and not p_name.startswith("#"):
                         chain.append((pi, p_name.lower(), p_label))
                     next_pi = parent_indices[pi] if pi < len(parent_indices) else -1
@@ -539,12 +672,23 @@ async def capture_snapshot(
                     element_handlers = prioritize_handlers(handler_map[hid])
                 # Strip the marker so it doesn't leak into attributes / [+attrs] hint
                 node_attributes.pop("data-agent-hid", None)
+            node_attributes.pop("data-agent-scroll", None)
 
             # Upgrade non-interactive elements with detected handlers to interactive
             if element_handlers and not is_interactive:
                 is_interactive = True
                 interactive_reason = "detected_handler"
                 interactive_confidence = 0.55
+
+            descendant_text = None
+            if (
+                is_interactive
+                and preview_enabled
+                and not name
+                and not text
+                and (node_name or "").upper() in preview_container_tags
+            ):
+                descendant_text = _descendant_text_preview(index)
 
             bbox = bounds_map.get(index)
             in_viewport = _in_viewport(bbox, viewport_width=viewport_width, viewport_height=viewport_height)
@@ -572,6 +716,7 @@ async def capture_snapshot(
                     area=area,
                     parent_chain=parent_chain,
                     handlers=element_handlers,
+                    descendant_text=descendant_text,
                 )
             )
 
@@ -597,6 +742,11 @@ def format_snapshot_for_llm(
     max_elements: int = 200,
     query: str | None = None,
     priority_ids: Sequence[str] | None = None,
+    class_sanitize_mode: Literal["off", "aggressive"] = "aggressive",
+    class_sanitize_max_tokens: int = 6,
+    class_sanitize_max_chars: int = 80,
+    class_sanitize_fallback_tokens: int = 2,
+    attr_value_max_len: int = 120,
 ) -> str:
     """Format a snapshot into a compact, LLM-friendly text representation."""
 
@@ -634,10 +784,12 @@ def format_snapshot_for_llm(
         "name",
         "type",
         "placeholder",
+        "disabled",
         "aria-label",
         "aria-describedby",
         "aria-details",
         "aria-labelledby",
+        "aria-disabled",
         "aria-hidden",
         "aria-value",
         "aria-valuetext",
@@ -674,17 +826,40 @@ def format_snapshot_for_llm(
         role = (element.role or "").strip()
         name = (element.name or "").strip()
         text = (element.text or "").strip()
+        if not text and element.descendant_text:
+            text = (element.descendant_text or "").strip()
         tag = (element.node_name or "").strip()
         attrs = element.attributes or {}
-        important_attrs = {
-            k: attrs.get(k) for k in _IMPORTANT_ATTR_KEYS if attrs.get(k)
-        }
+        boolean_keys = {"disabled", "checked", "selected", "readonly", "multiple", "required"}
+        important_attrs: dict[str, str] = {}
+        for k in _IMPORTANT_ATTR_KEYS:
+            if k not in attrs:
+                continue
+            v = attrs.get(k)
+            if v or k in boolean_keys:
+                important_attrs[k] = str(v or "")
         for k, v in attrs.items():
             if k.startswith("data-") and v and k not in important_attrs:
-                important_attrs[k] = v
+                important_attrs[k] = str(v)
+        rendered_attrs: dict[str, str] = {}
+        for k, v in important_attrs.items():
+            value = str(v)
+            if k == "class":
+                sanitized = sanitize_class_value(
+                    value,
+                    mode=class_sanitize_mode,
+                    max_tokens=class_sanitize_max_tokens,
+                    max_chars=class_sanitize_max_chars,
+                    fallback_tokens=class_sanitize_fallback_tokens,
+                )
+                if not sanitized:
+                    continue
+                value = sanitized
+            else:
+                value = truncate_attr_value(value, max_len=attr_value_max_len)
+            rendered_attrs[k] = value
         attr_str = (
-            " ".join(f'{k}="{v}"' for k, v in important_attrs.items())
-            if important_attrs else ""
+            " ".join(f'{k}="{v}"' for k, v in rendered_attrs.items()) if rendered_attrs else ""
         )
         label_parts = [part for part in [role, name, text, tag] if part]
         label = " | ".join(label_parts) if label_parts else "element"

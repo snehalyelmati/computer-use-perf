@@ -50,7 +50,36 @@ def test_attribute_map_normalizes_case() -> None:
 
 
 def test_is_interactive_cursor_pointer() -> None:
-    is_interactive, reason, confidence = snapshot._interactive_reason("DIV", None, {}, "pointer")
+    is_interactive, reason, confidence = snapshot._interactive_reason(
+        "DIV",
+        None,
+        {},
+        "pointer",
+    )
     assert is_interactive is True
     assert reason == "cursor_pointer"
     assert confidence < 0.6
+
+
+def test_is_interactive_scroll_container_via_attribute() -> None:
+    is_interactive, reason, confidence = snapshot._interactive_reason(
+        "DIV",
+        None,
+        {"data-agent-scroll": "1"},
+        None,
+    )
+    assert is_interactive is True
+    assert reason == "scroll_container"
+    assert confidence == 0.6
+
+
+def test_not_interactive_without_scroll_attribute() -> None:
+    """A plain DIV with no signals should not be interactive."""
+    is_interactive, reason, _confidence = snapshot._interactive_reason(
+        "DIV",
+        None,
+        {},
+        None,
+    )
+    assert is_interactive is False
+    assert reason is None

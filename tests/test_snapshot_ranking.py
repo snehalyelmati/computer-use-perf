@@ -13,6 +13,7 @@ from src.agent.context.snapshot import (
     PageSnapshot,
     format_snapshot_for_llm,
     rank_elements,
+    sanitize_class_value,
     search_elements,
 )
 
@@ -81,3 +82,51 @@ def test_format_snapshot_for_llm_adds_bbox_for_duplicate_labels() -> None:
     assert re.search(r"\bbbox=\d+,\d+,\d+,\d+\b", left_line)
     assert re.search(r"\bbbox=\d+,\d+,\d+,\d+\b", right_line)
     assert "bbox=" not in other_line
+
+
+def test_format_snapshot_for_llm_uses_descendant_text_for_unlabeled_containers() -> None:
+    elements = [
+        _el(
+            "el_container",
+            role=None,
+            name=None,
+            text=None,
+            node_name="DIV",
+            attrs={},
+        ),
+    ]
+    elements[0].descendant_text = "Hidden DOM Challenge: click here 3 more times to reveal"
+    snapshot = PageSnapshot(url="https://example.com/", title="Test", elements=elements, raw_text=[])
+    text = format_snapshot_for_llm(snapshot, max_elements=5)
+    assert "Hidden DOM Challenge" in text
+
+
+def test_format_snapshot_for_llm_sanitizes_class_and_shows_disabled_boolean_attr() -> None:
+    elements = [
+        _el(
+            "el_btn",
+            role="button",
+            name="Click Here",
+            node_name="BUTTON",
+            attrs={
+                "class": "w-24 h-24 cursor-pointer bg-gradient-to-br z-[100] fooBar",
+                "disabled": "",
+            },
+        )
+    ]
+    snapshot = PageSnapshot(url="https://example.com/", title="Test", elements=elements, raw_text=[])
+    rendered = format_snapshot_for_llm(snapshot, max_elements=5)
+    assert 'class="cursor-pointer fooBar"' in rendered
+    assert "w-24" not in rendered
+    assert 'disabled=""' in rendered
+
+
+def test_sanitize_class_value_aggressive_drops_utility_like_tokens() -> None:
+    out = sanitize_class_value(
+        "w-24 h-24 cursor-pointer bg-gradient-to-br z-[100] fooBar",
+        mode="aggressive",
+        max_tokens=6,
+        max_chars=80,
+        fallback_tokens=2,
+    )
+    assert out == "cursor-pointer fooBar"

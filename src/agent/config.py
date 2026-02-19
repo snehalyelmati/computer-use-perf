@@ -89,10 +89,27 @@ class AgentConfig:
     stuck_threshold: int = 3
     unchanged_abort_threshold: int = 5
     oracle_interval: int = 5
+    widen_on_oracle: bool = False
+    # Snapshot semantics
+    desc_text_preview_enabled: bool = True
+    desc_text_preview_max_chars: int = 240
+    desc_text_preview_max_nodes: int = 200
+    # Stuck detection
+    progress_fingerprint_enabled: bool = True
+    progress_fingerprint_max_elements: int = 120
+    progress_fingerprint_raw_lines: int = 60
+    progress_fingerprint_raw_chars: int = 8000
+    # Snapshot formatting / token efficiency
+    class_sanitize_mode: Literal["off", "aggressive"] = "aggressive"
+    class_sanitize_max_tokens: int = 6
+    class_sanitize_max_chars: int = 80
+    class_sanitize_fallback_tokens: int = 2
+    snapshot_attr_value_max_len: int = 120
     log_level: str = "INFO"
     metrics_enabled: bool = True
     color_logs: bool = True
     handlers_enabled: bool = True
+    scroll_containers_enabled: bool = True
     save_pages: bool = False
     raw_text_limit_prompt: int = 300
     raw_text_limit_fingerprint: int = 200

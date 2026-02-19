@@ -42,7 +42,7 @@ flowchart LR
 - Set `OPENROUTER_API_KEY` for OpenRouter access
 
 ## Run
-- `uv run main.py --url <target> --task TASK.md [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--max-tokens 2048] [--log-level INFO] [--no-metrics] [--no-handlers]`
+- `uv run main.py --url <target> --task TASK.md [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--widen-on-oracle] [--max-tokens 2048] [--log-level INFO] [--no-metrics] [--no-handlers]`
 
 `TASK.md` should contain the full task instructions as plain markdown text.
 
@@ -149,11 +149,12 @@ The agent uses semantic tools that reference stable element IDs:
 3. **Extract context via CDP** into a structured snapshot with full element tree. Handler map is correlated via `data-agent-hid`, then marker attributes are cleaned up.
 4. **Oracle health check** (periodic every N steps + when stuck): reviews the execution trace and issues directives. Invalidates filter cache when intervention is needed.
 5. **Filter (tree pruner)**: receives full snapshot + diff + Oracle advice. Conservatively removes only obvious filler elements; keeps everything plausibly useful. Cached when the page fingerprint is unchanged.
-6. **Build pruned snapshot**: only filter-kept elements survive. Orchestrator and worker never see pruned elements.
-7. **Orchestrator**: plans the next sub-goal using stable element IDs from the pruned snapshot. Follows Oracle directives when present.
-8. **Worker**: executes the goal using semantic tools against the pruned snapshot. Receives only the goal + snapshot (no memory, no progress info).
-9. **Update step trace + memory + stop criteria** (`done`, `max_steps`, or unchanged fingerprint abort).
-10. **Repeat** until the overall goal is complete.
+6. **Deterministic guardrails**: compress text blobs, anchor must-keep elements to instruction text (e.g., quoted button labels), and expand kept containers to retain sibling controls.
+7. **Build pruned snapshot**: only kept elements survive. Orchestrator and worker never see removed elements. Optionally, `--widen-on-oracle` bypasses pruning when the Oracle intervenes (`all_clear=false`).
+8. **Orchestrator**: plans the next sub-goal using stable element IDs from the pruned snapshot. Follows Oracle directives when present.
+9. **Worker**: executes the goal using semantic tools against the pruned snapshot. Receives only the goal + snapshot (no memory, no progress info).
+10. **Update step trace + memory + stop criteria** (`done`, `max_steps`, or unchanged fingerprint abort).
+11. **Repeat** until the overall goal is complete.
 
 ## Guardrails
 
@@ -162,6 +163,7 @@ The agent uses semantic tools that reference stable element IDs:
 - Keep tools generic and reusable across websites.
 - The Oracle fires periodically (default: every 5 steps) and when stuck (default: 3 unchanged steps). It reviews the full execution trace and issues directives that the orchestrator must follow.
 - When the Oracle fires with `all_clear=false`, the filter cache is invalidated to force re-evaluation with Oracle context.
+- Optional: enable `--widen-on-oracle` to keep all interactive elements (minus avoided ids) when `all_clear=false`.
 - If the page fingerprint is unchanged for multiple steps (default: 5), the agent aborts early with a clear stop reason.
 - LLM output is capped at `max_tokens` (default: 2048) with `frequency_penalty` (0.3) to prevent degenerate repetition.
 

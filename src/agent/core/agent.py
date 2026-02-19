@@ -12,6 +12,7 @@ import re
 import signal
 import sys
 import time
+from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
@@ -22,11 +23,21 @@ from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 
 from src.agent.core.resilient_model import ResilientModel
+from src.agent.core.pruning import (
+    extract_instruction_phrases,
+    extract_stable_ids,
+    match_phrases_to_elements,
+)
+from src.agent.core.text_compress import compress_text_lines
 
 from src.agent.browser.session import close_browser, launch_browser
 from src.agent.capture.page_saver import PageSaver
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.handlers import cleanup_handler_attributes, extract_handlers
+from src.agent.context.scroll_containers import (
+    cleanup_scroll_container_attributes,
+    extract_scroll_containers,
+)
 from src.agent.context.snapshot import (
     ElementSnapshot,
     PageSnapshot,
@@ -244,6 +255,61 @@ def _format_phase(step: int, phase: str, *, detail: str | None = None, indent: i
     return message
 
 
+_SEMANTIC_CONTAINER_TAGS: frozenset[str] = frozenset({
+    "form",
+    "section",
+    "main",
+    "nav",
+    "aside",
+    "article",
+    "dialog",
+    "header",
+    "footer",
+    "ul",
+    "ol",
+    "table",
+    "fieldset",
+})
+_CONTAINER_EXPANSION_LIMIT = 80
+
+
+def _container_prefixes(parent_chain: tuple[tuple[int, str, str], ...]) -> list[tuple[tuple[int, str, str], ...]]:
+    """Pick up to two meaningful container prefixes from a parent chain.
+
+    The deepest meaningful container can be too narrow (e.g., a flex row) and miss
+    siblings that live at a higher level in the same task card. Returning an
+    additional ancestor prefix helps preserve nearby controls without hardcoding.
+    """
+    prefixes: list[tuple[tuple[int, str, str], ...]] = []
+    for idx in range(len(parent_chain) - 1, -1, -1):
+        _, tag, label = parent_chain[idx]
+        if label or tag in _SEMANTIC_CONTAINER_TAGS:
+            prefixes.append(parent_chain[: idx + 1])
+            if len(prefixes) >= 2:
+                break
+    return prefixes
+
+
+def _filter_ids_ordered(
+    ids: list[str] | tuple[str, ...] | None,
+    *,
+    valid_ids: set[str],
+    avoid_ids: set[str],
+) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for sid in ids or []:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        if sid not in valid_ids:
+            continue
+        if sid in avoid_ids:
+            continue
+        out.append(sid)
+    return out
+
+
 @dataclass
 class AgentState:
     step: int = 0
@@ -251,6 +317,7 @@ class AgentState:
     memory: list[str] = field(default_factory=list)
     last_summary: str | None = None
     last_page_fingerprint: str | None = None
+    last_progress_fingerprint: str | None = None
     no_progress_steps: int = 0
     last_tool: str | None = None
     last_element_id: str | None = None
@@ -462,6 +529,62 @@ def _element_fingerprint_line(element: ElementSnapshot) -> str:
         "|".join(important_attrs),
     ]
     return "\t".join(parts)
+
+def _element_progress_line(element: ElementSnapshot) -> str:
+    """Semantic element identity for progress detection (ignores stable_id)."""
+    attrs = element.attributes or {}
+    important_attrs: list[str] = []
+    for key in ["id", "name", "type", "placeholder", "aria-label", "title", "alt", "href", "value", "disabled"]:
+        if key in attrs:
+            value = attrs.get(key)
+            if value:
+                important_attrs.append(f"{key}={_normalize_label(str(value))}")
+            else:
+                important_attrs.append(key)
+    parts = [
+        _normalize_label(element.role),
+        _normalize_label(element.name),
+        _normalize_label(element.text or element.descendant_text),
+        _normalize_label(element.node_name),
+        "|".join(sorted(set(important_attrs))),
+    ]
+    return "\t".join(parts)
+
+
+def _progress_fingerprint(
+    snapshot: Any,
+    *,
+    max_elements: int = 120,
+    raw_text_lines: int = 60,
+    raw_text_chars: int = 8000,
+    raw_text_scan_cap: int = 20000,
+    raw_text_line_max_len: int = 800,
+    raw_text_dedupe_prefix_len: int = 240,
+    raw_text_dedupe_suffix_len: int = 120,
+) -> str:
+    """Fingerprint page progress while ignoring stable-id churn."""
+    elements = list(getattr(snapshot, "elements", []) or [])
+    semantic_lines = [_element_progress_line(el) for el in elements[: max(0, int(max_elements))]]
+    semantic_lines.sort()
+
+    raw_lines = _select_raw_text_lines(
+        list(getattr(snapshot, "raw_text", []) or []),
+        limit=int(raw_text_lines),
+        scan_cap=raw_text_scan_cap,
+        max_len=raw_text_line_max_len,
+        dedupe_prefix_len=raw_text_dedupe_prefix_len,
+        dedupe_suffix_len=raw_text_dedupe_suffix_len,
+    )
+    raw_lines = compress_text_lines(raw_lines, max_lines=int(raw_text_lines), max_chars=int(raw_text_chars))
+
+    lines: list[str] = [getattr(snapshot, "url", "") or "", getattr(snapshot, "title", "") or ""]
+    lines.extend(semantic_lines)
+    if raw_lines:
+        lines.append("RAW_TEXT:")
+        lines.extend(raw_lines)
+    material = "\n".join(lines)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
 
 def _page_fingerprint(snapshot: Any, *, raw_text_limit: int = 200) -> str:
     elements = list(getattr(snapshot, "elements", []) or [])
@@ -1416,14 +1539,37 @@ class BrowserAgent:
                         handlers=handlers_count,
                     )
 
+                scroll_marked = 0
+                if self.agent_config.scroll_containers_enabled:
+                    scroll_started = time.perf_counter()
+                    scroll_marked = await extract_scroll_containers(session.page)
+                    scroll_duration_ms = int((time.perf_counter() - scroll_started) * 1000)
+                    metrics.emit(
+                        "scroll_container_marking",
+                        step=self.state.step,
+                        duration_ms=scroll_duration_ms,
+                        marked=scroll_marked,
+                    )
+
                 snapshot_started = time.perf_counter()
                 snapshot = await capture_snapshot(
-                    session.page, session.cdp_session, handler_map=handler_map,
+                    session.page,
+                    session.cdp_session,
+                    handler_map=handler_map,
+                    desc_text_preview_enabled=self.agent_config.desc_text_preview_enabled,
+                    desc_text_preview_max_chars=self.agent_config.desc_text_preview_max_chars,
+                    desc_text_preview_max_nodes=self.agent_config.desc_text_preview_max_nodes,
+                    class_sanitize_mode=self.agent_config.class_sanitize_mode,
+                    class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
+                    class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
+                    class_sanitize_fallback_tokens=self.agent_config.class_sanitize_fallback_tokens,
                 )
                 snapshot_duration_ms = int((time.perf_counter() - snapshot_started) * 1000)
 
                 if handler_map:
                     await cleanup_handler_attributes(session.page)
+                if scroll_marked:
+                    await cleanup_scroll_container_attributes(session.page)
 
                 metrics.emit(
                     "snapshot",
@@ -1470,10 +1616,28 @@ class BrowserAgent:
                 )
                 logger.debug("page_fingerprint=%s", page_fingerprint)
                 logger.debug("diff_text:\n%s", diff_text)
-                if self.state.last_page_fingerprint == page_fingerprint:
-                    self.state.no_progress_steps += 1
+                if self.agent_config.progress_fingerprint_enabled:
+                    progress_fingerprint = _progress_fingerprint(
+                        snapshot,
+                        max_elements=self.agent_config.progress_fingerprint_max_elements,
+                        raw_text_lines=self.agent_config.progress_fingerprint_raw_lines,
+                        raw_text_chars=self.agent_config.progress_fingerprint_raw_chars,
+                        raw_text_scan_cap=self.agent_config.raw_text_scan_cap,
+                        raw_text_line_max_len=self.agent_config.raw_text_line_max_len,
+                        raw_text_dedupe_prefix_len=self.agent_config.raw_text_dedupe_prefix_len,
+                        raw_text_dedupe_suffix_len=self.agent_config.raw_text_dedupe_suffix_len,
+                    )
+                    logger.debug("progress_fingerprint=%s", progress_fingerprint)
+                    if self.state.last_progress_fingerprint == progress_fingerprint:
+                        self.state.no_progress_steps += 1
+                    else:
+                        self.state.no_progress_steps = 0
+                    self.state.last_progress_fingerprint = progress_fingerprint
                 else:
-                    self.state.no_progress_steps = 0
+                    if self.state.last_page_fingerprint == page_fingerprint:
+                        self.state.no_progress_steps += 1
+                    else:
+                        self.state.no_progress_steps = 0
                 self.state.last_page_fingerprint = page_fingerprint
 
                 if page_saver:
@@ -1487,8 +1651,13 @@ class BrowserAgent:
 
                 if self.state.no_progress_steps >= self.agent_config.unchanged_abort_threshold:
                     stop_reason = "unchanged_fingerprint_abort"
+                    fp_label = (
+                        "progress_fingerprint"
+                        if self.agent_config.progress_fingerprint_enabled
+                        else "page_fingerprint"
+                    )
                     logger.warning(
-                        f"  abort: unchanged_fingerprint count={self.state.no_progress_steps} "
+                        f"  abort: unchanged_{fp_label} count={self.state.no_progress_steps} "
                         f"threshold={self.agent_config.unchanged_abort_threshold}"
                     )
                     metrics.emit(
@@ -1514,10 +1683,16 @@ class BrowserAgent:
                 full_tree_text = format_snapshot_for_llm(
                     snapshot,
                     max_elements=self.agent_config.max_elements,
+                    class_sanitize_mode=self.agent_config.class_sanitize_mode,
+                    class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
+                    class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
+                    class_sanitize_fallback_tokens=self.agent_config.class_sanitize_fallback_tokens,
+                    attr_value_max_len=self.agent_config.snapshot_attr_value_max_len,
                 )
 
                 # ── Oracle (dual trigger: periodic + stuck) ──
                 oracle_hint = ""
+                advice: OracleAdvice | None = None
                 should_call_oracle = (
                     (self.agent_config.oracle_interval > 0 and self.state.step % self.agent_config.oracle_interval == 0)
                     or self.state.no_progress_steps >= self.agent_config.stuck_threshold
@@ -1594,6 +1769,14 @@ class BrowserAgent:
                         oracle_duration_ms = int((time.perf_counter() - oracle_started) * 1000)
                         logger.warning("Oracle advisor failed", exc_info=True)
 
+                oracle_intervened = bool(
+                    self.agent_config.widen_on_oracle and advice and not advice.all_clear
+                )
+                avoid_ids: set[str] = set()
+                if advice:
+                    for entry in advice.avoid or []:
+                        avoid_ids |= extract_stable_ids(entry)
+
                 # ── Filter (tree pruner) ──
                 filter_output = self.state.last_filter_output
                 if self.state.last_filter_fingerprint != page_fingerprint or filter_output is None:
@@ -1606,6 +1789,7 @@ class BrowserAgent:
                         dedupe_prefix_len=self.agent_config.raw_text_dedupe_prefix_len,
                         dedupe_suffix_len=self.agent_config.raw_text_dedupe_suffix_len,
                     )
+                    raw_lines = compress_text_lines(raw_lines, max_lines=60, max_chars=8000)
                     raw_text_block = "\n".join(raw_lines) if raw_lines else "None."
                     last_summary = self.state.last_summary or "None."
                     last_worker_goal = self.state.last_worker_goal or "None."
@@ -1648,11 +1832,25 @@ class BrowserAgent:
                     )
                     filter_output = filter_result.output
                     valid_ids = set(element_index.elements.keys())
-                    for sid in filter_output.priority_element_ids or []:
-                        if sid in valid_ids and sid not in priority_ids:
+                    priority_ids.extend(
+                        _filter_ids_ordered(
+                            tuple(filter_output.priority_element_ids or ()),
+                            valid_ids=valid_ids,
+                            avoid_ids=avoid_ids,
+                        )
+                    )
+                    compressed_useful_lines = compress_text_lines(
+                        list(filter_output.useful_text_lines or []),
+                        max_lines=30,
+                        max_chars=4000,
+                    )
+                    phrases = extract_instruction_phrases(compressed_useful_lines, oracle_hint=oracle_hint or None)
+                    anchored_ids = match_phrases_to_elements(phrases, snapshot.elements, max_matches=15)
+                    for sid in anchored_ids:
+                        if sid in valid_ids and sid not in avoid_ids and sid not in priority_ids:
                             priority_ids.append(sid)
                     filter_output = SnapshotFilterOutput(
-                        useful_text_lines=list(filter_output.useful_text_lines or []),
+                        useful_text_lines=compressed_useful_lines,
                         priority_element_ids=priority_ids,
                         notes=filter_output.notes,
                     )
@@ -1672,11 +1870,79 @@ class BrowserAgent:
                     )
 
                 # ── Build pruned snapshot ──
+                valid_ids = set(element_index.elements.keys())
+                if filter_output:
+                    compressed_useful_lines = compress_text_lines(
+                        list(filter_output.useful_text_lines or []),
+                        max_lines=30,
+                        max_chars=4000,
+                    )
+                    priority_ids = _filter_ids_ordered(
+                        tuple(filter_output.priority_element_ids or ()),
+                        valid_ids=valid_ids,
+                        avoid_ids=avoid_ids,
+                    )
+                    phrases = extract_instruction_phrases(compressed_useful_lines, oracle_hint=oracle_hint or None)
+                    anchored_ids = match_phrases_to_elements(phrases, snapshot.elements, max_matches=15)
+                    for sid in anchored_ids:
+                        if sid in valid_ids and sid not in avoid_ids and sid not in priority_ids:
+                            priority_ids.append(sid)
+                    filter_output = SnapshotFilterOutput(
+                        useful_text_lines=compressed_useful_lines,
+                        priority_element_ids=priority_ids,
+                        notes=filter_output.notes,
+                    )
+                    self.state.last_filter_output = filter_output
                 useful_lines = filter_output.useful_text_lines if filter_output else []
                 useful_block = "\n".join(useful_lines) if useful_lines else "None."
                 priority_ids = list(filter_output.priority_element_ids if filter_output else [])
-                kept_ids = set(priority_ids)
-                pruned_elements = [el for el in snapshot.elements if el.stable_id in kept_ids]
+                if priority_ids:
+                    priority_ids = _filter_ids_ordered(tuple(priority_ids), valid_ids=valid_ids, avoid_ids=avoid_ids)
+
+                kept_ids = set(priority_ids) - avoid_ids
+                if oracle_intervened:
+                    kept_ids = set(valid_ids) - avoid_ids
+                    logger.debug(
+                        "oracle_intervened: widening kept_ids=%s total_elements=%s avoided=%s",
+                        len(kept_ids),
+                        len(valid_ids),
+                        len(avoid_ids),
+                    )
+                container_prefixes: set[tuple[tuple[int, str, str], ...]] = set()
+                if kept_ids and not oracle_intervened:
+                    for element in snapshot.elements:
+                        if element.stable_id in kept_ids and element.parent_chain:
+                            for prefix in _container_prefixes(element.parent_chain):
+                                container_prefixes.add(prefix)
+                if container_prefixes:
+                    # Build index: chain prefix tuple -> list of element stable_ids
+                    chain_index: dict[tuple, list[str]] = defaultdict(list)
+                    for element in snapshot.elements:
+                        if element.stable_id in kept_ids or element.stable_id in avoid_ids or not element.parent_chain:
+                            continue
+                        for depth in range(1, len(element.parent_chain) + 1):
+                            chain_index[element.parent_chain[:depth]].append(element.stable_id)
+                    added = 0
+                    for prefix in container_prefixes:
+                        for sid in chain_index.get(prefix, []):
+                            if sid in avoid_ids:
+                                continue
+                            if sid not in kept_ids:
+                                kept_ids.add(sid)
+                                added += 1
+                                if added >= _CONTAINER_EXPANSION_LIMIT:
+                                    break
+                        if added >= _CONTAINER_EXPANSION_LIMIT:
+                            break
+                    if added:
+                        logger.debug("expanded pruned snapshot by %s elements via container prefixes", added)
+                kept_ids -= avoid_ids
+                if not kept_ids:
+                    kept_ids = set(valid_ids) - avoid_ids
+                    logger.debug("kept_ids empty after avoid; falling back to keep all non-avoided (%s)", len(kept_ids))
+                pruned_elements = [
+                    el for el in snapshot.elements if el.stable_id in kept_ids and el.stable_id not in avoid_ids
+                ]
                 pruned_snapshot = PageSnapshot(
                     url=snapshot.url,
                     title=snapshot.title,
@@ -1687,9 +1953,18 @@ class BrowserAgent:
                 )
 
                 # ── Orchestrator ──
+                prev_goal = self.state.last_worker_goal or ""
+                orchestrator_query = ((" ".join(useful_lines) + " " + prev_goal).strip())[:600]
                 snapshot_text_orchestrator = format_snapshot_for_llm(
                     pruned_snapshot,
                     max_elements=self.agent_config.max_elements,
+                    query=orchestrator_query or None,
+                    priority_ids=priority_ids,
+                    class_sanitize_mode=self.agent_config.class_sanitize_mode,
+                    class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
+                    class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
+                    class_sanitize_fallback_tokens=self.agent_config.class_sanitize_fallback_tokens,
+                    attr_value_max_len=self.agent_config.snapshot_attr_value_max_len,
                 )
                 memory_text = _format_memory(self.state.memory, limit=self.agent_config.memory_steps)
                 tool_list = ", ".join(sorted(DEFAULT_WORKER_TOOLS))
@@ -1763,6 +2038,13 @@ class BrowserAgent:
                 snapshot_text_worker = format_snapshot_for_llm(
                     pruned_snapshot,
                     max_elements=self.agent_config.max_elements,
+                    query=(decision.worker_goal or "")[:600] or None,
+                    priority_ids=priority_ids,
+                    class_sanitize_mode=self.agent_config.class_sanitize_mode,
+                    class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
+                    class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
+                    class_sanitize_fallback_tokens=self.agent_config.class_sanitize_fallback_tokens,
+                    attr_value_max_len=self.agent_config.snapshot_attr_value_max_len,
                 )
                 tool_tracker = ToolCallTracker()
                 deps = WorkerDeps(

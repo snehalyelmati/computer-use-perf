@@ -56,13 +56,13 @@ class _StubAgent:
         return contextlib.nullcontext()
 
 
-def _snapshot(*, url: str, title: str, element_name: str) -> PageSnapshot:
+def _snapshot(*, url: str, title: str, element_name: str, stable_id: str = "el_1") -> PageSnapshot:
     return PageSnapshot(
         url=url,
         title=title,
         elements=[
             ElementSnapshot(
-                stable_id="el_1",
+                stable_id=stable_id,
                 backend_node_id=1,
                 node_name="BUTTON",
                 role="button",
@@ -76,6 +76,15 @@ def _snapshot(*, url: str, title: str, element_name: str) -> PageSnapshot:
             )
         ],
         raw_text=[f"{title} {element_name}"],
+    )
+
+
+def _snapshot_elements(*, url: str, title: str, elements: list[ElementSnapshot]) -> PageSnapshot:
+    return PageSnapshot(
+        url=url,
+        title=title,
+        elements=elements,
+        raw_text=[f"{title} {url}"],
     )
 
 
@@ -147,6 +156,231 @@ async def test_filter_is_cached_when_fingerprint_unchanged(monkeypatch: pytest.M
 
     assert filter_calls["count"] == 1
     assert captured_summary.get("steps") == 2
+
+
+@pytest.mark.asyncio
+async def test_oracle_avoid_ids_excluded_from_priority_seeding_when_not_widening(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    avoided_id = "el_deadbeef"
+    kept_id = "el_cafebabe"
+
+    snapshots = [
+        _snapshot(url="https://example.com", title="Step1", element_name="Next", stable_id=kept_id),
+        _snapshot_elements(
+            url="https://example.com/step2",
+            title="Step2",
+            elements=[
+                ElementSnapshot(
+                    stable_id=avoided_id,
+                    backend_node_id=1,
+                    node_name="BUTTON",
+                    role="button",
+                    name="Decoy",
+                    text=None,
+                    bounding_box=(10, 10, 100, 30),
+                    attributes={},
+                    frame_id="frame_1",
+                    frame_url="https://example.com/step2",
+                    frame_name=None,
+                ),
+                ElementSnapshot(
+                    stable_id=kept_id,
+                    backend_node_id=2,
+                    node_name="BUTTON",
+                    role="button",
+                    name="Real",
+                    text=None,
+                    bounding_box=(10, 50, 100, 30),
+                    attributes={},
+                    frame_id="frame_1",
+                    frame_url="https://example.com/step2",
+                    frame_name=None,
+                ),
+            ],
+        ),
+    ]
+
+    async def fake_launch_browser(_config: BrowserConfig) -> _StubSession:
+        return _StubSession(page=_StubPage(url="https://example.com"), cdp_session=object(), frame_sessions={})
+
+    async def fake_close_browser(_session: _StubSession) -> None:
+        return None
+
+    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any, **_kwargs: Any) -> PageSnapshot:
+        return snapshots.pop(0)
+
+    filter_calls = {"count": 0}
+
+    def filter_runner(_prompt: str, _deps: Any | None) -> SnapshotFilterOutput:
+        filter_calls["count"] += 1
+        if filter_calls["count"] == 1:
+            return SnapshotFilterOutput(useful_text_lines=[], priority_element_ids=[kept_id], notes=None)
+        return SnapshotFilterOutput(useful_text_lines=[], priority_element_ids=[avoided_id], notes=None)
+
+    orchestrator_calls = {"count": 0}
+
+    def orchestrator_runner(prompt: str, _deps: Any | None) -> OrchestratorDecision:
+        orchestrator_calls["count"] += 1
+        if orchestrator_calls["count"] == 2:
+            assert f"- {avoided_id}:" not in prompt
+        return OrchestratorDecision(done=False, worker_goal="noop")
+
+    def worker_runner(_prompt: str, _deps: Any | None) -> StepOutput:
+        return StepOutput(done=False, summary="noop", next_goal=None)
+
+    monkeypatch.setattr(agent_mod, "launch_browser", fake_launch_browser)
+    monkeypatch.setattr(agent_mod, "close_browser", fake_close_browser)
+    monkeypatch.setattr(agent_mod, "_teardown_logging", lambda: None)
+    monkeypatch.setattr(agent_mod, "capture_snapshot", fake_capture_snapshot)
+    monkeypatch.setattr(agent_mod, "write_run_summary", lambda **_k: tmp_path / "run_summary.json")
+    monkeypatch.setattr(agent_mod, "_build_model", lambda _config: object())
+    monkeypatch.setattr(agent_mod, "_model_settings", lambda _config: {})
+    monkeypatch.setattr(agent_mod, "usage_stats_from_result", lambda _res: UsageStats(0, 0, 0, 0, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(agent_mod, "cost_stats_from_result", lambda _res, _model: None)
+
+    monkeypatch.setattr(agent_mod, "build_snapshot_filter_agent", lambda *_a, **_k: _StubAgent(filter_runner))
+    monkeypatch.setattr(agent_mod, "build_orchestrator_agent", lambda *_a, **_k: _StubAgent(orchestrator_runner))
+    monkeypatch.setattr(agent_mod, "build_browser_worker_agent", lambda *_a, **_k: _StubAgent(worker_runner))
+    monkeypatch.setattr(
+        agent_mod,
+        "build_oracle_agent",
+        lambda *_a, **_k: _StubAgent(
+            lambda *_: OracleAdvice(
+                all_clear=False,
+                diagnosis="stuck",
+                recommendation="try something else",
+                avoid=[f"avoid {avoided_id}"],
+            )
+        ),
+    )
+
+    agent = agent_mod.BrowserAgent(
+        AgentConfig(
+            target_url="https://example.com",
+            goal="Test goal",
+            max_steps=2,
+            oracle_interval=1,
+            widen_on_oracle=False,
+            log_dir=str(tmp_path),
+            metrics_enabled=False,
+        ),
+        LLMConfig(),
+        BrowserConfig(headless=True),
+    )
+    await agent.run()
+
+
+@pytest.mark.asyncio
+async def test_oracle_avoid_ids_not_readded_by_container_expansion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    avoided_id = "el_deadbeef"
+    kept_id = "el_cafebabe"
+    shared_chain = ((10, "div", "card"),)
+
+    snapshots = [
+        _snapshot(url="https://example.com", title="Step1", element_name="Next", stable_id=kept_id),
+        _snapshot_elements(
+            url="https://example.com/step2",
+            title="Step2",
+            elements=[
+                ElementSnapshot(
+                    stable_id=kept_id,
+                    backend_node_id=1,
+                    node_name="BUTTON",
+                    role="button",
+                    name="Keep",
+                    text=None,
+                    bounding_box=(10, 10, 100, 30),
+                    attributes={},
+                    frame_id="frame_1",
+                    frame_url="https://example.com/step2",
+                    frame_name=None,
+                    parent_chain=shared_chain,
+                ),
+                ElementSnapshot(
+                    stable_id=avoided_id,
+                    backend_node_id=2,
+                    node_name="BUTTON",
+                    role="button",
+                    name="Avoid",
+                    text=None,
+                    bounding_box=(10, 50, 100, 30),
+                    attributes={},
+                    frame_id="frame_1",
+                    frame_url="https://example.com/step2",
+                    frame_name=None,
+                    parent_chain=shared_chain,
+                ),
+            ],
+        ),
+    ]
+
+    async def fake_launch_browser(_config: BrowserConfig) -> _StubSession:
+        return _StubSession(page=_StubPage(url="https://example.com"), cdp_session=object(), frame_sessions={})
+
+    async def fake_close_browser(_session: _StubSession) -> None:
+        return None
+
+    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any, **_kwargs: Any) -> PageSnapshot:
+        return snapshots.pop(0)
+
+    filter_calls = {"count": 0}
+
+    def filter_runner(_prompt: str, _deps: Any | None) -> SnapshotFilterOutput:
+        filter_calls["count"] += 1
+        return SnapshotFilterOutput(useful_text_lines=[], priority_element_ids=[kept_id], notes=None)
+
+    orchestrator_calls = {"count": 0}
+
+    def orchestrator_runner(prompt: str, _deps: Any | None) -> OrchestratorDecision:
+        orchestrator_calls["count"] += 1
+        if orchestrator_calls["count"] == 2:
+            assert f"- {avoided_id}:" not in prompt
+        return OrchestratorDecision(done=False, worker_goal="noop")
+
+    def worker_runner(_prompt: str, _deps: Any | None) -> StepOutput:
+        return StepOutput(done=False, summary="noop", next_goal=None)
+
+    monkeypatch.setattr(agent_mod, "launch_browser", fake_launch_browser)
+    monkeypatch.setattr(agent_mod, "close_browser", fake_close_browser)
+    monkeypatch.setattr(agent_mod, "_teardown_logging", lambda: None)
+    monkeypatch.setattr(agent_mod, "capture_snapshot", fake_capture_snapshot)
+    monkeypatch.setattr(agent_mod, "write_run_summary", lambda **_k: tmp_path / "run_summary.json")
+    monkeypatch.setattr(agent_mod, "_build_model", lambda _config: object())
+    monkeypatch.setattr(agent_mod, "_model_settings", lambda _config: {})
+    monkeypatch.setattr(agent_mod, "usage_stats_from_result", lambda _res: UsageStats(0, 0, 0, 0, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(agent_mod, "cost_stats_from_result", lambda _res, _model: None)
+
+    monkeypatch.setattr(agent_mod, "build_snapshot_filter_agent", lambda *_a, **_k: _StubAgent(filter_runner))
+    monkeypatch.setattr(agent_mod, "build_orchestrator_agent", lambda *_a, **_k: _StubAgent(orchestrator_runner))
+    monkeypatch.setattr(agent_mod, "build_browser_worker_agent", lambda *_a, **_k: _StubAgent(worker_runner))
+    monkeypatch.setattr(
+        agent_mod,
+        "build_oracle_agent",
+        lambda *_a, **_k: _StubAgent(
+            lambda *_: OracleAdvice(
+                all_clear=False,
+                diagnosis="stuck",
+                recommendation="try something else",
+                avoid=[f"avoid {avoided_id}"],
+            )
+        ),
+    )
+
+    agent = agent_mod.BrowserAgent(
+        AgentConfig(
+            target_url="https://example.com",
+            goal="Test goal",
+            max_steps=2,
+            oracle_interval=1,
+            widen_on_oracle=False,
+            log_dir=str(tmp_path),
+            metrics_enabled=False,
+        ),
+        LLMConfig(),
+        BrowserConfig(headless=True),
+    )
+    await agent.run()
 
 
 @pytest.mark.asyncio
@@ -266,3 +500,71 @@ async def test_abort_when_fingerprint_unchanged_for_threshold(monkeypatch: pytes
     # Step 1: sets fingerprint. Steps 2-5: unchanged (no_progress 1,2,3,4).
     # At step 6: no_progress=5 >= threshold=5 → abort.
     assert captured_summary.get("steps") == 6
+
+
+@pytest.mark.asyncio
+async def test_abort_when_progress_fingerprint_unchanged_even_if_ids_change(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Stable IDs change every step (simulating re-render), but semantics do not.
+    snapshots = [
+        _snapshot(url="https://example.com", title="Test", element_name="Next", stable_id=f"el_{i}")
+        for i in range(1, 20)
+    ]
+
+    async def fake_launch_browser(_config: BrowserConfig) -> _StubSession:
+        return _StubSession(page=_StubPage(url="https://example.com"), cdp_session=object(), frame_sessions={})
+
+    async def fake_close_browser(_session: _StubSession) -> None:
+        return None
+
+    async def fake_capture_snapshot(_page: _StubPage, _cdp_session: Any, **_kwargs: Any) -> PageSnapshot:
+        return snapshots.pop(0)
+
+    captured_summary: dict[str, Any] = {}
+
+    def fake_write_run_summary(*, log_dir: str, run_id: str, summary: dict[str, Any], filename: str = "run_summary.json") -> Path:
+        captured_summary.update(summary)
+        return tmp_path / filename
+
+    monkeypatch.setattr(agent_mod, "launch_browser", fake_launch_browser)
+    monkeypatch.setattr(agent_mod, "close_browser", fake_close_browser)
+    monkeypatch.setattr(agent_mod, "_teardown_logging", lambda: None)
+    monkeypatch.setattr(agent_mod, "capture_snapshot", fake_capture_snapshot)
+    monkeypatch.setattr(agent_mod, "write_run_summary", fake_write_run_summary)
+    monkeypatch.setattr(agent_mod, "_build_model", lambda _config: object())
+    monkeypatch.setattr(agent_mod, "_model_settings", lambda _config: {})
+    monkeypatch.setattr(agent_mod, "usage_stats_from_result", lambda _res: UsageStats(0, 0, 0, 0, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(agent_mod, "cost_stats_from_result", lambda _res, _model: None)
+
+    monkeypatch.setattr(
+        agent_mod,
+        "build_snapshot_filter_agent",
+        lambda *_a, **_k: _StubAgent(lambda *_: SnapshotFilterOutput(useful_text_lines=[], priority_element_ids=[], notes=None)),
+    )
+    monkeypatch.setattr(agent_mod, "build_orchestrator_agent", lambda *_a, **_k: _StubAgent(lambda *_: OrchestratorDecision(done=False, worker_goal="noop")))
+    monkeypatch.setattr(agent_mod, "build_browser_worker_agent", lambda *_a, **_k: _StubAgent(lambda *_: StepOutput(done=False, summary="noop", next_goal=None)))
+    monkeypatch.setattr(
+        agent_mod,
+        "build_oracle_agent",
+        lambda *_a, **_k: _StubAgent(lambda *_: OracleAdvice(all_clear=False, diagnosis="stuck", recommendation="try something else", avoid=[])),
+    )
+
+    agent = agent_mod.BrowserAgent(
+        AgentConfig(
+            target_url="https://example.com",
+            goal="Test goal",
+            max_steps=10,
+            unchanged_abort_threshold=3,
+            log_dir=str(tmp_path),
+            metrics_enabled=False,
+        ),
+        LLMConfig(),
+        BrowserConfig(headless=True),
+    )
+    await agent.run()
+
+    assert captured_summary.get("stop_reason") == "unchanged_fingerprint_abort"
+    # Step 1: sets progress fingerprint. Steps 2-3: unchanged (no_progress 1,2).
+    # At step 4: no_progress=3 >= threshold=3 → abort.
+    assert captured_summary.get("steps") == 4
