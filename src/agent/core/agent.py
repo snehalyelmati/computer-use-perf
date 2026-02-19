@@ -350,6 +350,7 @@ DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
     "draw",
     "scroll",
     "wait",
+    "watch_for_text",
     "switch_to_iframe",
     "switch_to_main_frame",
     "press_key_combination",
@@ -1088,6 +1089,46 @@ def build_browser_worker_agent(
             ok=result.ok,
             duration_ms=duration_ms,
             requested_ms=milliseconds,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message)
+
+    @agent.tool(name="watch_for_text")
+    async def watch_for_text(
+        ctx: RunContext[WorkerDeps], text: str, timeout_ms: int = 10000
+    ) -> ToolExecutionResult:
+        """Watch for text to appear then click its element. Use for transient content that appears after a delay (toasts, lazy-loaded buttons, async results). Max timeout 10 000 ms."""
+        start = time.perf_counter()
+        result = await semantic.watch_for_text(
+            text, ctx.deps.tool_context, timeout_ms=timeout_ms
+        )
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        text_preview = text[:30] + "..." if len(text) > 30 else text
+        logger.info(
+            _format_tool_log(
+                "watch_for_text",
+                result.ok,
+                duration_ms,
+                extra=f'"{text_preview}"',
+            )
+        )
+        logger.debug(
+            "tool=watch_for_text step=%s ok=%s text=%s timeout_ms=%s duration_ms=%s full_message=%s",
+            ctx.deps.step,
+            result.ok,
+            text,
+            timeout_ms,
+            duration_ms,
+            result.message,
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="watch_for_text",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            text=text,
+            timeout_ms=timeout_ms,
         )
         return ToolExecutionResult(ok=result.ok, message=result.message)
 

@@ -923,6 +923,73 @@ async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
     return ToolResult(ok=True, message=_format_wait_message(buffered, mutations))
 
 
+_WATCH_MAX_TIMEOUT_MS = 10_000
+
+_WATCH_FOR_TEXT_JS = """
+([text, timeoutMs]) => new Promise(resolve => {
+    const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','META','LINK','HEAD']);
+    function find() {
+        const all = document.querySelectorAll('*');
+        for (const el of all) {
+            if (SKIP.has(el.tagName)) continue;
+            if (el.children.length === 0) {
+                const t = (el.textContent || '').trim();
+                if (t.includes(text)) return el;
+            }
+        }
+        return null;
+    }
+    const immediate = find();
+    if (immediate) {
+        immediate.click();
+        return resolve('found');
+    }
+    const observer = new MutationObserver(() => {
+        const el = find();
+        if (el) {
+            observer.disconnect();
+            clearTimeout(timer);
+            setTimeout(() => { el.click(); resolve('found'); }, 50);
+        }
+    });
+    observer.observe(document.body, {
+        childList: true, subtree: true,
+        attributes: true, characterData: true
+    });
+    const timer = setTimeout(() => {
+        observer.disconnect();
+        resolve('timeout');
+    }, timeoutMs);
+})
+"""
+
+
+async def watch_for_text(
+    text: str, context: ToolContext, *, timeout_ms: int = 10_000
+) -> ToolResult:
+    context.last_tool = "watch_for_text"
+    context.last_element_id = None
+
+    if not text or not text.strip():
+        return ToolResult(ok=False, message="Text to watch for cannot be empty")
+
+    clamped = max(500, min(timeout_ms, _WATCH_MAX_TIMEOUT_MS))
+
+    try:
+        result = await context.page.evaluate(
+            _WATCH_FOR_TEXT_JS, [text.strip(), clamped]
+        )
+    except Exception as exc:
+        return ToolResult(ok=False, message=f"Watch failed: {exc}")
+
+    if result == "found":
+        return ToolResult(ok=True, message=f"Watched and clicked '{text}'")
+    return ToolResult(
+        ok=False,
+        message=f"Watch timeout: '{text}' not found within {clamped}ms",
+    )
+
+
 def _truncate_attr(value: str, max_len: int = 200) -> str:
     if len(value) > max_len:
         return value[:max_len] + "..."
