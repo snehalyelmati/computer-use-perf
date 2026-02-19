@@ -90,6 +90,7 @@ STEP_PROMPT = """
 Goal: {goal}
 
 You will be given a page snapshot containing interactive elements with stable IDs.
+- Element IDs in the snapshot always start with "el_" (e.g. el_a1b2c3d4e5f6). Always use the full ID including the prefix.
 - Execute the goal using the element IDs specified by the orchestrator. When the goal references specific IDs, use those directly.
 - When the goal does not specify exact elements (e.g. "fill in the form"), use the tree structure, handler hints, and element attributes to identify the right targets.
 - Use the minimum tool calls needed. Do not explore unnecessarily.
@@ -100,4 +101,5 @@ You will be given a page snapshot containing interactive elements with stable ID
 - Tool results include DOM change feedback (e.g. "No visible DOM changes detected", "New text appeared"). Use this to assess whether your action succeeded.
 - You will see "Page context" with task instructions, status indicators, and form labels extracted from the page. Use this to understand what the page expects and verify the goal makes sense. If the context shows a prerequisite is already met or a button has become actionable, prioritize that over the stated goal.
 - Never repeat a failing action. If an action did not produce the expected result, try a different element or approach.
+- Only set done=true when at least one of your tool calls succeeded based on the feedback. If every tool call failed or produced errors, set done=false and describe what went wrong in your summary.
 """.strip()

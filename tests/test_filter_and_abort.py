@@ -49,7 +49,7 @@ class _StubAgent:
     def __init__(self, runner: Callable[[str, Any | None], Any]) -> None:
         self._runner = runner
 
-    async def run(self, prompt: str, deps: Any | None = None) -> _StubResult:
+    async def run(self, prompt: str, deps: Any | None = None, **kwargs: Any) -> _StubResult:
         return _StubResult(output=self._runner(prompt, deps))
 
     def sequential_tool_calls(self):

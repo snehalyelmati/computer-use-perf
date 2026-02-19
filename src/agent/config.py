@@ -90,6 +90,8 @@ class AgentConfig:
     stuck_threshold: int = 3
     unchanged_abort_threshold: int = 5
     oracle_interval: int = 5
+    oracle_trace_window: int = 15
+    max_worker_tool_calls: int = 25
     widen_on_oracle: bool = False
     # Snapshot semantics
     desc_text_preview_enabled: bool = True

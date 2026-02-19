@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from playwright.async_api import CDPSession, Page
 
@@ -186,7 +189,13 @@ _OBSERVER_COLLECT_JS = """
 
 
 def _resolve_element(element_id: str, context: ToolContext) -> ElementSnapshot | None:
-    return context.element_index.elements.get(element_id)
+    element = context.element_index.elements.get(element_id)
+    if element is None and not element_id.startswith("el_"):
+        corrected = f"el_{element_id}"
+        element = context.element_index.elements.get(corrected)
+        if element is not None:
+            logger.warning("Auto-corrected element id %r -> %r", element_id, corrected)
+    return element
 
 async def _resolve_object_id(backend_node_id: int, session: CDPSession) -> str | None:
     try:

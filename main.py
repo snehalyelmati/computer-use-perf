@@ -65,6 +65,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Abort if the page fingerprint is unchanged for this many consecutive steps",
     )
     parser.add_argument(
+        "--max-worker-tool-calls",
+        type=_positive_int,
+        default=25,
+        help="Max tool calls the worker can make in a single step (default: 25)",
+    )
+    parser.add_argument(
+        "--oracle-trace-window",
+        type=int,
+        default=15,
+        help="Max recent steps shown in Oracle execution trace (0 = unlimited, default: 15)",
+    )
+    parser.add_argument(
         "--headless",
         action="store_true",
         help="Run browser in headless mode",
@@ -223,6 +235,8 @@ def main() -> None:
         handlers_enabled=not bool(args.no_handlers),
         save_pages=bool(args.save_pages),
         max_log_runs=int(args.max_log_runs),
+        max_worker_tool_calls=int(args.max_worker_tool_calls),
+        oracle_trace_window=int(args.oracle_trace_window),
     )
     provider = args.provider
     defaults = PROVIDER_DEFAULTS[provider]

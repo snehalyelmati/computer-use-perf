@@ -17,7 +17,9 @@ from collections.abc import Sequence
 from typing import Any
 
 from pydantic_ai import Agent, RunContext, ToolDefinition
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models import Model
+from pydantic_ai.usage import UsageLimits
 from pydantic_ai.models.cerebras import CerebrasModel
 from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.openrouter import OpenRouterModel
@@ -332,6 +334,14 @@ class AgentState:
 class ToolCallTracker:
     """Track tool calls within a step for logging purposes."""
     first_tool_logged: bool = False
+    success_count: int = 0
+    failure_count: int = 0
+
+    def record(self, ok: bool) -> None:
+        if ok:
+            self.success_count += 1
+        else:
+            self.failure_count += 1
 
 
 @dataclass(frozen=True)
@@ -495,11 +505,17 @@ def _format_memory(memory: list[str], *, limit: int = 10) -> str:
     lines = [f"{idx + 1}. {item}" for idx, item in enumerate(recent)]
     return "\n".join(lines)
 
-def _format_step_trace(trace: list[dict[str, Any]]) -> str:
+def _format_step_trace(trace: list[dict[str, Any]], *, window: int = 0) -> str:
     if not trace:
         return "No steps yet."
+    if window > 0 and len(trace) > window:
+        visible = trace[-window:]
+        header = f"(showing last {window} of {len(trace)} steps)\n"
+    else:
+        visible = trace
+        header = ""
     lines: list[str] = []
-    for entry in trace:
+    for entry in visible:
         url_changed = "yes" if entry.get("url_changed") else "no"
         lines.append(
             f"Step {entry['step']}: [{entry.get('url', '')}] goal={entry.get('goal', '')}"
@@ -510,7 +526,7 @@ def _format_step_trace(trace: list[dict[str, Any]]) -> str:
         lines.append(
             f"  Diff: {entry.get('diff_summary', '')} | url_changed={url_changed}"
         )
-    return "\n".join(lines)
+    return header + "\n".join(lines)
 
 
 def _normalize_label(value: str | None) -> str:
@@ -862,6 +878,8 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             element_id=element_id,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="hover_element")
@@ -900,6 +918,8 @@ def build_browser_worker_agent(
             duration_ms=elapsed_ms,
             element_id=element_id,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="find_elements")
@@ -941,6 +961,8 @@ def build_browser_worker_agent(
             query_len=len(query or ""),
             limit=limit,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(True)
         return ToolExecutionResult(ok=True, message=message)
 
     @agent.tool(name="type_text")
@@ -981,6 +1003,8 @@ def build_browser_worker_agent(
             element_id=element_id,
             text_len=len(text),
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="drag_and_drop")
@@ -1019,6 +1043,8 @@ def build_browser_worker_agent(
             source_id=source_id,
             target_id=target_id,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="draw")
@@ -1058,6 +1084,8 @@ def build_browser_worker_agent(
             element_id=element_id,
             points_count=len(path),
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="wait")
@@ -1091,13 +1119,15 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             requested_ms=milliseconds,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="watch_for_text")
     async def watch_for_text(
         ctx: RunContext[WorkerDeps], text: str, timeout_ms: int = 10000
     ) -> ToolExecutionResult:
-        """Watch for text to appear then click its element. Use for transient content that appears after a delay (toasts, lazy-loaded buttons, async results). Max timeout 10 000 ms."""
+        """Watch for literal text to appear on the page, then click its element. Pass the exact text to match (case-sensitive substring, not a regex or pattern). Use for transient content that appears after a delay (toasts, lazy-loaded buttons, async results). Max timeout 10 000 ms."""
         start = time.perf_counter()
         result = await semantic.watch_for_text(
             text, ctx.deps.tool_context, timeout_ms=timeout_ms
@@ -1131,6 +1161,8 @@ def build_browser_worker_agent(
             text=text,
             timeout_ms=timeout_ms,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="inspect_element")
@@ -1167,6 +1199,8 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             element_id=element_id,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="search_page_attributes")
@@ -1201,6 +1235,8 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             query=query,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="scroll")
@@ -1256,6 +1292,8 @@ def build_browser_worker_agent(
             delta_y=delta_y,
             element_id=element_id,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="switch_to_iframe")
@@ -1292,6 +1330,8 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             iframe_id=iframe_id,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="switch_to_main_frame")
@@ -1323,6 +1363,8 @@ def build_browser_worker_agent(
             ok=result.ok,
             duration_ms=duration_ms,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="navigate_to")
@@ -1358,6 +1400,8 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             url=url,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="take_screenshot")
@@ -1389,6 +1433,8 @@ def build_browser_worker_agent(
             ok=result.ok,
             duration_ms=duration_ms,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="execute_js")
@@ -1423,6 +1469,8 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             code_len=len(code),
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="press_key_combination")
@@ -1458,6 +1506,8 @@ def build_browser_worker_agent(
             duration_ms=duration_ms,
             keys=keys,
         )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     return agent
@@ -1745,7 +1795,7 @@ class BrowserAgent:
                     or self.state.no_progress_steps >= self.agent_config.stuck_threshold
                 )
                 if should_call_oracle and self.state.step_trace:
-                    trace_text = _format_step_trace(self.state.step_trace)
+                    trace_text = _format_step_trace(self.state.step_trace, window=self.agent_config.oracle_trace_window)
                     tool_list = ", ".join(sorted(DEFAULT_WORKER_TOOLS))
                     oracle_prompt = (
                         f"Overall goal: {self.agent_config.goal}\n\n"
@@ -2114,29 +2164,51 @@ class BrowserAgent:
                     len(worker_prompt),
                     worker_prompt,
                 )
+                worker_usage_limits = UsageLimits(request_limit=self.agent_config.max_worker_tool_calls)
                 worker_started = time.perf_counter()
-                with browser_worker.sequential_tool_calls():
-                    worker_result = await browser_worker.run(worker_prompt, deps=deps)
-                worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
-                worker_usage = usage_stats_from_result(worker_result)
-                worker_cost = cost_stats_from_result(worker_result, self.llm_config.worker_model or self.llm_config.model)
-                total_input_tokens += worker_usage.input_tokens
-                total_output_tokens += worker_usage.output_tokens
-                if worker_cost:
-                    total_cost_usd = (total_cost_usd or 0.0) + worker_cost.cost_usd
-                metrics.emit(
-                    "agent_call",
-                    step=self.state.step,
-                    agent="browser_worker",
-                    duration_ms=worker_duration_ms,
-                    input_tokens=worker_usage.input_tokens,
-                    output_tokens=worker_usage.output_tokens,
-                    requests=worker_usage.requests,
-                    tool_calls=worker_usage.tool_calls,
-                    cost_usd=(worker_cost.cost_usd if worker_cost else None),
-                    upstream_inference_cost_usd=(worker_cost.upstream_inference_cost_usd if worker_cost else None),
-                )
-                step_output = worker_result.output
+                try:
+                    with browser_worker.sequential_tool_calls():
+                        worker_result = await browser_worker.run(
+                            worker_prompt, deps=deps, usage_limits=worker_usage_limits
+                        )
+                except UsageLimitExceeded:
+                    worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
+                    logger.warning(
+                        "  worker: tool call limit reached (%s), ending step",
+                        self.agent_config.max_worker_tool_calls,
+                    )
+                    step_output = StepOutput(
+                        done=False,
+                        summary=f"Tool call limit reached ({self.agent_config.max_worker_tool_calls})",
+                    )
+                else:
+                    worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
+                    worker_usage = usage_stats_from_result(worker_result)
+                    worker_cost = cost_stats_from_result(worker_result, self.llm_config.worker_model or self.llm_config.model)
+                    total_input_tokens += worker_usage.input_tokens
+                    total_output_tokens += worker_usage.output_tokens
+                    if worker_cost:
+                        total_cost_usd = (total_cost_usd or 0.0) + worker_cost.cost_usd
+                    metrics.emit(
+                        "agent_call",
+                        step=self.state.step,
+                        agent="browser_worker",
+                        duration_ms=worker_duration_ms,
+                        input_tokens=worker_usage.input_tokens,
+                        output_tokens=worker_usage.output_tokens,
+                        requests=worker_usage.requests,
+                        tool_calls=worker_usage.tool_calls,
+                        cost_usd=(worker_cost.cost_usd if worker_cost else None),
+                        upstream_inference_cost_usd=(worker_cost.upstream_inference_cost_usd if worker_cost else None),
+                    )
+                    step_output = worker_result.output
+
+                # Done-gate: override done=True when no tool calls succeeded
+                if step_output.done and tool_tracker.success_count == 0:
+                    logger.info("    done-gate: overriding done=True (no successful tool calls)")
+                    step_output = step_output.model_copy(
+                        update={"done": False, "summary": f"[no successful tools] {step_output.summary}"}
+                    )
                 self.state.active_frame_id = tool_context.active_frame_id
                 self.state.last_summary = step_output.summary
                 self.state.memory.append(step_output.summary)
@@ -2176,6 +2248,16 @@ class BrowserAgent:
                 step_duration_ms = int((time.perf_counter() - step_started) * 1000)
                 logger.info(f"Step {self.state.step} end {step_duration_ms}ms")
                 prev_snapshot = snapshot
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception:
+            logger.error(
+                "Step %s failed with unhandled error", self.state.step, exc_info=True
+            )
+            self.state.last_summary = (
+                f"Step {self.state.step} crashed: {type(sys.exc_info()[1]).__name__}"
+            )
+            stop_reason = "error"
         finally:
             interrupted = isinstance(
                 sys.exc_info()[1], (asyncio.CancelledError, KeyboardInterrupt)
