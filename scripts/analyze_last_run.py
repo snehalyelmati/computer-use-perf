@@ -26,6 +26,7 @@ from src.agent.core.text_compress import compress_text_lines
 
 
 _STABLE_ID_RE = re.compile(r"\bel_[0-9a-f]{6,}\b", re.IGNORECASE)
+_RUN_DIR_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _normalize(text: str) -> str:
@@ -159,14 +160,40 @@ def _missed_elements(signals: DebugSignals) -> list[str]:
     return [item[1] for item in missed[:15]]
 
 
+def _resolve_run_dir(log_dir: Path) -> Path:
+    """Find the most recent per-run subdirectory.
+
+    Checks ``latest`` symlink first, then falls back to the newest UUID-hex
+    directory by mtime, then falls back to the flat layout (log_dir itself).
+    """
+    latest = log_dir / "latest"
+    if latest.is_symlink():
+        target = latest.resolve()
+        if target.is_dir():
+            return target
+    # Fall back to newest UUID-hex directory by mtime
+    run_dirs = [d for d in log_dir.iterdir() if d.is_dir() and _RUN_DIR_RE.match(d.name)]
+    if run_dirs:
+        run_dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+        return run_dirs[0]
+    # Fall back to flat layout
+    return log_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze last run logs for stuck/inefficiency patterns")
-    parser.add_argument("--log-dir", default="logs", help="Log directory (default: logs)")
+    parser.add_argument("--log-dir", default="logs", help="Base log directory (default: logs)")
+    parser.add_argument("--run-dir", default=None, help="Explicit per-run directory to analyze")
     parser.add_argument("--run-id", default=None, help="Run id to analyze (default: from run_summary.json)")
     args = parser.parse_args()
 
     log_dir = Path(args.log_dir)
-    run_summary_path = log_dir / "run_summary.json"
+    if args.run_dir:
+        run_dir = Path(args.run_dir)
+    else:
+        run_dir = _resolve_run_dir(log_dir)
+
+    run_summary_path = run_dir / "run_summary.json"
     if not run_summary_path.exists():
         raise SystemExit(f"Missing {run_summary_path}")
     try:
@@ -177,8 +204,8 @@ def main() -> None:
     if not run_id:
         raise SystemExit("No run_id provided and run_summary.json missing run_id")
 
-    agent_log_path = log_dir / "agent.log"
-    agent_debug_path = log_dir / "agent_debug.log"
+    agent_log_path = run_dir / "agent.log"
+    agent_debug_path = run_dir / "agent_debug.log"
     if not agent_log_path.exists():
         raise SystemExit(f"Missing {agent_log_path}")
     agent_log = _read_text(agent_log_path)

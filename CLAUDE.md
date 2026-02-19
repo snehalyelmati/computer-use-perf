@@ -14,12 +14,14 @@ A general-purpose browser agent. Python 3.14, managed with [uv](https://docs.ast
 
 ## Observability
 
-- Logs: `logs/agent.log`
-- Debug log: `logs/agent_debug.log` (always captures full DEBUG output)
-- Metrics: `logs/metrics.jsonl` (disable with `--no-metrics`)
-- Run summary: `logs/run_summary.json`
-- Page captures: `logs/pages/*.html` (enable with `--save-pages`)
-- Page manifest: `logs/pages/manifest.jsonl`
+Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlink points to the most recent run. Old run directories are pruned at startup (keep last 10 by default; configure with `--max-log-runs`).
+
+- Logs: `logs/latest/agent.log`
+- Debug log: `logs/latest/agent_debug.log` (always captures full DEBUG output)
+- Metrics: `logs/latest/metrics.jsonl` (disable with `--no-metrics`)
+- Run summary: `logs/latest/run_summary.json`
+- Page captures: `logs/latest/pages/*.html` (enable with `--save-pages`)
+- Page manifest: `logs/latest/pages/manifest.jsonl`
 
 ## Dependencies
 

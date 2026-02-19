@@ -130,6 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save page HTML snapshots to logs/pages/ for local replay",
     )
     parser.add_argument(
+        "--max-log-runs",
+        type=_positive_int,
+        default=10,
+        help="Max per-run log directories to keep; oldest are pruned at startup (default: 10)",
+    )
+    parser.add_argument(
         "--no-desc-text-preview",
         action="store_true",
         help="Disable deriving short descendant-text previews for unlabeled clickable containers",
@@ -216,6 +222,7 @@ def main() -> None:
         color_logs=not bool(args.no_color),
         handlers_enabled=not bool(args.no_handlers),
         save_pages=bool(args.save_pages),
+        max_log_runs=int(args.max_log_runs),
     )
     provider = args.provider
     defaults = PROVIDER_DEFAULTS[provider]

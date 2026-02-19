@@ -12,9 +12,10 @@ Common Commands:
 - `uv add <package>` - add a dependency
 
 Observability:
-- Logs: `logs/agent.log`
-- Metrics: `logs/metrics.jsonl` (disable via `--no-metrics`)
-- Run summary: `logs/run_summary.json`
+- Each run writes to `logs/<run_id>/`; `logs/latest` symlink points to the most recent run. Old runs pruned at startup (default: keep 10; `--max-log-runs`).
+- Logs: `logs/latest/agent.log`
+- Metrics: `logs/latest/metrics.jsonl` (disable via `--no-metrics`)
+- Run summary: `logs/latest/run_summary.json`
 
 Dependencies:
 - `pydantic-ai` - agent orchestration + structured output

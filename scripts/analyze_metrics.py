@@ -53,7 +53,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze agent metrics.jsonl timings")
-    parser.add_argument("path", help="Path to logs/metrics.jsonl")
+    parser.add_argument("path", help="Path to metrics.jsonl (e.g. logs/latest/metrics.jsonl)")
     args = parser.parse_args()
 
     path = Path(args.path)

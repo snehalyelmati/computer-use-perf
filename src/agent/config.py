@@ -84,6 +84,7 @@ class AgentConfig:
     goal: str | None = None
     max_steps: int = 100
     log_dir: str = "logs"
+    max_log_runs: int = 10
     max_elements: int = 200
     memory_steps: int = 10
     stuck_threshold: int = 3

@@ -50,6 +50,7 @@ from src.agent.metrics import (
     MetricsRecorder,
     cost_stats_from_result,
     new_run_id,
+    prepare_run_dir,
     usage_stats_from_result,
     write_run_summary,
 )
@@ -1483,17 +1484,22 @@ class BrowserAgent:
             raise ValueError("goal is required")
 
         run_id = new_run_id()
-        _setup_logging(
+        run_dir = prepare_run_dir(
             self.agent_config.log_dir,
+            run_id,
+            max_log_runs=self.agent_config.max_log_runs,
+        )
+        _setup_logging(
+            run_dir,
             level=self.agent_config.log_level,
             color=self.agent_config.color_logs,
         )
         metrics = MetricsRecorder(
-            log_dir=self.agent_config.log_dir,
+            log_dir=run_dir,
             run_id=run_id,
             enabled=self.agent_config.metrics_enabled,
         )
-        page_saver = PageSaver(self.agent_config.log_dir, run_id) if self.agent_config.save_pages else None
+        page_saver = PageSaver(run_dir, run_id) if self.agent_config.save_pages else None
         run_started = time.perf_counter()
         total_input_tokens = 0
         total_output_tokens = 0
@@ -2204,7 +2210,7 @@ class BrowserAgent:
 
             try:
                 write_run_summary(
-                    log_dir=self.agent_config.log_dir,
+                    log_dir=run_dir,
                     run_id=run_id,
                     summary={
                         "duration_ms": run_duration_ms,

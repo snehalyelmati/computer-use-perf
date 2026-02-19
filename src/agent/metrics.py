@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import re
+import shutil
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 import uuid
@@ -16,8 +18,52 @@ from pydantic_ai.usage import RunUsage
 from src.agent.config import MODEL_PRICES
 
 
+_RUN_DIR_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
 def new_run_id() -> str:
     return uuid.uuid4().hex
+
+
+def prune_old_runs(base_log_dir: str | Path, *, keep: int) -> None:
+    """Delete oldest per-run log directories beyond *keep* count.
+
+    Only directories whose names match the 32-hex-char UUID pattern produced by
+    ``new_run_id()`` are considered.  Non-matching entries are never touched.
+    """
+    base = Path(base_log_dir)
+    if not base.is_dir():
+        return
+    run_dirs = [d for d in base.iterdir() if d.is_dir() and _RUN_DIR_RE.match(d.name)]
+    # Sort newest first by mtime
+    run_dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    for old in run_dirs[keep:]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def _update_latest_symlink(base_log_dir: str | Path, run_id: str) -> None:
+    """Create or replace a ``latest`` symlink pointing to *run_id*."""
+    link = Path(base_log_dir) / "latest"
+    try:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(run_id)
+    except OSError:
+        pass  # Silently skip on platforms that don't support symlinks
+
+
+def prepare_run_dir(
+    base_log_dir: str | Path, run_id: str, *, max_log_runs: int
+) -> str:
+    """Create ``<base_log_dir>/<run_id>/``, prune old runs, update symlink.
+
+    Returns the per-run directory path as a string.
+    """
+    prune_old_runs(base_log_dir, keep=max(max_log_runs - 1, 0))
+    run_dir = Path(base_log_dir) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _update_latest_symlink(base_log_dir, run_id)
+    return str(run_dir)
 
 
 def utc_now_iso() -> str:

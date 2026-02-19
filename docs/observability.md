@@ -4,11 +4,13 @@ This agent emits both human-readable logs and machine-readable metrics.
 
 ### Files
 
-- `logs/agent.log`: main runtime log (INFO by default; add `--log-level DEBUG` for per-tool timing lines)
-- `logs/metrics.jsonl`: structured JSONL events (disable with `--no-metrics`)
-- `logs/run_summary.json`: final rollup for the run (duration, total tokens, total cost, etc.)
+Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlink points to the most recent run. Old directories are pruned at startup (default: keep last 10; configure with `--max-log-runs`).
 
-### Metrics events (`logs/metrics.jsonl`)
+- `logs/latest/agent.log`: main runtime log (INFO by default; add `--log-level DEBUG` for per-tool timing lines)
+- `logs/latest/metrics.jsonl`: structured JSONL events (disable with `--no-metrics`)
+- `logs/latest/run_summary.json`: final rollup for the run (duration, total tokens, total cost, etc.)
+
+### Metrics events (`logs/latest/metrics.jsonl`)
 
 Each line is a standalone JSON object with common fields:
 
@@ -34,7 +36,7 @@ Event types:
 
 ### Quick inspection
 
-- Total run summary: `cat logs/run_summary.json`
-- Count events by type: `jq -r '.event' logs/metrics.jsonl | sort | uniq -c`
-- Sum durations (rough): `jq -s 'map(select(.duration_ms != null) | .duration_ms) | add' logs/metrics.jsonl`
-- Timing breakdown: `uv run python scripts/analyze_metrics.py logs/metrics.jsonl`
+- Total run summary: `cat logs/latest/run_summary.json`
+- Count events by type: `jq -r '.event' logs/latest/metrics.jsonl | sort | uniq -c`
+- Sum durations (rough): `jq -s 'map(select(.duration_ms != null) | .duration_ms) | add' logs/latest/metrics.jsonl`
+- Timing breakdown: `uv run python scripts/analyze_metrics.py logs/latest/metrics.jsonl`
