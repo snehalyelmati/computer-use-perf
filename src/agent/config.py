@@ -83,6 +83,7 @@ class AgentConfig:
     target_url: str | None = None
     goal: str | None = None
     max_steps: int = 100
+    step_timeout_seconds: int = 300
     log_dir: str = "logs"
     max_log_runs: int = 10
     max_elements: int = 200

@@ -71,3 +71,4 @@ Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlin
 - Handler extraction runs a single `page.evaluate()` before snapshot capture; stamps elements with `data-agent-hid` for correlation, cleaned up after snapshot
 - Oracle advice + diff are fed into the filter; filter cache is invalidated when Oracle intervenes
 - Per-role model support: `--worker-model`, `--filter-model`, `--oracle-model`
+- LLM resilience: `ResilientModel` wraps each model with per-category retries (429/5xx/network); step-level try/except provides graceful degradation (filter falls back to full snapshot, orchestrator retries once then skips, worker records failure). See `docs/llm-resilience.md`.

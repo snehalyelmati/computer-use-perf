@@ -479,7 +479,7 @@ def _build_model(config: LLMConfig, *, model_override: str | None = None) -> Mod
         model = OpenRouterModel(model_name)
 
     if config.max_retries > 0:
-        model = ResilientModel(model, max_retries=config.max_retries)
+        model = ResilientModel(model)
     return model
 
 
@@ -496,6 +496,14 @@ def _model_settings(config: LLMConfig) -> dict[str, Any]:
         if config.reasoning_effort and config.reasoning_effort != "none":
             settings["openrouter_reasoning"] = {"effort": config.reasoning_effort}
     return settings
+
+
+async def _with_deadline(coro: Any, deadline: float) -> Any:
+    """Run *coro* with a deadline; raises TimeoutError if deadline has passed or is reached."""
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise TimeoutError("step deadline exceeded")
+    return await asyncio.wait_for(coro, timeout=remaining)
 
 
 def _format_memory(memory: list[str], *, limit: int = 10) -> str:
@@ -1801,6 +1809,26 @@ class BrowserAgent:
                     attr_value_max_len=self.agent_config.snapshot_attr_value_max_len,
                 )
 
+                # Step-level deadline for LLM calls
+                _step_deadline = asyncio.get_running_loop().time() + self.agent_config.step_timeout_seconds
+                _step_timed_out = False
+
+                def _is_step_timed_out() -> bool:
+                    """Log + record if the step deadline was exceeded. Returns True to skip."""
+                    if not _step_timed_out:
+                        return False
+                    logger.warning("Step %s timed out, skipping remaining LLM calls", self.state.step)
+                    self.state.memory.append(f"[step {self.state.step}] Step timed out")
+                    metrics.emit(
+                        "step_end",
+                        step=self.state.step,
+                        done=False,
+                        timeout=True,
+                        duration_ms=int((time.perf_counter() - step_started) * 1000),
+                    )
+                    logger.info(f"Step {self.state.step} end (timed out)")
+                    return True
+
                 # ── Oracle (dual trigger: periodic + stuck) ──
                 oracle_hint = ""
                 advice: OracleAdvice | None = None
@@ -1827,7 +1855,7 @@ class BrowserAgent:
                     )
                     oracle_started = time.perf_counter()
                     try:
-                        oracle_result = await oracle_agent.run(oracle_prompt)
+                        oracle_result = await _with_deadline(oracle_agent.run(oracle_prompt), _step_deadline)
                         oracle_duration_ms = int((time.perf_counter() - oracle_started) * 1000)
                         oracle_usage = usage_stats_from_result(oracle_result)
                         oracle_cost = cost_stats_from_result(
@@ -1876,6 +1904,12 @@ class BrowserAgent:
                             logger.info(f"    recommendation: {advice.recommendation[:120]}")
                             if advice.avoid:
                                 logger.info(f"    avoid: {avoid_str[:120]}")
+                    except (asyncio.CancelledError, KeyboardInterrupt):
+                        raise
+                    except TimeoutError:
+                        oracle_duration_ms = int((time.perf_counter() - oracle_started) * 1000)
+                        _step_timed_out = True
+                        logger.warning("Oracle timed out (step %s deadline)", self.state.step)
                     except Exception:
                         oracle_duration_ms = int((time.perf_counter() - oracle_started) * 1000)
                         logger.warning("Oracle advisor failed", exc_info=True)
@@ -1889,6 +1923,9 @@ class BrowserAgent:
                         avoid_ids |= extract_stable_ids(entry)
 
                 # ── Filter (tree pruner) ──
+                if _is_step_timed_out():
+                    prev_snapshot = snapshot
+                    continue
                 filter_output = self.state.last_filter_output
                 if self.state.last_filter_fingerprint != page_fingerprint or filter_output is None:
                     logger.debug("full_tree_text (filter input):\n%s", full_tree_text)
@@ -1921,27 +1958,54 @@ class BrowserAgent:
                         filter_prompt,
                     )
                     filter_started = time.perf_counter()
-                    filter_result = await snapshot_filter.run(filter_prompt)
-                    filter_duration_ms = int((time.perf_counter() - filter_started) * 1000)
-                    filter_usage = usage_stats_from_result(filter_result)
-                    filter_cost = cost_stats_from_result(filter_result, self.llm_config.filter_model or self.llm_config.model)
-                    total_input_tokens += filter_usage.input_tokens
-                    total_output_tokens += filter_usage.output_tokens
-                    if filter_cost:
-                        total_cost_usd = (total_cost_usd or 0.0) + filter_cost.cost_usd
-                    metrics.emit(
-                        "agent_call",
-                        step=self.state.step,
-                        agent="snapshot_filter",
-                        duration_ms=filter_duration_ms,
-                        input_tokens=filter_usage.input_tokens,
-                        output_tokens=filter_usage.output_tokens,
-                        requests=filter_usage.requests,
-                        tool_calls=filter_usage.tool_calls,
-                        cost_usd=(filter_cost.cost_usd if filter_cost else None),
-                        upstream_inference_cost_usd=(filter_cost.upstream_inference_cost_usd if filter_cost else None),
-                    )
-                    filter_output = filter_result.output
+                    try:
+                        filter_result = await _with_deadline(snapshot_filter.run(filter_prompt), _step_deadline)
+                        filter_duration_ms = int((time.perf_counter() - filter_started) * 1000)
+                        filter_usage = usage_stats_from_result(filter_result)
+                        filter_cost = cost_stats_from_result(filter_result, self.llm_config.filter_model or self.llm_config.model)
+                        total_input_tokens += filter_usage.input_tokens
+                        total_output_tokens += filter_usage.output_tokens
+                        if filter_cost:
+                            total_cost_usd = (total_cost_usd or 0.0) + filter_cost.cost_usd
+                        metrics.emit(
+                            "agent_call",
+                            step=self.state.step,
+                            agent="snapshot_filter",
+                            duration_ms=filter_duration_ms,
+                            input_tokens=filter_usage.input_tokens,
+                            output_tokens=filter_usage.output_tokens,
+                            requests=filter_usage.requests,
+                            tool_calls=filter_usage.tool_calls,
+                            cost_usd=(filter_cost.cost_usd if filter_cost else None),
+                            upstream_inference_cost_usd=(filter_cost.upstream_inference_cost_usd if filter_cost else None),
+                        )
+                        filter_output = filter_result.output
+                    except (asyncio.CancelledError, KeyboardInterrupt):
+                        raise
+                    except Exception as _filter_exc:
+                        filter_duration_ms = int((time.perf_counter() - filter_started) * 1000)
+                        if isinstance(_filter_exc, TimeoutError):
+                            _step_timed_out = True
+                            logger.warning("Filter timed out (step %s deadline)", self.state.step)
+                        else:
+                            logger.warning(
+                                "Filter failed (step %s), using unfiltered snapshot",
+                                self.state.step,
+                                exc_info=True,
+                            )
+                            metrics.emit(
+                                "agent_call",
+                                step=self.state.step,
+                                agent="snapshot_filter",
+                                duration_ms=filter_duration_ms,
+                                error=True,
+                            )
+                        filter_output = SnapshotFilterOutput(
+                            useful_text_lines=[],
+                            priority_element_ids=[],
+                            notes="Filter unavailable; using full snapshot.",
+                        )
+                        self.state.last_filter_fingerprint = None
                     valid_ids = set(element_index.elements.keys())
                     priority_ids.extend(
                         _filter_ids_ordered(
@@ -2064,6 +2128,9 @@ class BrowserAgent:
                 )
 
                 # ── Orchestrator ──
+                if _is_step_timed_out():
+                    prev_snapshot = snapshot
+                    continue
                 prev_goal = self.state.last_worker_goal or ""
                 orchestrator_query = ((" ".join(useful_lines) + " " + prev_goal).strip())[:600]
                 snapshot_text_orchestrator = format_snapshot_for_llm(
@@ -2095,29 +2162,72 @@ class BrowserAgent:
                     orchestrator_prompt,
                 )
                 orchestrator_started = time.perf_counter()
-                decision_result = await orchestrator.run(orchestrator_prompt)
-                orchestrator_duration_ms = int((time.perf_counter() - orchestrator_started) * 1000)
-                orchestrator_usage = usage_stats_from_result(decision_result)
-                orchestrator_cost = cost_stats_from_result(decision_result, self.llm_config.model)
-                total_input_tokens += orchestrator_usage.input_tokens
-                total_output_tokens += orchestrator_usage.output_tokens
-                if orchestrator_cost:
-                    total_cost_usd = (total_cost_usd or 0.0) + orchestrator_cost.cost_usd
-                metrics.emit(
-                    "agent_call",
-                    step=self.state.step,
-                    agent="orchestrator",
-                    duration_ms=orchestrator_duration_ms,
-                    input_tokens=orchestrator_usage.input_tokens,
-                    output_tokens=orchestrator_usage.output_tokens,
-                    requests=orchestrator_usage.requests,
-                    tool_calls=orchestrator_usage.tool_calls,
-                    cost_usd=(orchestrator_cost.cost_usd if orchestrator_cost else None),
-                    upstream_inference_cost_usd=(
-                        orchestrator_cost.upstream_inference_cost_usd if orchestrator_cost else None
-                    ),
-                )
-                decision = decision_result.output
+                decision = None
+                for orchestrator_attempt in range(2):
+                    try:
+                        decision_result = await _with_deadline(orchestrator.run(orchestrator_prompt), _step_deadline)
+                        orchestrator_duration_ms = int((time.perf_counter() - orchestrator_started) * 1000)
+                        orchestrator_usage = usage_stats_from_result(decision_result)
+                        orchestrator_cost = cost_stats_from_result(decision_result, self.llm_config.model)
+                        total_input_tokens += orchestrator_usage.input_tokens
+                        total_output_tokens += orchestrator_usage.output_tokens
+                        if orchestrator_cost:
+                            total_cost_usd = (total_cost_usd or 0.0) + orchestrator_cost.cost_usd
+                        metrics.emit(
+                            "agent_call",
+                            step=self.state.step,
+                            agent="orchestrator",
+                            duration_ms=orchestrator_duration_ms,
+                            input_tokens=orchestrator_usage.input_tokens,
+                            output_tokens=orchestrator_usage.output_tokens,
+                            requests=orchestrator_usage.requests,
+                            tool_calls=orchestrator_usage.tool_calls,
+                            cost_usd=(orchestrator_cost.cost_usd if orchestrator_cost else None),
+                            upstream_inference_cost_usd=(
+                                orchestrator_cost.upstream_inference_cost_usd if orchestrator_cost else None
+                            ),
+                        )
+                        decision = decision_result.output
+                        break
+                    except (asyncio.CancelledError, KeyboardInterrupt):
+                        raise
+                    except TimeoutError:
+                        orchestrator_duration_ms = int((time.perf_counter() - orchestrator_started) * 1000)
+                        _step_timed_out = True
+                        logger.warning("Orchestrator timed out (step %s deadline)", self.state.step)
+                        break  # don't retry on timeout
+                    except Exception:
+                        orchestrator_duration_ms = int((time.perf_counter() - orchestrator_started) * 1000)
+                        if orchestrator_attempt == 0:
+                            logger.warning("Orchestrator failed, retrying once", exc_info=True)
+                            continue
+                        logger.warning(
+                            "Orchestrator failed twice (step %s), skipping step",
+                            self.state.step,
+                            exc_info=True,
+                        )
+                        metrics.emit(
+                            "agent_call",
+                            step=self.state.step,
+                            agent="orchestrator",
+                            duration_ms=orchestrator_duration_ms,
+                            error=True,
+                        )
+
+                if decision is None:
+                    self.state.memory.append(
+                        f"[step {self.state.step}] Orchestrator LLM error, step skipped"
+                    )
+                    metrics.emit(
+                        "step_end",
+                        step=self.state.step,
+                        done=False,
+                        skipped=True,
+                        duration_ms=int((time.perf_counter() - step_started) * 1000),
+                    )
+                    logger.info(f"Step {self.state.step} end (skipped — orchestrator error)")
+                    prev_snapshot = snapshot
+                    continue
                 self.state.last_worker_goal = decision.worker_goal
                 logger.info(
                     f"  orchestrator: {orchestrator_duration_ms}ms worker={decision.worker} done={decision.done}"
@@ -2146,6 +2256,9 @@ class BrowserAgent:
                     break
 
                 # ── Worker ──
+                if _is_step_timed_out():
+                    prev_snapshot = snapshot
+                    continue
                 snapshot_text_worker = format_snapshot_for_llm(
                     pruned_snapshot,
                     max_elements=self.agent_config.max_elements,
@@ -2188,8 +2301,9 @@ class BrowserAgent:
                 worker_started = time.perf_counter()
                 try:
                     with browser_worker.sequential_tool_calls():
-                        worker_result = await browser_worker.run(
-                            worker_prompt, deps=deps, usage_limits=worker_usage_limits
+                        worker_result = await _with_deadline(
+                            browser_worker.run(worker_prompt, deps=deps, usage_limits=worker_usage_limits),
+                            _step_deadline,
                         )
                 except UsageLimitExceeded:
                     worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
@@ -2200,6 +2314,32 @@ class BrowserAgent:
                     step_output = StepOutput(
                         done=False,
                         summary=f"Tool call limit reached ({self.agent_config.max_worker_tool_calls})",
+                    )
+                except TimeoutError:
+                    worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
+                    logger.warning("Worker timed out (step %s deadline)", self.state.step)
+                    step_output = StepOutput(
+                        done=False,
+                        summary="Worker timed out (step deadline exceeded)",
+                    )
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    raise
+                except Exception:
+                    worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
+                    err_name = type(sys.exc_info()[1]).__name__
+                    logger.warning(
+                        "Worker LLM error (step %s): %s", self.state.step, err_name, exc_info=True
+                    )
+                    metrics.emit(
+                        "agent_call",
+                        step=self.state.step,
+                        agent="browser_worker",
+                        duration_ms=worker_duration_ms,
+                        error=True,
+                    )
+                    step_output = StepOutput(
+                        done=False,
+                        summary=f"Worker LLM error: {err_name}",
                     )
                 else:
                     worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)

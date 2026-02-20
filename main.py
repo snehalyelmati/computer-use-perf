@@ -138,6 +138,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max completion tokens per LLM call (prevents runaway repetition)",
     )
     parser.add_argument(
+        "--timeout",
+        dest="timeout_seconds",
+        type=int,
+        default=60,
+        help="Timeout in seconds for each LLM request (default: 60)",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="Max retries for transient LLM errors; 0 disables resilient wrapper (default: 2)",
+    )
+    parser.add_argument(
+        "--step-timeout",
+        dest="step_timeout_seconds",
+        type=_positive_int,
+        default=300,
+        help="Timeout in seconds for an entire step's LLM pipeline (default: 300)",
+    )
+    parser.add_argument(
         "--no-handlers",
         action="store_true",
         help="Disable JS event handler extraction from DOM elements",
@@ -244,6 +264,7 @@ def main() -> None:
         max_log_runs=int(args.max_log_runs),
         max_worker_tool_calls=int(args.max_worker_tool_calls),
         oracle_trace_window=int(args.oracle_trace_window),
+        step_timeout_seconds=int(args.step_timeout_seconds),
     )
     provider = args.provider
     defaults = PROVIDER_DEFAULTS[provider]
@@ -254,6 +275,8 @@ def main() -> None:
         filter_model=args.filter_model or defaults.get("filter_model") or None,
         oracle_model=args.oracle_model or defaults.get("oracle_model") or None,
         api_key_env=defaults["api_key_env"],
+        timeout_seconds=int(args.timeout_seconds),
+        max_retries=int(args.max_retries),
         max_tokens=args.max_tokens,
     )
     browser_config = BrowserConfig(headless=bool(args.headless))
