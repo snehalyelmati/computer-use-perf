@@ -277,7 +277,7 @@ _SCROLL_PAGE_JS = """
 """.strip()
 
 _SCROLL_ELEMENT_JS = """
-([dx, dy]) => {
+function ([dx, dy]) {
     function canScroll(el) {
         const style = getComputedStyle(el);
         const oy = style.overflowY;
@@ -1106,6 +1106,7 @@ async def scroll(
     session = context.cdp_session
     if element_id and element and element.frame_id:
         session = await _session_for_element(element, context)
+    await _inject_observer(session)
     try:
         if element_id and element and element.backend_node_id:
             result = await _call_on_node(
@@ -1115,14 +1116,20 @@ async def scroll(
                 args=[{"value": [delta_x, delta_y]}],
             )
             if not result:
+                await _collect_mutations(session, settle_ms=50)
                 return ToolResult(ok=False, message="Scroll failed: element not found")
             result = result.get("result", {}).get("value")
         else:
             result = await context.page.evaluate(_SCROLL_PAGE_JS, [delta_x, delta_y])
     except Exception as exc:
+        await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Scroll failed: {exc}")
+    mutations = await _collect_mutations(session, context.timing.settle_ms)
     if not result:
-        return ToolResult(ok=True, message=f"Scrolled dx={delta_x} dy={delta_y}")
+        msg = f"Scrolled dx={delta_x} dy={delta_y}"
+        if element_id:
+            msg += ". WARNING: could not confirm element scroll position changed"
+        return ToolResult(ok=True, message=_format_verification(mutations, msg))
     before = result.get("before", {})
     after = result.get("after", {})
     target = result.get("targetTag")
@@ -1137,7 +1144,7 @@ async def scroll(
     )
     if dx == 0 and dy == 0:
         msg += ". WARNING: scroll position did not change (may be at boundary)"
-    return ToolResult(ok=True, message=msg)
+    return ToolResult(ok=True, message=_format_verification(mutations, msg))
 
 
 async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
