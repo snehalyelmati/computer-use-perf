@@ -85,8 +85,11 @@ def _classify_http_error(exc: ModelHTTPError) -> RetryPolicy | None:
 class ResilientModel(WrapperModel):
     """Wraps a Model with nested retry logic for HTTP and network errors."""
 
+    total_retry_wait_seconds: float
+
     def __init__(self, wrapped: object) -> None:
         super().__init__(wrapped)  # type: ignore[arg-type]
+        self.total_retry_wait_seconds = 0.0
 
     # -- inner layer: HTTP status retries --
 
@@ -132,6 +135,7 @@ class ResilientModel(WrapperModel):
                     f" (Retry-After: {retry_after}s)" if retry_after is not None else "",
                     exc,
                 )
+                self.total_retry_wait_seconds += delay
                 await asyncio.sleep(delay)
 
     # -- outer layer: network/timeout retries --
@@ -162,6 +166,7 @@ class ResilientModel(WrapperModel):
                     delay,
                     exc,
                 )
+                self.total_retry_wait_seconds += delay
                 await asyncio.sleep(delay)
         # Unreachable, but keeps the type checker happy.
         raise RuntimeError("unreachable")

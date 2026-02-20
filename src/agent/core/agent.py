@@ -1613,6 +1613,13 @@ class BrowserAgent:
             else model
         )
 
+        _seen: set[int] = set()
+        resilient_models: list[ResilientModel] = []
+        for m in [model, worker_model, filter_model, oracle_model]:
+            if isinstance(m, ResilientModel) and id(m) not in _seen:
+                _seen.add(id(m))
+                resilient_models.append(m)
+
         orchestrator = build_orchestrator_agent(model, model_settings=model_settings)
         snapshot_filter = build_snapshot_filter_agent(filter_model, model_settings=model_settings)
         oracle_agent = build_oracle_agent(oracle_model, model_settings=model_settings)
@@ -1839,12 +1846,13 @@ class BrowserAgent:
                 if should_call_oracle and self.state.step_trace:
                     trace_text = _format_step_trace(self.state.step_trace, window=self.agent_config.oracle_trace_window)
                     tool_list = ", ".join(sorted(DEFAULT_WORKER_TOOLS))
+                    tool_constraint = "Only recommend actions using these exact tools. Do not suggest inspecting elements, reading page content, taking screenshots, executing JavaScript, or any action not in this list."
                     oracle_prompt = (
                         f"Overall goal: {self.agent_config.goal}\n\n"
                         f"Current step: {self.state.step}\n"
                         f"No-progress steps: {self.state.no_progress_steps}\n\n"
                         f"Execution trace:\n{trace_text}\n\n"
-                        f"Worker tools: {tool_list}\n\n"
+                        f"Worker tools: {tool_list}\n{tool_constraint}\n\n"
                         f"Page snapshot (full interactive element tree):\n{full_tree_text}\n"
                     )
                     logger.debug(
@@ -2146,12 +2154,13 @@ class BrowserAgent:
                 )
                 memory_text = _format_memory(self.state.memory, limit=self.agent_config.memory_steps)
                 tool_list = ", ".join(sorted(DEFAULT_WORKER_TOOLS))
+                tool_constraint = "Only set goals achievable with these exact tools. Do not suggest inspecting elements, reading page content, taking screenshots, executing JavaScript, or any action not in this list."
                 orchestrator_prompt = (
                     f"Overall goal: {self.agent_config.goal}\n\n"
                     f"Filtered useful lines:\n{useful_block}\n\n"
                     f"Diff since prior snapshot:\n{diff_text}\n\n"
                     f"Memory (recent):\n{memory_text}\n\n"
-                    f"Worker tools: {tool_list}\n\n"
+                    f"Worker tools: {tool_list}\n{tool_constraint}\n\n"
                     f"Page snapshot:\n{snapshot_text_orchestrator}\n"
                     f"{oracle_hint}"
                 )
@@ -2445,6 +2454,8 @@ class BrowserAgent:
                 logger.warning("Error closing browser", exc_info=True)
 
             run_duration_ms = int((time.perf_counter() - run_started) * 1000)
+            retry_wait_ms = int(sum(m.total_retry_wait_seconds for m in resilient_models) * 1000)
+            active_duration_ms = run_duration_ms - retry_wait_ms
             effective_stop_reason = "interrupted" if interrupted else stop_reason
 
             try:
@@ -2458,6 +2469,8 @@ class BrowserAgent:
                     run_id=run_id,
                     summary={
                         "duration_ms": run_duration_ms,
+                        "retry_wait_ms": retry_wait_ms,
+                        "active_duration_ms": active_duration_ms,
                         "steps": self.state.step,
                         "last_summary": self.state.last_summary,
                         "stop_reason": effective_stop_reason,
@@ -2472,9 +2485,11 @@ class BrowserAgent:
 
             try:
                 logger.info(
-                    "Run end run_id=%s duration_ms=%s steps=%s total_tokens=%s cost_usd=%s%s",
+                    "Run end run_id=%s duration_ms=%s retry_wait_ms=%s active_duration_ms=%s steps=%s total_tokens=%s cost_usd=%s%s",
                     run_id,
                     run_duration_ms,
+                    retry_wait_ms,
+                    active_duration_ms,
                     self.state.step,
                     total_input_tokens + total_output_tokens,
                     total_cost_usd,
