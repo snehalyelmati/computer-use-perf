@@ -73,8 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-worker-tool-calls",
         type=_positive_int,
-        default=25,
-        help="Max tool calls the worker can make in a single step (default: 25)",
+        default=10,
+        help="Max tool calls the worker can make in a single step (default: 10)",
     )
     parser.add_argument(
         "--oracle-trace-window",
