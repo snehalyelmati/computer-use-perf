@@ -249,24 +249,6 @@ async def _viewport_info(backend_node_id: int, session: CDPSession) -> dict[str,
         """,
     )
 
-async def _dispatch_click(session: CDPSession, x: float, y: float) -> bool:
-    try:
-        await session.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseMoved", "x": x, "y": y, "button": "left"},
-        )
-        await session.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
-        )
-        await session.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
-        )
-    except Exception:
-        return False
-    return True
-
 _SCROLL_PAGE_JS = """
 ([dx, dy]) => {
     const before = { x: window.scrollX, y: window.scrollY };
@@ -720,59 +702,11 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
     if source.frame_id != target.frame_id:
         return ToolResult(ok=False, message="Drag elements are in different frames")
     session = await _session_for_element(source, context)
-    source_info = await _viewport_info(source.backend_node_id, session)
-    if not source_info:
-        return ToolResult(ok=False, message="Drag failed")
-    target_info = await _viewport_info(target.backend_node_id, session)
-    if not target_info:
-        return ToolResult(ok=False, message="Drag failed")
-    source_value = source_info.get("result", {}).get("value")
-    target_value = target_info.get("result", {}).get("value")
-    if not source_value or not target_value:
-        return ToolResult(ok=False, message="Drag failed")
-
     await _inject_observer(session)
 
     base_msg = f"Dragged {source_id} -> {target_id}"
 
-    # CDP coordinate-based drag — only when both elements are on top (no overlays).
-    # CDP mouse events can't complete HTML5 DnD through overlays (browser's drag
-    # state machine doesn't handle mouseReleased as a drop when overlay intercepts).
-    if source_value.get("onTop") and target_value.get("onTop"):
-        try:
-            sx, sy = source_value["x"], source_value["y"]
-            tx, ty = target_value["x"], target_value["y"]
-            await session.send(
-                "Input.dispatchMouseEvent",
-                {"type": "mouseMoved", "x": sx, "y": sy, "button": "left"},
-            )
-            await session.send(
-                "Input.dispatchMouseEvent",
-                {"type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1},
-            )
-            await asyncio.sleep(context.timing.drag_phase_interval_ms / 1000)
-            await session.send(
-                "Input.dispatchMouseEvent",
-                {"type": "mouseMoved", "x": sx + 10, "y": sy + 10, "button": "left", "buttons": 1},
-            )
-            await asyncio.sleep(context.timing.drag_phase_interval_ms / 1000)
-            await session.send(
-                "Input.dispatchMouseEvent",
-                {"type": "mouseMoved", "x": tx, "y": ty, "button": "left", "buttons": 1},
-            )
-            await asyncio.sleep(context.timing.drag_phase_interval_ms / 1000)
-            await session.send(
-                "Input.dispatchMouseEvent",
-                {"type": "mouseReleased", "x": tx, "y": ty, "button": "left", "clickCount": 1},
-            )
-            mutations = await _collect_mutations(session, context.timing.settle_ms)
-            message = _format_verification(mutations, base_msg)
-            return ToolResult(ok=True, message=message)
-        except Exception:
-            pass  # Fall through to DOM fallback
-
-    # DOM fallback — split-phase DragEvent dispatch for overlay bypass.
-    # Dispatches directly on DOM nodes (bypasses visual layering).
+    # DOM-based DragEvent dispatch — operates directly on DOM nodes, not coordinates.
     # Split into two phases with async gap so framework state (React setState)
     # can flush between dragstart and drop.
     target_object_id = await _resolve_object_id(target.backend_node_id, session)
@@ -840,55 +774,13 @@ async def draw(
         return ToolResult(ok=False, message="Draw requires at least 2 points")
 
     session = await _session_for_element(element, context)
-    info = await _viewport_info(element.backend_node_id, session)
-    if not info:
-        return ToolResult(ok=False, message="Draw failed: cannot locate element")
-    value = info.get("result", {}).get("value")
-    if not value:
-        return ToolResult(ok=False, message="Draw failed: cannot locate element")
-
-    # Element top-left corner in viewport coordinates
-    el_left = value["x"] - value["width"] / 2
-    el_top = value["y"] - value["height"] / 2
-
     await _inject_observer(session)
 
     base_msg = f"Drew path with {len(path)} points on {element_id}"
 
-    # CDP coordinate-based draw — only when element is on top (no overlays).
-    if value.get("onTop"):
-        start_x = el_left + path[0][0]
-        start_y = el_top + path[0][1]
-        try:
-            await session.send(
-                "Input.dispatchMouseEvent",
-                {"type": "mouseMoved", "x": start_x, "y": start_y, "button": "left"},
-            )
-            await session.send(
-                "Input.dispatchMouseEvent",
-                {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1},
-            )
-            for point in path[1:]:
-                px = el_left + point[0]
-                py = el_top + point[1]
-                await session.send(
-                    "Input.dispatchMouseEvent",
-                    {"type": "mouseMoved", "x": px, "y": py, "button": "left", "buttons": 1},
-                )
-                await asyncio.sleep(context.timing.draw_point_interval_ms / 1000)
-            last_x = el_left + path[-1][0]
-            last_y = el_top + path[-1][1]
-            await session.send(
-                "Input.dispatchMouseEvent",
-                {"type": "mouseReleased", "x": last_x, "y": last_y, "button": "left", "clickCount": 1},
-            )
-            mutations = await _collect_mutations(session, context.timing.draw_settle_ms)
-            return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
-        except Exception:
-            pass  # Fall through to DOM fallback
-
-    # DOM fallback — dispatch synthetic MouseEvents directly on the element,
-    # bypassing any overlay that intercepts CDP coordinate-based events.
+    # DOM-first — dispatch synthetic MouseEvents directly on the element.
+    # Works through overlays and computes accurate clientX/clientY from
+    # a fresh getBoundingClientRect() in the same synchronous JS call.
     result = await _call_on_node(
         element.backend_node_id,
         session,
@@ -913,12 +805,53 @@ async def draw(
         """,
         [{"value": path}],
     )
-    if not result:
-        await _collect_mutations(session, settle_ms=50)
-        return ToolResult(ok=False, message="Draw failed: DOM event dispatch error")
+    if result:
+        mutations = await _collect_mutations(session, context.timing.draw_settle_ms)
+        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
-    mutations = await _collect_mutations(session, context.timing.draw_settle_ms)
-    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+    # CDP coordinate fallback — for apps that ignore synthetic DOM events
+    # but respond to real input events (e.g. some canvas libraries).
+    info = await _viewport_info(element.backend_node_id, session)
+    if not info:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Draw failed: cannot locate element")
+    value = info.get("result", {}).get("value")
+    if not value:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Draw failed: cannot locate element")
+
+    el_left = value["x"] - value["width"] / 2
+    el_top = value["y"] - value["height"] / 2
+    start_x = el_left + path[0][0]
+    start_y = el_top + path[0][1]
+    try:
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": start_x, "y": start_y, "button": "left"},
+        )
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": start_x, "y": start_y, "button": "left", "clickCount": 1},
+        )
+        for point in path[1:]:
+            px = el_left + point[0]
+            py = el_top + point[1]
+            await session.send(
+                "Input.dispatchMouseEvent",
+                {"type": "mouseMoved", "x": px, "y": py, "button": "left", "buttons": 1},
+            )
+            await asyncio.sleep(context.timing.draw_point_interval_ms / 1000)
+        last_x = el_left + path[-1][0]
+        last_y = el_top + path[-1][1]
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": last_x, "y": last_y, "button": "left", "clickCount": 1},
+        )
+        mutations = await _collect_mutations(session, context.timing.draw_settle_ms)
+        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+    except Exception:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Draw failed")
 
 
 async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
