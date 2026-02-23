@@ -42,9 +42,11 @@ flowchart LR
 - Set `OPENROUTER_API_KEY` for OpenRouter access
 
 ## Run
-- `uv run main.py --url <target> --task TASK.md [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--widen-on-oracle] [--max-tokens 2048] [--log-level INFO] [--no-metrics] [--no-handlers]`
+- `uv run main.py --url <target> --task TASK.md [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--widen-on-oracle] [--unified] [--max-tokens 2048] [--log-level INFO] [--no-metrics] [--no-handlers]`
 
 `TASK.md` should contain the full task instructions as plain markdown text.
+
+Use `--unified` to run a single tool-equipped agent (skips the Orchestrator → Worker handoff). Oracle and Filter remain unchanged.
 
 ### Outputs
 - Logs: `logs/agent.log`

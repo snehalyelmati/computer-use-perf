@@ -131,3 +131,4 @@ class AgentConfig:
     draw_point_interval_ms: int = 20
     drag_phase_interval_ms: int = 50
     networkidle_timeout_ms: int = 3000
+    unified: bool = False

@@ -138,12 +138,13 @@ def main() -> int:
         agents = step_agents.get(step, {})
         filt = agents.get("snapshot_filter", 0.0)
         orch = agents.get("orchestrator", 0.0)
+        unified = agents.get("unified", 0.0)
         work = agents.get("browser_worker", 0.0)
         tools = step_tool_total.get(step, 0.0)
         total = step_total.get(step, 0.0)
         print(
             f"  step={step:3d} total={total:7.1f}ms snapshot={snap:7.1f}ms"
-            f" filter={filt:7.1f}ms orch={orch:7.1f}ms worker={work:7.1f}ms tools={tools:7.1f}ms"
+            f" filter={filt:7.1f}ms orch={orch:7.1f}ms unified={unified:7.1f}ms worker={work:7.1f}ms tools={tools:7.1f}ms"
         )
     if len(steps) > 50:
         print(f"  ... ({len(steps) - 50} more steps omitted)")

@@ -56,8 +56,22 @@ from src.agent.metrics import (
     usage_stats_from_result,
     write_run_summary,
 )
-from src.agent.models.actions import OracleAdvice, OrchestratorDecision, SnapshotFilterOutput, StepOutput, ToolExecutionResult
-from src.agent.prompts.system import FILTER_PROMPT, ORACLE_PROMPT, ORCHESTRATOR_PROMPT, STEP_PROMPT, SYSTEM_PROMPT
+from src.agent.models.actions import (
+    OracleAdvice,
+    OrchestratorDecision,
+    SnapshotFilterOutput,
+    StepOutput,
+    ToolExecutionResult,
+    UnifiedStepOutput,
+)
+from src.agent.prompts.system import (
+    FILTER_PROMPT,
+    ORACLE_PROMPT,
+    ORCHESTRATOR_PROMPT,
+    STEP_PROMPT,
+    SYSTEM_PROMPT,
+    UNIFIED_PROMPT,
+)
 from src.agent.tools import semantic
 
 logger = logging.getLogger(__name__)
@@ -838,33 +852,7 @@ def build_oracle_agent(model: Model, *, model_settings: dict[str, Any]) -> Agent
     )
 
 
-def build_browser_worker_agent(
-    model: Model, *, model_settings: dict[str, Any]
-) -> Agent[WorkerDeps, StepOutput]:
-    async def _normalize_strict(
-        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
-    ) -> list[ToolDefinition]:
-        return [replace(t, strict=False) for t in tool_defs]
-
-    async def _filter_tools(
-        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
-    ) -> list[ToolDefinition]:
-        tool_defs = [replace(t, strict=False) for t in tool_defs]
-        if ctx.deps.allowed_tools is None:
-            return tool_defs
-        return [t for t in tool_defs if t.name in ctx.deps.allowed_tools]
-
-    agent: Agent[WorkerDeps, StepOutput] = Agent(
-        model,
-        deps_type=WorkerDeps,
-        output_type=StepOutput,
-        system_prompt=SYSTEM_PROMPT,
-        model_settings=model_settings,
-        prepare_tools=_filter_tools,
-        prepare_output_tools=_normalize_strict,
-        retries=1,
-    )
-
+def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
     @agent.tool(name="click_element")
     async def click_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
         """Click on an element to activate it, follow a link, or toggle a control. Use element_id from the page snapshot."""
@@ -1532,6 +1520,63 @@ def build_browser_worker_agent(
             ctx.deps.tool_tracker.record(result.ok)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
+def build_browser_worker_agent(
+    model: Model, *, model_settings: dict[str, Any]
+) -> Agent[WorkerDeps, StepOutput]:
+    async def _normalize_strict(
+        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
+    ) -> list[ToolDefinition]:
+        return [replace(t, strict=False) for t in tool_defs]
+
+    async def _filter_tools(
+        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
+    ) -> list[ToolDefinition]:
+        tool_defs = [replace(t, strict=False) for t in tool_defs]
+        if ctx.deps.allowed_tools is None:
+            return tool_defs
+        return [t for t in tool_defs if t.name in ctx.deps.allowed_tools]
+
+    agent: Agent[WorkerDeps, StepOutput] = Agent(
+        model,
+        deps_type=WorkerDeps,
+        output_type=StepOutput,
+        system_prompt=SYSTEM_PROMPT,
+        model_settings=model_settings,
+        prepare_tools=_filter_tools,
+        prepare_output_tools=_normalize_strict,
+        retries=1,
+    )
+    register_browser_tools(agent)
+    return agent
+
+
+def build_unified_agent(
+    model: Model, *, model_settings: dict[str, Any]
+) -> Agent[WorkerDeps, UnifiedStepOutput]:
+    async def _normalize_strict(
+        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
+    ) -> list[ToolDefinition]:
+        return [replace(t, strict=False) for t in tool_defs]
+
+    async def _filter_tools(
+        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
+    ) -> list[ToolDefinition]:
+        tool_defs = [replace(t, strict=False) for t in tool_defs]
+        if ctx.deps.allowed_tools is None:
+            return tool_defs
+        return [t for t in tool_defs if t.name in ctx.deps.allowed_tools]
+
+    agent: Agent[WorkerDeps, UnifiedStepOutput] = Agent(
+        model,
+        deps_type=WorkerDeps,
+        output_type=UnifiedStepOutput,
+        system_prompt=(SYSTEM_PROMPT, UNIFIED_PROMPT),
+        model_settings=model_settings,
+        prepare_tools=_filter_tools,
+        prepare_output_tools=_normalize_strict,
+        retries=1,
+    )
+    register_browser_tools(agent)
     return agent
 
 
@@ -1624,6 +1669,9 @@ class BrowserAgent:
         snapshot_filter = build_snapshot_filter_agent(filter_model, model_settings=model_settings)
         oracle_agent = build_oracle_agent(oracle_model, model_settings=model_settings)
         browser_worker = build_browser_worker_agent(worker_model, model_settings=model_settings)
+        unified_agent: Agent[WorkerDeps, UnifiedStepOutput] | None = None
+        if self.agent_config.unified:
+            unified_agent = build_unified_agent(worker_model, model_settings=model_settings)
 
         session = await launch_browser(self.browser_config)
         try:
@@ -2135,6 +2183,188 @@ class BrowserAgent:
                     viewport_height=snapshot.viewport_height,
                 )
 
+                # ── Unified (single agent: plan + tools) ──
+                if self.agent_config.unified:
+                    if _is_step_timed_out():
+                        prev_snapshot = snapshot
+                        continue
+                    if unified_agent is None:
+                        raise RuntimeError("unified_agent is not initialized")
+
+                    unified_query = ((" ".join(useful_lines) + " " + (self.agent_config.goal or "")).strip())[:600]
+                    snapshot_text_unified = format_snapshot_for_llm(
+                        pruned_snapshot,
+                        max_elements=self.agent_config.max_elements,
+                        query=unified_query or None,
+                        priority_ids=priority_ids,
+                        class_sanitize_mode=self.agent_config.class_sanitize_mode,
+                        class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
+                        class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
+                        class_sanitize_fallback_tokens=self.agent_config.class_sanitize_fallback_tokens,
+                        attr_value_max_len=self.agent_config.snapshot_attr_value_max_len,
+                    )
+                    memory_text = _format_memory(self.state.memory, limit=self.agent_config.memory_steps)
+                    unified_prompt = (
+                        f"Overall goal: {self.agent_config.goal}\n\n"
+                        f"Memory (recent):\n{memory_text}\n\n"
+                        f"Filtered useful lines:\n{useful_block}\n\n"
+                        f"Diff since prior snapshot:\n{diff_text}\n\n"
+                        f"Page snapshot:\n{snapshot_text_unified}\n"
+                        f"{oracle_hint}"
+                    )
+                    logger.debug(
+                        "unified prompt step=%s chars=%s:\n%s",
+                        self.state.step,
+                        len(unified_prompt),
+                        unified_prompt,
+                    )
+
+                    tool_tracker = ToolCallTracker()
+                    deps = WorkerDeps(
+                        tool_context=tool_context,
+                        metrics=metrics,
+                        step=self.state.step,
+                        tool_tracker=tool_tracker,
+                        allowed_tools=DEFAULT_WORKER_TOOLS,
+                    )
+                    prev_url = getattr(session.page, "url", "") or ""
+                    unified_usage_limits = UsageLimits(request_limit=self.agent_config.max_worker_tool_calls)
+                    unified_started = time.perf_counter()
+                    try:
+                        with unified_agent.sequential_tool_calls():
+                            unified_result = await _with_deadline(
+                                unified_agent.run(
+                                    unified_prompt, deps=deps, usage_limits=unified_usage_limits
+                                ),
+                                _step_deadline,
+                            )
+                    except UsageLimitExceeded:
+                        unified_duration_ms = int((time.perf_counter() - unified_started) * 1000)
+                        logger.warning(
+                            "  unified: tool call limit reached (%s), ending step",
+                            self.agent_config.max_worker_tool_calls,
+                        )
+                        step_output = UnifiedStepOutput(
+                            done=False,
+                            step_goal="Attempt progress toward the overall goal",
+                            summary=f"Tool call limit reached ({self.agent_config.max_worker_tool_calls})",
+                            rationale="",
+                        )
+                    except TimeoutError:
+                        unified_duration_ms = int((time.perf_counter() - unified_started) * 1000)
+                        logger.warning("Unified timed out (step %s deadline)", self.state.step)
+                        step_output = UnifiedStepOutput(
+                            done=False,
+                            step_goal="Attempt progress toward the overall goal",
+                            summary="Unified timed out (step deadline exceeded)",
+                            rationale="",
+                        )
+                    except (asyncio.CancelledError, KeyboardInterrupt):
+                        raise
+                    except Exception:
+                        unified_duration_ms = int((time.perf_counter() - unified_started) * 1000)
+                        err_name = type(sys.exc_info()[1]).__name__
+                        logger.warning(
+                            "Unified LLM error (step %s): %s", self.state.step, err_name, exc_info=True
+                        )
+                        metrics.emit(
+                            "agent_call",
+                            step=self.state.step,
+                            agent="unified",
+                            duration_ms=unified_duration_ms,
+                            error=True,
+                        )
+                        step_output = UnifiedStepOutput(
+                            done=False,
+                            step_goal="Attempt progress toward the overall goal",
+                            summary=f"Unified LLM error: {err_name}",
+                            rationale="",
+                        )
+                    else:
+                        unified_duration_ms = int((time.perf_counter() - unified_started) * 1000)
+                        unified_usage = usage_stats_from_result(unified_result)
+                        unified_cost = cost_stats_from_result(
+                            unified_result, self.llm_config.worker_model or self.llm_config.model
+                        )
+                        total_input_tokens += unified_usage.input_tokens
+                        total_output_tokens += unified_usage.output_tokens
+                        if unified_cost:
+                            total_cost_usd = (total_cost_usd or 0.0) + unified_cost.cost_usd
+                        metrics.emit(
+                            "agent_call",
+                            step=self.state.step,
+                            agent="unified",
+                            duration_ms=unified_duration_ms,
+                            input_tokens=unified_usage.input_tokens,
+                            output_tokens=unified_usage.output_tokens,
+                            requests=unified_usage.requests,
+                            tool_calls=unified_usage.tool_calls,
+                            cost_usd=(unified_cost.cost_usd if unified_cost else None),
+                            upstream_inference_cost_usd=(
+                                unified_cost.upstream_inference_cost_usd if unified_cost else None
+                            ),
+                        )
+                        step_output = unified_result.output
+
+                    # Done-gate: override done=True when tool calls were attempted and none succeeded
+                    if step_output.done and tool_tracker.success_count == 0 and tool_tracker.failure_count > 0:
+                        logger.info("    done-gate: overriding done=True (no successful tool calls)")
+                        step_output = step_output.model_copy(
+                            update={"done": False, "summary": f"[no successful tools] {step_output.summary}"}
+                        )
+
+                    self.state.active_frame_id = tool_context.active_frame_id
+                    tool_status = f"{tool_tracker.success_count} ok, {tool_tracker.failure_count} failed"
+                    memory_entry = f"[step {self.state.step}, {tool_status}] {step_output.summary}"
+                    self.state.last_summary = memory_entry
+                    self.state.memory.append(memory_entry)
+                    self.state.last_tool = tool_context.last_tool
+                    self.state.last_element_id = tool_context.last_element_id
+                    self.state.last_worker_goal = step_output.step_goal
+                    logger.debug("memory step=%s entries=%s", self.state.step, self.state.memory)
+
+                    # ── Populate step trace ──
+                    self.state.step_trace.append({
+                        "step": self.state.step,
+                        "url": getattr(session.page, "url", "") or "",
+                        "goal": step_output.step_goal,
+                        "summary": step_output.summary,
+                        "diff_summary": diff_text.split("\n")[0] if diff_text else "",
+                        "url_changed": prev_url != (getattr(session.page, "url", "") or ""),
+                    })
+                    logger.debug("step_trace step=%s entries=%s", self.state.step, self.state.step_trace)
+
+                    logger.info(f"  unified: {unified_duration_ms}ms done={step_output.done}")
+                    if step_output.step_goal:
+                        logger.info(f"    goal: {step_output.step_goal}")
+                    if step_output.summary:
+                        logger.info(f"    summary: {step_output.summary}")
+                    if step_output.rationale:
+                        logger.info(f"    rationale: {step_output.rationale}")
+                    logger.debug(
+                        "unified output step=%s done=%s step_goal=%s summary=%s rationale=%s",
+                        self.state.step,
+                        step_output.done,
+                        step_output.step_goal,
+                        step_output.summary,
+                        step_output.rationale,
+                    )
+
+                    metrics.emit(
+                        "step_end",
+                        step=self.state.step,
+                        done=bool(step_output.done),
+                        duration_ms=int((time.perf_counter() - step_started) * 1000),
+                        **({"stop_reason": "done"} if step_output.done else {}),
+                    )
+                    step_duration_ms = int((time.perf_counter() - step_started) * 1000)
+                    logger.info(f"Step {self.state.step} end {step_duration_ms}ms")
+                    prev_snapshot = snapshot
+                    if step_output.done:
+                        stop_reason = "done"
+                        break
+                    continue
+
                 # ── Orchestrator ──
                 if _is_step_timed_out():
                     prev_snapshot = snapshot
@@ -2255,11 +2485,13 @@ class BrowserAgent:
                     getattr(decision, "allowed_tools", None),
                 )
                 if decision.done:
+                    stop_reason = "done"
                     logger.info(f"  orchestrator done: {decision.rationale or 'task complete'}")
                     metrics.emit(
                         "step_end",
                         step=self.state.step,
                         done=True,
+                        stop_reason=stop_reason,
                         duration_ms=int((time.perf_counter() - step_started) * 1000),
                     )
                     break
@@ -2419,6 +2651,8 @@ class BrowserAgent:
                 step_duration_ms = int((time.perf_counter() - step_started) * 1000)
                 logger.info(f"Step {self.state.step} end {step_duration_ms}ms")
                 prev_snapshot = snapshot
+            else:
+                stop_reason = stop_reason or "max_steps"
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except Exception:

@@ -132,6 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="When Oracle intervenes (all_clear=false), keep all interactive elements (minus avoided ids)",
     )
     parser.add_argument(
+        "--unified",
+        action="store_true",
+        help="Use unified agent (skip orchestrator + worker)",
+    )
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=2048,
@@ -247,6 +252,7 @@ def main() -> None:
         unchanged_abort_threshold=args.unchanged_abort_threshold,
         oracle_interval=args.oracle_interval,
         widen_on_oracle=bool(args.widen_on_oracle),
+        unified=bool(args.unified),
         desc_text_preview_enabled=not bool(args.no_desc_text_preview),
         desc_text_preview_max_chars=int(args.desc_text_preview_max_chars),
         desc_text_preview_max_nodes=int(args.desc_text_preview_max_nodes),

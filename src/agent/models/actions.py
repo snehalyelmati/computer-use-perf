@@ -38,6 +38,27 @@ class StepOutput(BaseModel):
     summary: str = Field(..., description="Concise summary of what happened in this step")
 
 
+class UnifiedStepOutput(BaseModel):
+    """Structured output returned by the unified agent after a step."""
+
+    done: bool = Field(
+        False,
+        description="Set true ONLY when the overall run goal is fully complete.",
+    )
+    step_goal: str = Field(
+        ...,
+        description="Short sub-goal you attempted this step (used for trace/Oracle).",
+    )
+    summary: str = Field(
+        ...,
+        description="Concise summary of what happened in this step.",
+    )
+    rationale: str = Field(
+        "",
+        description="Brief why these actions were chosen.",
+    )
+
+
 class OrchestratorDecision(BaseModel):
     """Structured output returned by the orchestrator to delegate work."""
 
