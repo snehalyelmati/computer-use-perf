@@ -989,7 +989,7 @@ def build_browser_worker_agent(
 
     @agent.tool(name="type_text")
     async def type_text(ctx: RunContext[WorkerDeps], element_id: str, text: str) -> ToolExecutionResult:
-        """Type text into an input or editable field. Replaces any existing content. Use element_id from the page snapshot."""
+        """Type text into an input or editable field — clears any existing content first and focuses automatically (no separate click needed). Use for any element that accepts keyboard input, including fields with placeholder hints like 'click to type' or 'enter value'. Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.type_text(element_id, text, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
