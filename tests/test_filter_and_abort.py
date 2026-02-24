@@ -479,7 +479,7 @@ async def test_abort_when_fingerprint_unchanged_for_threshold(monkeypatch: pytes
     monkeypatch.setattr(
         agent_mod,
         "build_oracle_agent",
-        lambda *_a, **_k: _StubAgent(lambda *_: OracleAdvice(all_clear=False, diagnosis="stuck", recommendation="try something else", avoid=[])),
+        lambda *_a, **_k: _StubAgent(lambda *_: OracleAdvice(all_clear=True, diagnosis="", recommendation="", avoid=[])),
     )
 
     agent = agent_mod.BrowserAgent(

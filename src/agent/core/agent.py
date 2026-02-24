@@ -893,8 +893,8 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="hover_element")
-    async def hover_element(ctx: RunContext[WorkerDeps], element_id: str, duration_ms: int = 1000) -> ToolExecutionResult:
-        """Hover over an element for a duration. Use for revealing tooltips, dropdown menus, or hidden content triggered by mouse hover. Use element_id from the page snapshot."""
+    async def hover_element(ctx: RunContext[WorkerDeps], element_id: str, duration_ms: int = 2000) -> ToolExecutionResult:
+        """Hover over an element for a duration to trigger hover-dependent behavior. Use for revealing tooltips, dropdown menus, or hidden content triggered by mouse hover. Default hold time is 2 seconds; increase duration_ms for content that requires longer hover (up to 5 000 ms). Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.hover_element(element_id, ctx.deps.tool_context, duration_ms=duration_ms)
         elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -1137,7 +1137,12 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
     async def watch_for_text(
         ctx: RunContext[WorkerDeps], text: str, timeout_ms: int = 10000
     ) -> ToolExecutionResult:
-        """Watch for literal text to appear on the page, then click its element. Pass the exact text to match (case-sensitive substring, not a regex or pattern). Use for transient content that appears after a delay (toasts, lazy-loaded buttons, async results). Max timeout 10 000 ms."""
+        """Watch for literal text to appear on the page, then click its element.
+Pass the exact text to match (case-sensitive substring).
+Use ONLY for transient elements that appear after a delay — buttons, toasts, or labels that are not yet in the snapshot.
+When tool feedback reports new text appeared (e.g. "New text appeared: ..."), watch for the dynamic content itself, not surrounding labels or prefixes. For example, if a page says "your value will appear here: " and feedback later shows a button with new text, watch for the button text, not the label.
+Do NOT fabricate expected text — only watch for text you have actually seen in tool feedback or page instructions.
+NOT for finding text already visible in the snapshot — use click_element for those. Max timeout 10 000 ms."""
         start = time.perf_counter()
         result = await semantic.watch_for_text(
             text, ctx.deps.tool_context, timeout_ms=timeout_ms
@@ -1957,6 +1962,8 @@ class BrowserAgent:
                             )
                             # Invalidate filter cache so it re-runs with Oracle context
                             self.state.last_filter_fingerprint = None
+                            # Give oracle-guided steps a fair window before abort
+                            self.state.no_progress_steps = max(0, self.state.no_progress_steps - self.agent_config.stuck_threshold)
                             logger.info(f"    recommendation: {advice.recommendation[:120]}")
                             if advice.avoid:
                                 logger.info(f"    avoid: {avoid_str[:120]}")

@@ -553,6 +553,24 @@ async def _read_input_value(
 
 
 
+_CLICK_BY_TEXT_JS = """
+(args) => {
+    const [label, tagName] = args;
+    const candidates = tagName
+        ? document.querySelectorAll(tagName)
+        : document.querySelectorAll('button, a, [role="button"], input[type="submit"]');
+    for (const el of candidates) {
+        if (el.textContent.trim().includes(label)) {
+            el.scrollIntoView({block: 'center', inline: 'center'});
+            el.click();
+            return true;
+        }
+    }
+    return false;
+}
+"""
+
+
 async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     context.last_tool = "click_element"
     context.last_element_id = element_id
@@ -576,6 +594,22 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
         """,
     )
     if not result:
+        # Stale node — try text-based re-lookup in the live DOM
+        label = element.name or (element.text or "").strip()
+        tag = (element.node_name or "").lower() or None
+        if label:
+            try:
+                re_clicked = await context.page.evaluate(
+                    _CLICK_BY_TEXT_JS, [label, tag]
+                )
+            except Exception:
+                re_clicked = False
+            if re_clicked:
+                mutations = await _collect_mutations(session, context.timing.settle_ms)
+                message = _format_verification(
+                    mutations, f"Re-found and clicked element with text '{label}'"
+                )
+                return ToolResult(ok=True, message=message)
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Click failed")
     mutations = await _collect_mutations(session, context.timing.settle_ms)
@@ -583,7 +617,7 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     return ToolResult(ok=True, message=message)
 
 
-async def hover_element(element_id: str, context: ToolContext, *, duration_ms: int = 1000) -> ToolResult:
+async def hover_element(element_id: str, context: ToolContext, *, duration_ms: int = 2000) -> ToolResult:
     context.last_tool = "hover_element"
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)

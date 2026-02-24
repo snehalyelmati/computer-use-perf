@@ -127,6 +127,9 @@ Rules:
 - Use the minimum tool calls needed. Avoid exploratory clicking.
 - Only type values provided in the overall goal or visible in the provided context/snapshot. Never guess or fabricate values.
 - Never repeat a failing action. If an action does not progress, switch approach or target a different element.
+- If multiple consecutive actions produce error feedback (e.g. "Wrong!", negative responses), stop trying similar elements. Reassess the page context and useful text lines for a different approach — look for input fields, hidden elements, or interactive patterns you haven't tried.
+- When tool feedback reports new text appeared on the page and that text names a button or interactive element not in your snapshot, use watch_for_text with that exact text to click it. Watch for the actual dynamic content, not surrounding labels or prefixes.
+- When tool feedback reports new elements were added to the page, you may need to use watch_for_text to interact with them since they won't have element IDs in your current snapshot.
 
 Output requirements:
 - Populate step_goal with a short, outcome-focused sub-goal you attempted this step (used for trace/Oracle).

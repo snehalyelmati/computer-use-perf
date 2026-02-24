@@ -71,7 +71,7 @@ class BrowserConfig:
     """Browser automation configuration."""
 
     headless: bool = False
-    viewport_width: int = 1280
+    viewport_width: int = 2560
     viewport_height: int = 720
     cdp_url: str | None = None
 
@@ -94,7 +94,7 @@ class AgentConfig:
     oracle_interval: int = 5
     oracle_trace_window: int = 15
     max_worker_tool_calls: int = 10
-    widen_on_oracle: bool = False
+    widen_on_oracle: bool = True
     # Snapshot semantics
     desc_text_preview_enabled: bool = True
     desc_text_preview_max_chars: int = 240
