@@ -40,8 +40,14 @@ class ModelPricing:
 
 
 MODEL_PRICES: dict[str, ModelPricing] = {
+    # Cerebras
     "qwen-3-235b-a22b-instruct-2507": ModelPricing(0.60, 1.20),
     "zai-glm-4.7": ModelPricing(2.25, 2.75),
+    "gpt-oss-120b": ModelPricing(0.35, 0.75),
+    # Groq
+    "moonshotai/kimi-k2-instruct-0905": ModelPricing(1.00, 3.00),
+    "qwen/qwen3-32b": ModelPricing(0.29, 0.59),
+    "openai/gpt-oss-120b": ModelPricing(0.15, 0.60),
 }
 
 
