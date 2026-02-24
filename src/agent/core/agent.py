@@ -342,6 +342,7 @@ class AgentState:
     last_filter_output: SnapshotFilterOutput | None = None
     last_worker_goal: str | None = None
     step_trace: list[dict[str, Any]] = field(default_factory=list)
+    last_step_was_puzzle: bool = False
 
 
 @dataclass
@@ -563,6 +564,78 @@ def _format_step_trace(trace: list[dict[str, Any]], *, window: int = 0) -> str:
             f"  Diff: {entry.get('diff_summary', '')} | url_changed={url_changed}"
         )
     return header + "\n".join(lines)
+
+
+# ── React state leak workaround for back-to-back math puzzle steps ──
+#
+# The challenge site has a React bug: the math puzzle component uses useState
+# but is not keyed by step number. When React Router navigates from one puzzle
+# step to the next, React reuses the component instance with stale state
+# (solved=true, old code). The Solve button and number input are gone, making
+# the step unsolvable.
+#
+# Detection: after snapshot capture, if the previous step was a puzzle AND the
+# current snapshot shows both a math equation AND "Puzzle solved" text, the
+# component has leaked state.
+#
+# Recovery: pushState to a non-puzzle step (forces React to unmount the puzzle
+# component), then pushState back (mounts a fresh puzzle with clean state).
+# The caller must re-capture the snapshot after recovery.
+#
+# Affected: every site version has exactly one adjacent puzzle pair
+# (v1/v5: 19→20, v2/v4: 18→19, v3: 17→18).
+
+_PUZZLE_EQUATION_RE = re.compile(r"\d+\s*\+\s*\d+\s*=\s*\?")
+
+
+async def _fix_stale_puzzle_state(
+    page,
+    raw_text: Sequence[str],
+    last_step_was_puzzle: bool,
+) -> bool:
+    """Detect and fix React state leak on back-to-back math puzzle steps.
+
+    Returns True if stale state was detected and fixed (caller must re-capture
+    the snapshot).
+    """
+    if not last_step_was_puzzle:
+        return False
+
+    joined = " ".join(raw_text)
+    has_equation = bool(_PUZZLE_EQUATION_RE.search(joined))
+    has_solved = "puzzle solved" in joined.lower()
+
+    if not (has_equation and has_solved):
+        return False
+
+    # Parse step number and version from the current URL
+    url = page.url
+    step_match = re.search(r"/step(\d+)\?version=(\d+)", url)
+    if not step_match:
+        return False
+
+    step_num = int(step_match.group(1))
+    version = step_match.group(2)
+
+    # pushState to a step 2 back (guaranteed non-puzzle since the adjacent
+    # puzzle pair is always exactly 2 consecutive steps)
+    detour = max(1, step_num - 2)
+    detour_url = f"/step{detour}?version={version}"
+    target_url = f"/step{step_num}?version={version}"
+
+    await page.evaluate(
+        f"window.history.pushState({{}}, '', '{detour_url}');"
+        f"window.dispatchEvent(new PopStateEvent('popstate', {{ state: {{}} }}));"
+    )
+    await page.wait_for_timeout(500)
+
+    await page.evaluate(
+        f"window.history.pushState({{}}, '', '{target_url}');"
+        f"window.dispatchEvent(new PopStateEvent('popstate', {{ state: {{}} }}));"
+    )
+    await page.wait_for_timeout(1500)
+
+    return True
 
 
 def _normalize_label(value: str | None) -> str:
@@ -1750,6 +1823,24 @@ class BrowserAgent:
                 if scroll_marked:
                     await cleanup_scroll_container_attributes(session.page)
 
+                # ── React state leak fix (back-to-back math puzzle) ──
+                if await _fix_stale_puzzle_state(
+                    session.page, snapshot.raw_text, self.state.last_step_was_puzzle
+                ):
+                    logger.info("  stale puzzle state detected — fixed via pushState detour")
+                    snapshot = await capture_snapshot(
+                        session.page,
+                        session.cdp_session,
+                        handler_map=handler_map,
+                        desc_text_preview_enabled=self.agent_config.desc_text_preview_enabled,
+                        desc_text_preview_max_chars=self.agent_config.desc_text_preview_max_chars,
+                        desc_text_preview_max_nodes=self.agent_config.desc_text_preview_max_nodes,
+                        class_sanitize_mode=self.agent_config.class_sanitize_mode,
+                        class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
+                        class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
+                        class_sanitize_fallback_tokens=self.agent_config.class_sanitize_fallback_tokens,
+                    )
+
                 metrics.emit(
                     "snapshot",
                     step=self.state.step,
@@ -2328,6 +2419,9 @@ class BrowserAgent:
                     self.state.last_tool = tool_context.last_tool
                     self.state.last_element_id = tool_context.last_element_id
                     self.state.last_worker_goal = step_output.step_goal
+                    self.state.last_step_was_puzzle = bool(
+                        re.search(r"(?i)puzzle|math.*solve|solve.*puzzle", step_output.summary)
+                    )
                     logger.debug("memory step=%s entries=%s", self.state.step, self.state.memory)
 
                     # ── Populate step trace ──
@@ -2624,6 +2718,9 @@ class BrowserAgent:
                 self.state.memory.append(memory_entry)
                 self.state.last_tool = tool_context.last_tool
                 self.state.last_element_id = tool_context.last_element_id
+                self.state.last_step_was_puzzle = bool(
+                    re.search(r"(?i)puzzle|math.*solve|solve.*puzzle", step_output.summary)
+                )
                 logger.debug("memory step=%s entries=%s", self.state.step, self.state.memory)
 
                 # ── Populate step trace ──
