@@ -71,8 +71,8 @@ class BrowserConfig:
     """Browser automation configuration."""
 
     headless: bool = False
-    viewport_width: int = 2560
-    viewport_height: int = 720
+    viewport_width: int = 1920
+    viewport_height: int = 1080
     cdp_url: str | None = None
 
 
