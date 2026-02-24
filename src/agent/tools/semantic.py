@@ -891,11 +891,14 @@ async def draw(
 async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
     context.last_tool = "wait"
     context.last_element_id = None
+    session = context.cdp_session
+    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
+        session = context.frame_sessions[context.active_frame_id]
     clamped = max(0, min(milliseconds, 10_000))
     buffered = min(clamped + _WAIT_BUFFER_MS, 10_000)
-    injected = await _inject_observer(context.cdp_session)
+    injected = await _inject_observer(session)
     await asyncio.sleep(buffered / 1000)
-    mutations = await _collect_mutations(context.cdp_session, context.timing.settle_ms) if injected else None
+    mutations = await _collect_mutations(session, context.timing.settle_ms) if injected else None
     return ToolResult(ok=True, message=_format_wait_message(buffered, mutations))
 
 
@@ -951,18 +954,29 @@ async def watch_for_text(
 
     clamped = max(500, min(timeout_ms, _WATCH_MAX_TIMEOUT_MS))
 
+    session = context.cdp_session
+    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
+        session = context.frame_sessions[context.active_frame_id]
+    await _inject_observer(session)
+
     try:
         result = await context.page.evaluate(
             _WATCH_FOR_TEXT_JS, [text.strip(), clamped]
         )
     except Exception as exc:
+        await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Watch failed: {exc}")
 
     if result == "found":
-        return ToolResult(ok=True, message=f"Watched and clicked '{text}'")
+        mutations = await _collect_mutations(session, context.timing.settle_ms)
+        base_msg = f"Watched and clicked '{text}'"
+        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+    mutations = await _collect_mutations(session, settle_ms=50)
+    timeout_msg = f"Watch timeout: '{text}' not found within {clamped}ms"
     return ToolResult(
         ok=False,
-        message=f"Watch timeout: '{text}' not found within {clamped}ms",
+        message=_format_verification(mutations, timeout_msg),
     )
 
 
@@ -1166,11 +1180,17 @@ async def take_screenshot(context: ToolContext) -> ToolResult:
 async def execute_js(code: str, context: ToolContext) -> ToolResult:
     context.last_tool = "execute_js"
     context.last_element_id = None
+    session = context.cdp_session
+    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
+        session = context.frame_sessions[context.active_frame_id]
+    await _inject_observer(session)
     try:
         await context.page.evaluate(code)
     except Exception as exc:  # pragma: no cover - runtime safety
+        await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Execute JS failed: {exc}")
-    return ToolResult(ok=True, message="Executed script")
+    mutations = await _collect_mutations(session, context.timing.settle_ms)
+    return ToolResult(ok=True, message=_format_verification(mutations, "Executed script"))
 
 
 async def press_key_combination(keys: list[str], context: ToolContext) -> ToolResult:

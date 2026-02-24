@@ -9,19 +9,22 @@ whitespace trimming.
 
 import asyncio
 import time
-from types import SimpleNamespace
 
 from playwright.async_api import async_playwright
 
-from src.agent.tools.semantic import watch_for_text
+from src.agent.context.snapshot import capture_snapshot, build_element_index
+from src.agent.tools.semantic import ToolContext, watch_for_text
 
 
 # ---------------------------------------------------------------------------
-# Minimal context — watch_for_text only touches .page, .last_tool, .last_element_id
+# Minimal context — watch_for_text needs page + cdp_session for mutation observer
 # ---------------------------------------------------------------------------
 
-def _make_ctx(page):
-    return SimpleNamespace(page=page, last_tool=None, last_element_id=None)
+async def _make_ctx(browser_context, page):
+    cdp = await browser_context.new_cdp_session(page)
+    snapshot = await capture_snapshot(page, cdp)
+    index = build_element_index(snapshot)
+    return ToolContext(page=page, cdp_session=cdp, element_index=index)
 
 
 # ---------------------------------------------------------------------------
@@ -314,14 +317,16 @@ async def _run_one(label, html, text, timeout_ms, expect_ok, expect_title, expec
     """Run a single scenario, return (label, passed, detail)."""
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
-        page = await browser.new_page()
+        browser_context = await browser.new_context(viewport={"width": 800, "height": 600})
+        page = await browser_context.new_page()
         await page.set_content(html)
         await page.wait_for_load_state("domcontentloaded")
 
-        ctx = _make_ctx(page)
+        ctx = await _make_ctx(browser_context, page)
         result = await watch_for_text(text, ctx, timeout_ms=timeout_ms)
 
         title = await page.title()
+        await browser_context.close()
         await browser.close()
 
     ok_match = result.ok == expect_ok
@@ -339,24 +344,26 @@ async def _run_clamping():
         browser = await pw.chromium.launch(headless=True)
 
         # --- low clamp: 100ms request → clamped to 500ms ---
-        page_lo = await browser.new_page()
+        ctx_lo = await browser.new_context(viewport={"width": 800, "height": 600})
+        page_lo = await ctx_lo.new_page()
         await page_lo.set_content("<!DOCTYPE html><html><body><p>x</p></body></html>")
         await page_lo.wait_for_load_state("domcontentloaded")
 
         t0 = time.monotonic()
-        result_lo = await watch_for_text("NOPE", _make_ctx(page_lo), timeout_ms=100)
+        result_lo = await watch_for_text("NOPE", await _make_ctx(ctx_lo, page_lo), timeout_ms=100)
         elapsed_lo = (time.monotonic() - t0) * 1000
-        await page_lo.close()
+        await ctx_lo.close()
 
         # --- high clamp: 99999ms request → clamped to 10000ms ---
-        page_hi = await browser.new_page()
+        ctx_hi = await browser.new_context(viewport={"width": 800, "height": 600})
+        page_hi = await ctx_hi.new_page()
         await page_hi.set_content("<!DOCTYPE html><html><body><p>x</p></body></html>")
         await page_hi.wait_for_load_state("domcontentloaded")
 
         t0 = time.monotonic()
-        result_hi = await watch_for_text("NOPE", _make_ctx(page_hi), timeout_ms=99_999)
+        result_hi = await watch_for_text("NOPE", await _make_ctx(ctx_hi, page_hi), timeout_ms=99_999)
         elapsed_hi = (time.monotonic() - t0) * 1000
-        await page_hi.close()
+        await ctx_hi.close()
 
         await browser.close()
 
