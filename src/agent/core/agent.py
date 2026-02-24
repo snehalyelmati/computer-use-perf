@@ -928,7 +928,7 @@ def build_oracle_agent(model: Model, *, model_settings: dict[str, Any]) -> Agent
 def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
     @agent.tool(name="click_element")
     async def click_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
-        """Click on an element to activate it, follow a link, or toggle a control. Use element_id from the page snapshot."""
+        """Click on an element to activate it, follow a link, or toggle a control. Automatically scrolls the element into view — no need to scroll first. Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.click_element(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -967,7 +967,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
 
     @agent.tool(name="hover_element")
     async def hover_element(ctx: RunContext[WorkerDeps], element_id: str, duration_ms: int = 2000) -> ToolExecutionResult:
-        """Hover over an element for a duration to trigger hover-dependent behavior. Use for revealing tooltips, dropdown menus, or hidden content triggered by mouse hover. Default hold time is 2 seconds; increase duration_ms for content that requires longer hover (up to 5 000 ms). Use element_id from the page snapshot."""
+        """Hover over an element for a duration to trigger hover-dependent behavior. Automatically scrolls the element into view — no need to scroll first. Use for revealing tooltips, dropdown menus, or hidden content triggered by mouse hover. Default hold time is 2 seconds; increase duration_ms for content that requires longer hover (up to 5 000 ms). Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.hover_element(element_id, ctx.deps.tool_context, duration_ms=duration_ms)
         elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -1050,7 +1050,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
 
     @agent.tool(name="type_text")
     async def type_text(ctx: RunContext[WorkerDeps], element_id: str, text: str) -> ToolExecutionResult:
-        """Type text into an input or editable field — clears any existing content first and focuses automatically (no separate click needed). Use for any element that accepts keyboard input, including fields with placeholder hints like 'click to type' or 'enter value'. Use element_id from the page snapshot."""
+        """Type text into an input or editable field — clears any existing content first and focuses automatically (no separate click needed). Automatically scrolls the element into view — no need to scroll first. Use for any element that accepts keyboard input, including fields with placeholder hints like 'click to type' or 'enter value'. Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.type_text(element_id, text, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -1092,7 +1092,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
 
     @agent.tool(name="drag_and_drop")
     async def drag_and_drop(ctx: RunContext[WorkerDeps], source_id: str, target_id: str) -> ToolExecutionResult:
-        """Drag one element onto another. Use for reordering lists, moving cards, adjusting sliders, etc. Use element IDs from the page snapshot."""
+        """Drag one element onto another. Automatically scrolls elements into view — no need to scroll first. Use for reordering lists, moving cards, adjusting sliders, etc. Use element IDs from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.drag_and_drop(source_id, target_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -1132,7 +1132,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
 
     @agent.tool(name="draw")
     async def draw(ctx: RunContext[WorkerDeps], element_id: str, path: list[list[float]]) -> ToolExecutionResult:
-        """Draw a freeform path on a canvas or drawing surface by moving the mouse through a series of coordinate points with the button held. Points are [x, y] pairs relative to the element's top-left corner. Use element_id from the page snapshot."""
+        """Draw a freeform path on a canvas or drawing surface by moving the mouse through a series of coordinate points with the button held. Automatically scrolls the element into view — no need to scroll first. Points are [x, y] pairs relative to the element's top-left corner. Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.draw(element_id, path, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
