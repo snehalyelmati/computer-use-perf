@@ -490,6 +490,13 @@ async def capture_snapshot(
         computed_styles = nodes.get("computedStyles", [])
         parent_indices = nodes.get("parentIndex", [])
         content_document_indices = nodes.get("contentDocumentIndex", [])
+        content_doc_map: dict[int, int] = {}
+        if isinstance(content_document_indices, dict):
+            cdi_keys = content_document_indices.get("index", [])
+            cdi_vals = content_document_indices.get("value", [])
+            for i, node_idx in enumerate(cdi_keys):
+                if i < len(cdi_vals):
+                    content_doc_map[node_idx] = cdi_vals[i]
         frame_id = document.get("frameId")
         document_frame_meta = frame_lookup.get(frame_id or "", {})
         document_frame_url = document_frame_meta.get("url") or None
@@ -583,12 +590,7 @@ async def capture_snapshot(
                     cursor = _decode_string(style_values[0], strings)
 
             element_frame_id = frame_id
-            if isinstance(content_document_indices, dict):
-                child_document_index = content_document_indices.get(index)
-            else:
-                child_document_index = (
-                    content_document_indices[index] if index < len(content_document_indices) else None
-                )
+            child_document_index = content_doc_map.get(index)
             if isinstance(child_document_index, int) and 0 <= child_document_index < len(documents):
                 element_frame_id = documents[child_document_index].get("frameId") or frame_id
 
