@@ -476,9 +476,14 @@ async def capture_snapshot(
     size_hints["ax_nodes"] = int(len(ax_tree.get("nodes", []) or []))
     size_hints["frames"] = int(len(frame_lookup))
 
-    viewport = page.viewport_size or {}
-    viewport_width = viewport.get("width") if isinstance(viewport, dict) else None
-    viewport_height = viewport.get("height") if isinstance(viewport, dict) else None
+    # Use CDP visualViewport (device pixels) to match DOMSnapshot.captureSnapshot
+    # coordinate space. page.viewport_size returns CSS pixels, which on HiDPI/Retina
+    # displays (DPR=2) are half the device-pixel values from DOMSnapshot bounds,
+    # causing the right/bottom half of the screen to be falsely classified as offscreen.
+    layout_metrics = await cdp_session.send("Page.getLayoutMetrics")
+    visual_viewport = layout_metrics.get("visualViewport", {})
+    viewport_width = int(visual_viewport.get("clientWidth", 0)) or None
+    viewport_height = int(visual_viewport.get("clientHeight", 0)) or None
 
     for document in documents:
         nodes = document.get("nodes", {})
