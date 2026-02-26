@@ -8,3 +8,6 @@ Instructions:
 - When a challenge is complete, the page will automatically advance to the next challenge.
 - Continue until all 30 challenges are complete and you reach the confirmation page.
 - NEVER INVENT CODES, USE OLD CODES OR TYPE RANDOM CODES. Each step has its own code visible on the page if you look carefully. You can only proceed if you type in the correct code.
+- Only stop after you reach the COMPLETION CRITERIA.
+
+COMPLETION CRITERIA: Reach the final screen after completing 30 challenges which says 'You are here!!! Congratulations! You've completed the challenge!'.
