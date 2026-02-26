@@ -449,6 +449,34 @@ def _fmt_text_item(item: Any) -> str:
     return f'"{str(item)[:250]}"'
 
 
+_BOOL_ATTR_LABELS: dict[str, tuple[str, str]] = {
+    # attr_name: (present_label, absent_label)
+    "disabled": ("disabled", "enabled"),
+    "hidden": ("hidden", "visible"),
+    "checked": ("checked", "unchecked"),
+    "selected": ("selected", "unselected"),
+    "open": ("open", "closed"),
+    "aria-disabled": ("disabled", "enabled"),
+    "aria-hidden": ("hidden", "visible"),
+    "aria-checked": ("checked", "unchecked"),
+    "aria-selected": ("selected", "unselected"),
+    "aria-expanded": ("expanded", "collapsed"),
+}
+
+def _fmt_attr_val(attr: str, raw_val: str | None, *, is_present: bool) -> str:
+    """Format an attribute value for mutation feedback.
+
+    For boolean HTML attributes (disabled, hidden, checked, etc.),
+    returns semantic labels like 'disabled'/'enabled'.
+    For string-valued attributes, returns the value as-is.
+    """
+    if raw_val is not None and raw_val != "":
+        return raw_val
+    labels = _BOOL_ATTR_LABELS.get(attr)
+    if labels:
+        return labels[0] if is_present else labels[1]
+    return "set" if is_present else "removed"
+
 def _build_change_lines(mutations: dict) -> list[str]:
     """Build diff-style change lines from mutation data."""
     lines: list[str] = []
@@ -467,8 +495,10 @@ def _build_change_lines(mutations: dict) -> list[str]:
     for change in mutations.get("attrChanges", []):
         tag = change.get("tag", "?")
         attr = change.get("attr", "?")
-        old = change.get("old") or "null"
-        new = change.get("new") or "null"
+        raw_old = change.get("old")
+        raw_new = change.get("new")
+        old = _fmt_attr_val(attr, raw_old, is_present=raw_old is not None)
+        new = _fmt_attr_val(attr, raw_new, is_present=raw_new is not None)
         lines.append(f"  ~ {tag}[{attr}]: {old} -> {new}")
 
     # Removed text  (-)

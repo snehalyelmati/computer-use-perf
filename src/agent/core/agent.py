@@ -362,6 +362,7 @@ class AgentState:
     last_worker_goal: str | None = None
     step_trace: list[dict[str, Any]] = field(default_factory=list)
     last_step_was_puzzle: bool = False
+    consecutive_tool_limit_steps: int = 0
 
 
 @dataclass
@@ -370,12 +371,39 @@ class ToolCallTracker:
     first_tool_logged: bool = False
     success_count: int = 0
     failure_count: int = 0
+    calls: list[tuple[str, str | None]] = field(default_factory=list)
 
-    def record(self, ok: bool) -> None:
+    def record(self, ok: bool, *, tool_name: str = "", element_id: str | None = None) -> None:
         if ok:
             self.success_count += 1
         else:
             self.failure_count += 1
+        self.calls.append((tool_name, element_id))
+
+    def calls_summary(self) -> str:
+        """Compact summary of tool calls, collapsing consecutive duplicates."""
+        if not self.calls:
+            return ""
+        parts: list[str] = []
+        prev: tuple[str, str | None] | None = None
+        count = 0
+        for call in self.calls:
+            if call == prev:
+                count += 1
+            else:
+                if prev is not None:
+                    label = prev[0]
+                    if prev[1]:
+                        label += f"({prev[1]})"
+                    parts.append(f"{label}x{count}" if count > 1 else label)
+                prev = call
+                count = 1
+        if prev is not None:
+            label = prev[0]
+            if prev[1]:
+                label += f"({prev[1]})"
+            parts.append(f"{label}x{count}" if count > 1 else label)
+        return ", ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -579,6 +607,11 @@ def _format_step_trace(trace: list[dict[str, Any]], *, window: int = 0) -> str:
         lines.append(
             f"  Result: {entry.get('summary', '')}"
         )
+        if entry.get("tool_calls"):
+            limit_tag = " [LIMIT HIT]" if entry.get("tool_limit_hit") else ""
+            lines.append(
+                f"  Tools: {entry['tool_calls']}{limit_tag}"
+            )
         lines.append(
             f"  Diff: {entry.get('diff_summary', '')} | url_changed={url_changed}"
         )
@@ -748,6 +781,12 @@ def _page_fingerprint(snapshot: Any, *, raw_text_limit: int = 200) -> str:
     material = "\n".join(lines)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
+def _is_disabled(element) -> bool:
+    attrs = getattr(element, "attributes", None) or {}
+    if "disabled" in attrs:
+        return True
+    return attrs.get("aria-disabled", "").lower() == "true"
+
 def _format_element_brief(element: ElementSnapshot) -> str:
     role = (element.role or "").strip()
     name = (element.name or "").strip()
@@ -789,7 +828,10 @@ def _format_element_brief(element: ElementSnapshot) -> str:
     viewport_hint = ""
     if element.in_viewport is False:
         viewport_hint = " offscreen"
-    hints = f"{bbox_hint}{(' ' + frame_hint) if frame_hint else ''}{reason_hint}{viewport_hint}"
+    disabled_hint = ""
+    if _is_disabled(element):
+        disabled_hint = " [disabled]"
+    hints = f"{bbox_hint}{(' ' + frame_hint) if frame_hint else ''}{reason_hint}{viewport_hint}{disabled_hint}"
     return f"{element.stable_id}: {label}{hints}"
 
 def _select_raw_text_lines(
@@ -846,9 +888,9 @@ def _snapshot_diff(
     raw_text_line_max_len: int = 800,
     raw_text_dedupe_prefix_len: int = 240,
     raw_text_dedupe_suffix_len: int = 120,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     if not prev:
-        return "First snapshot (no prior snapshot to diff).", []
+        return "First snapshot (no prior snapshot to diff).", [], []
     prev_map = {el.stable_id: el for el in list(getattr(prev, "elements", []) or [])}
     curr_map = {el.stable_id: el for el in list(getattr(curr, "elements", []) or [])}
     new_ids = sorted([sid for sid in curr_map.keys() if sid not in prev_map])
@@ -857,8 +899,8 @@ def _snapshot_diff(
     for sid in sorted(set(prev_map.keys()) & set(curr_map.keys())):
         a = prev_map[sid]
         b = curr_map[sid]
-        a_key = (_normalize_label(a.role), _normalize_label(a.name), _normalize_label(a.text), _normalize_label(a.node_name))
-        b_key = (_normalize_label(b.role), _normalize_label(b.name), _normalize_label(b.text), _normalize_label(b.node_name))
+        a_key = (_normalize_label(a.role), _normalize_label(a.name), _normalize_label(a.text), _normalize_label(a.node_name), _is_disabled(a))
+        b_key = (_normalize_label(b.role), _normalize_label(b.name), _normalize_label(b.text), _normalize_label(b.node_name), _is_disabled(b))
         if a_key != b_key:
             changed.append(sid)
     # Sort changed elements: priority IDs first (in priority order), then the rest capped
@@ -878,7 +920,14 @@ def _snapshot_diff(
         lines.append(f"+ {_format_element_brief(curr_map[sid])}")
     for sid in changed:
         detail_ids.append(sid)
-        lines.append(f"~ {_format_element_brief(curr_map[sid])}")
+        brief = _format_element_brief(curr_map[sid])
+        prev_dis = _is_disabled(prev_map[sid])
+        curr_dis = _is_disabled(curr_map[sid])
+        if prev_dis and not curr_dis:
+            brief += " [was disabled, NOW ENABLED]"
+        elif not prev_dis and curr_dis:
+            brief += " [was enabled, now DISABLED]"
+        lines.append(f"~ {brief}")
     for sid in removed_ids[:8]:
         detail_ids.append(sid)
         lines.append(f"- {sid}: (removed)")
@@ -910,7 +959,11 @@ def _snapshot_diff(
             lines.append(f"+text {line}")
         for line in removed[:raw_text_detail_limit]:
             lines.append(f"-text {line}")
-    return "\n".join(lines), detail_ids
+    newly_enabled: list[str] = []
+    for sid in sorted(set(prev_map.keys()) & set(curr_map.keys())):
+        if _is_disabled(prev_map[sid]) and not _is_disabled(curr_map[sid]):
+            newly_enabled.append(sid)
+    return "\n".join(lines), detail_ids, newly_enabled
 
 
 def build_orchestrator_agent(model: Model, *, model_settings: dict[str, Any]) -> Agent[None, OrchestratorDecision]:
@@ -981,7 +1034,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             element_id=element_id,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="click_element", element_id=element_id)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="hover_element")
@@ -1021,7 +1074,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             element_id=element_id,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="hover_element", element_id=element_id)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="find_elements")
@@ -1064,7 +1117,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             limit=limit,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(True)
+            ctx.deps.tool_tracker.record(True, tool_name="find_elements")
         return ToolExecutionResult(ok=True, message=message)
 
     @agent.tool(name="type_text")
@@ -1106,7 +1159,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             text_len=len(text),
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="type_text", element_id=element_id)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="drag_and_drop")
@@ -1146,7 +1199,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             target_id=target_id,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="drag_and_drop", element_id=source_id)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="draw")
@@ -1187,7 +1240,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             points_count=len(path),
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="draw", element_id=element_id)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="wait")
@@ -1222,7 +1275,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             requested_ms=milliseconds,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="wait")
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="watch_for_text")
@@ -1269,7 +1322,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             timeout_ms=timeout_ms,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="watch_for_text")
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="inspect_element")
@@ -1307,7 +1360,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             element_id=element_id,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="inspect_element", element_id=element_id)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="search_page_attributes")
@@ -1343,7 +1396,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             query=query,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="search_page_attributes")
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="scroll")
@@ -1400,7 +1453,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             element_id=element_id,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="scroll", element_id=element_id)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="switch_to_iframe")
@@ -1438,7 +1491,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             iframe_id=iframe_id,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="switch_to_iframe", element_id=iframe_id)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="switch_to_main_frame")
@@ -1471,7 +1524,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             duration_ms=duration_ms,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="switch_to_main_frame")
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="navigate_to")
@@ -1508,7 +1561,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             url=url,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="navigate_to")
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="take_screenshot")
@@ -1541,7 +1594,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             duration_ms=duration_ms,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="take_screenshot")
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="execute_js")
@@ -1577,7 +1630,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             code_len=len(code),
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="execute_js")
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="press_key_combination")
@@ -1614,7 +1667,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
             keys=keys,
         )
         if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok)
+            ctx.deps.tool_tracker.record(result.ok, tool_name="press_key_combination")
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
 def build_browser_worker_agent(
@@ -1890,7 +1943,7 @@ class BrowserAgent:
                     if self.state.last_filter_output
                     else None
                 )
-                diff_text, _diff_ids = _snapshot_diff(
+                diff_text, _diff_ids, newly_enabled_ids = _snapshot_diff(
                     prev_snapshot,
                     snapshot,
                     priority_ids=prev_priority_ids,
@@ -2002,12 +2055,13 @@ class BrowserAgent:
                     logger.info(f"Step {self.state.step} end (timed out)")
                     return True
 
-                # ── Oracle (dual trigger: periodic + stuck) ──
+                # ── Oracle (triple trigger: periodic + stuck + tool-limit loop) ──
                 oracle_hint = ""
                 advice: OracleAdvice | None = None
                 should_call_oracle = (
                     (self.agent_config.oracle_interval > 0 and self.state.step % self.agent_config.oracle_interval == 0)
                     or self.state.no_progress_steps >= self.agent_config.stuck_threshold
+                    or self.state.consecutive_tool_limit_steps >= 2
                 )
                 if should_call_oracle and self.state.step_trace:
                     trace_text = _format_step_trace(self.state.step_trace, window=self.agent_config.oracle_trace_window)
@@ -2016,7 +2070,8 @@ class BrowserAgent:
                     oracle_prompt = (
                         f"Overall goal: {self.agent_config.goal}\n\n"
                         f"Current step: {self.state.step}\n"
-                        f"No-progress steps: {self.state.no_progress_steps}\n\n"
+                        f"No-progress steps: {self.state.no_progress_steps}\n"
+                        f"Consecutive tool-limit-hit steps: {self.state.consecutive_tool_limit_steps}\n\n"
                         f"Execution trace:\n{trace_text}\n\n"
                         f"Worker tools: {tool_list}\n{tool_constraint}\n\n"
                         f"Page snapshot (full interactive element tree):\n{full_tree_text}\n"
@@ -2251,6 +2306,19 @@ class BrowserAgent:
                     priority_ids = _filter_ids_ordered(tuple(priority_ids), valid_ids=valid_ids, avoid_ids=avoid_ids)
 
                 kept_ids = set(priority_ids) - avoid_ids
+                # Guardrail: always show elements that just became enabled
+                if newly_enabled_ids:
+                    added_enabled = 0
+                    for sid in newly_enabled_ids:
+                        if sid in valid_ids and sid not in avoid_ids and sid not in kept_ids:
+                            kept_ids.add(sid)
+                            added_enabled += 1
+                    if added_enabled:
+                        logger.debug(
+                            "auto-included %d newly-enabled elements: %s",
+                            added_enabled,
+                            [s for s in newly_enabled_ids if s in kept_ids],
+                        )
                 if oracle_intervened:
                     kept_ids = set(valid_ids) - avoid_ids
                     logger.debug(
@@ -2360,9 +2428,11 @@ class BrowserAgent:
                             )
                     except UsageLimitExceeded:
                         unified_duration_ms = int((time.perf_counter() - unified_started) * 1000)
+                        self.state.consecutive_tool_limit_steps += 1
                         logger.warning(
-                            "  unified: tool call limit reached (%s), ending step",
+                            "  unified: tool call limit reached (%s), ending step (consecutive=%s)",
                             self.agent_config.max_worker_tool_calls,
+                            self.state.consecutive_tool_limit_steps,
                         )
                         step_output = UnifiedStepOutput(
                             done=False,
@@ -2401,6 +2471,7 @@ class BrowserAgent:
                             rationale="",
                         )
                     else:
+                        self.state.consecutive_tool_limit_steps = 0
                         unified_duration_ms = int((time.perf_counter() - unified_started) * 1000)
                         unified_usage = usage_stats_from_result(unified_result)
                         unified_cost = cost_stats_from_result(
@@ -2447,6 +2518,7 @@ class BrowserAgent:
                     logger.debug("memory step=%s entries=%s", self.state.step, self.state.memory)
 
                     # ── Populate step trace ──
+                    tool_limit_hit = step_output.summary.startswith("Tool call limit reached")
                     self.state.step_trace.append({
                         "step": self.state.step,
                         "url": getattr(session.page, "url", "") or "",
@@ -2454,6 +2526,8 @@ class BrowserAgent:
                         "summary": step_output.summary,
                         "diff_summary": diff_text.split("\n")[0] if diff_text else "",
                         "url_changed": prev_url != (getattr(session.page, "url", "") or ""),
+                        "tool_calls": tool_tracker.calls_summary(),
+                        "tool_limit_hit": tool_limit_hit,
                     })
                     logger.debug("step_trace step=%s entries=%s", self.state.step, self.state.step_trace)
 
@@ -2671,9 +2745,11 @@ class BrowserAgent:
                         )
                 except UsageLimitExceeded:
                     worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
+                    self.state.consecutive_tool_limit_steps += 1
                     logger.warning(
-                        "  worker: tool call limit reached (%s), ending step",
+                        "  worker: tool call limit reached (%s), ending step (consecutive=%s)",
                         self.agent_config.max_worker_tool_calls,
+                        self.state.consecutive_tool_limit_steps,
                     )
                     step_output = StepOutput(
                         done=False,
@@ -2706,6 +2782,7 @@ class BrowserAgent:
                         summary=f"Worker LLM error: {err_name}",
                     )
                 else:
+                    self.state.consecutive_tool_limit_steps = 0
                     worker_duration_ms = int((time.perf_counter() - worker_started) * 1000)
                     worker_usage = usage_stats_from_result(worker_result)
                     worker_cost = cost_stats_from_result(worker_result, self.llm_config.worker_model or self.llm_config.model)
@@ -2746,6 +2823,7 @@ class BrowserAgent:
                 logger.debug("memory step=%s entries=%s", self.state.step, self.state.memory)
 
                 # ── Populate step trace ──
+                tool_limit_hit = step_output.summary.startswith("Tool call limit reached")
                 self.state.step_trace.append({
                     "step": self.state.step,
                     "url": getattr(session.page, "url", "") or "",
@@ -2753,6 +2831,8 @@ class BrowserAgent:
                     "summary": step_output.summary,
                     "diff_summary": diff_text.split("\n")[0] if diff_text else "",
                     "url_changed": prev_url != (getattr(session.page, "url", "") or ""),
+                    "tool_calls": tool_tracker.calls_summary(),
+                    "tool_limit_hit": tool_limit_hit,
                 })
                 logger.debug("step_trace step=%s entries=%s", self.state.step, self.state.step_trace)
 
