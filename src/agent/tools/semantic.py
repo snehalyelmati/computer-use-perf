@@ -79,6 +79,8 @@ _OBSERVER_INJECT_JS = """
     removedElements: [],
     attrChanges: [],
   };
+  const TEXT_CAP = 20;
+  const charDataNodes = new Map();  // node -> index in addedText
   const IGNORED_TAGS = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META']);
   const TRACKED_ATTRS = new Set([
     'aria-expanded','aria-checked','aria-selected','aria-hidden',
@@ -107,22 +109,26 @@ _OBSERVER_INJECT_JS = """
     return '';
   }
 
-  const observer = new MutationObserver((mutations) => {
+  const callback = (mutations) => {
     for (const m of mutations) {
       if (m.type === 'childList') {
         for (const node of m.addedNodes) {
           if (node.nodeType === 1 && IGNORED_TAGS.has(node.tagName)) continue;
           const text = textOf(node);
-          if (text && data.addedText.length < 20)
-            data.addedText.push(text.slice(0, 250));
+          if (text && data.addedText.length < TEXT_CAP) {
+            const tag = node.nodeType === 1 ? (node.tagName || '').toLowerCase() : '';
+            data.addedText.push({t: text.slice(0, 250), tag});
+          }
           if (node.nodeType === 1 && data.addedElements.length < 10)
             data.addedElements.push(tagOf(node));
         }
         for (const node of m.removedNodes) {
           if (node.nodeType === 1 && IGNORED_TAGS.has(node.tagName)) continue;
           const text = textOf(node);
-          if (text && data.removedText.length < 10)
-            data.removedText.push(text.slice(0, 250));
+          if (text && data.removedText.length < 10) {
+            const tag = node.nodeType === 1 ? (node.tagName || '').toLowerCase() : '';
+            data.removedText.push({t: text.slice(0, 250), tag});
+          }
           if (node.nodeType === 1 && data.removedElements.length < 10)
             data.removedElements.push(tagOf(node));
         }
@@ -137,11 +143,21 @@ _OBSERVER_INJECT_JS = """
         }
       } else if (m.type === 'characterData') {
         const text = (m.target.textContent || '').trim();
-        if (text && data.addedText.length < 20)
-          data.addedText.push(text.slice(0, 250));
+        if (text) {
+          const parentTag = (m.target.parentElement?.tagName || '').toLowerCase();
+          const existing = charDataNodes.get(m.target);
+          if (existing !== undefined) {
+            data.addedText[existing] = {t: text.slice(0, 250), tag: parentTag};
+          } else if (data.addedText.length < TEXT_CAP) {
+            charDataNodes.set(m.target, data.addedText.length);
+            data.addedText.push({t: text.slice(0, 250), tag: parentTag});
+          }
+        }
       }
     }
-  });
+  };
+
+  const observer = new MutationObserver(callback);
 
   observer.observe(document.body || document.documentElement, {
     childList: true,
@@ -153,24 +169,27 @@ _OBSERVER_INJECT_JS = """
     attributeFilter: Array.from(TRACKED_ATTRS),
   });
 
-  window.__mutObs = { observer, data, startUrl: location.href };
+  window.__mutObs = { observer, data, callback, startUrl: location.href };
 })();
 """
 
 _OBSERVER_COLLECT_JS = """
 (() => {
   if (!window.__mutObs) return null;
-  const { observer, data, startUrl } = window.__mutObs;
+  const { observer, data, callback, startUrl } = window.__mutObs;
+  const pending = observer.takeRecords();
+  if (pending.length > 0) callback(pending);
   observer.disconnect();
   delete window.__mutObs;
 
   const seen = new Set();
   const uniqueAdded = [];
-  for (const t of data.addedText) {
-    const key = t.toLowerCase().trim();
+  for (const item of data.addedText) {
+    const text = typeof item === 'string' ? item : item.t;
+    const key = text.toLowerCase().trim();
     if (!seen.has(key) && key.length > 0) {
       seen.add(key);
-      uniqueAdded.push(t);
+      uniqueAdded.push(item);
     }
   }
 
@@ -421,116 +440,68 @@ async def _collect_mutations(
         return None
 
 
-def _format_verification(mutations: dict | None, base_message: str) -> str:
-    """Append a concise DOM-change summary to the base tool result message."""
-    if mutations is None:
-        return base_message
+def _fmt_text_item(item: Any) -> str:
+    """Format a text item (string or {t, tag} dict) for diff output."""
+    if isinstance(item, dict):
+        text = (item.get("t") or "")[:250]
+        tag = item.get("tag") or ""
+        return f'"{text}" ({tag})' if tag else f'"{text}"'
+    return f'"{str(item)[:250]}"'
 
-    parts: list[str] = [base_message]
+
+def _build_change_lines(mutations: dict) -> list[str]:
+    """Build diff-style change lines from mutation data."""
+    lines: list[str] = []
 
     # URL change
     start_url = mutations.get("startUrl", "")
     current_url = mutations.get("currentUrl", "")
     if start_url and current_url and start_url != current_url:
-        parts.append(f"Page navigated to: {current_url}")
+        lines.append(f"  navigated to: {current_url}")
 
-    # Attribute changes
-    attr_changes = mutations.get("attrChanges", [])
-    if attr_changes:
-        attr_lines = []
-        for change in attr_changes:
-            tag = change.get("tag", "?")
-            attr = change.get("attr", "?")
-            old = change.get("old") or "null"
-            new = change.get("new") or "null"
-            attr_lines.append(f"{tag}[{attr}]: {old} -> {new}")
-        parts.append("Attribute changes: " + "; ".join(attr_lines))
+    # Added text  (+)
+    for item in mutations.get("addedText", []):
+        lines.append(f"  + {_fmt_text_item(item)}")
 
-    # New text
-    added_text = mutations.get("addedText", [])
-    if added_text:
-        items = [t[:250] for t in added_text]
-        parts.append("New text appeared: " + " | ".join(items))
+    # Attribute changes  (~)
+    for change in mutations.get("attrChanges", []):
+        tag = change.get("tag", "?")
+        attr = change.get("attr", "?")
+        old = change.get("old") or "null"
+        new = change.get("new") or "null"
+        lines.append(f"  ~ {tag}[{attr}]: {old} -> {new}")
 
-    # Removed text
-    removed_text = mutations.get("removedText", [])
-    if removed_text:
-        items = [t[:250] for t in removed_text]
-        parts.append("Text removed: " + " | ".join(items))
+    # Removed text  (-)
+    for item in mutations.get("removedText", []):
+        lines.append(f"  - {_fmt_text_item(item)}")
 
-    # New elements (only if no text to avoid redundancy)
-    added_elements = mutations.get("addedElements", [])
-    if added_elements and not added_text:
-        parts.append(
-            f"{len(added_elements)} element(s) added: "
-            + ", ".join(added_elements)
-        )
+    return lines
 
-    # Removed elements (only if no text to avoid redundancy)
-    removed_elements = mutations.get("removedElements", [])
-    if removed_elements and not removed_text:
-        parts.append(
-            f"{len(removed_elements)} element(s) removed: "
-            + ", ".join(removed_elements)
-        )
 
-    if len(parts) == 1:
-        parts.append("No visible DOM changes detected")
+def _format_verification(mutations: dict | None, base_message: str) -> str:
+    """Append a multi-line diff-style DOM-change summary to the base tool result message."""
+    if mutations is None:
+        return base_message
 
-    return ". ".join(parts)
+    change_lines = _build_change_lines(mutations)
+
+    if change_lines:
+        return base_message + "\nDOM changes:\n" + "\n".join(change_lines)
+    else:
+        return base_message + "\nNo DOM changes."
 
 def _format_wait_message(wait_ms: int, mutations: dict | None) -> str:
-    wait_seconds = wait_ms / 1000.0
-    parts = [f"Waited {wait_ms}ms"]
+    base = f"Waited {wait_ms}ms."
 
     if not mutations:
-        parts.append(f"No changes during wait of {wait_seconds:.1f} seconds.")
-        return "\n".join(parts)
+        return base + "\nNo DOM changes."
 
-    detail_lines: list[str] = []
-    start_url = mutations.get("startUrl", "")
-    current_url = mutations.get("currentUrl", "")
-    if start_url and current_url and start_url != current_url:
-        detail_lines.append(f"Page navigated to: {current_url}")
+    change_lines = _build_change_lines(mutations)
 
-    attr_changes = mutations.get("attrChanges", [])
-    if attr_changes:
-        attr_lines = []
-        for change in attr_changes:
-            tag = change.get("tag", "?")
-            attr = change.get("attr", "?")
-            old = change.get("old") or "null"
-            new = change.get("new") or "null"
-            attr_lines.append(f"{tag}[{attr}]: {old} -> {new}")
-        detail_lines.append("Attribute changes: " + "; ".join(attr_lines))
-
-    added_text = mutations.get("addedText", [])
-    if added_text:
-        items = [t[:250] for t in added_text]
-        detail_lines.append("New text appeared: " + " | ".join(items))
-
-    removed_text = mutations.get("removedText", [])
-    if removed_text:
-        items = [t[:250] for t in removed_text]
-        detail_lines.append("Text removed: " + " | ".join(items))
-
-    added_elements = mutations.get("addedElements", [])
-    if added_elements:
-        items = [t[:80] for t in added_elements]
-        detail_lines.append("Elements added: " + " | ".join(items))
-
-    removed_elements = mutations.get("removedElements", [])
-    if removed_elements:
-        items = [t[:80] for t in removed_elements]
-        detail_lines.append("Elements removed: " + " | ".join(items))
-
-    if not detail_lines:
-        parts.append(f"No changes during wait of {wait_seconds:.1f} seconds.")
-        return "\n".join(parts)
-
-    parts.append(f"Changes during wait of {wait_seconds:.1f} seconds:")
-    parts.extend(detail_lines)
-    return "\n".join(parts)
+    if change_lines:
+        return base + "\nDOM changes:\n" + "\n".join(change_lines)
+    else:
+        return base + "\nNo DOM changes."
 
 
 async def _read_input_value(

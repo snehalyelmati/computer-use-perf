@@ -196,41 +196,59 @@ def _compact_feedback(message: str, base_prefix: str) -> str | None:
 
     Returns a short string like ``'→ no DOM changes'`` or ``None`` if no
     verification data is present.
+
+    Parses the newline-delimited diff format::
+
+        Base message.
+        DOM changes:
+          + "text" (tag)
+          ~ tag[attr]: old -> new
+          - "text" (tag)
     """
-    # Verification is appended after the base message with ". " separators.
-    idx = message.find(". ", len(base_prefix) - 5) if base_prefix else message.find(". ")
-    if idx == -1:
-        return None
-    tail = message[idx + 2:]
-    if not tail:
+    lines = message.split("\n")
+    if len(lines) <= 1:
         return None
 
     parts: list[str] = []
-    for segment in tail.split(". "):
-        seg = segment.strip()
-        if not seg:
-            continue
-        # Shorten common prefixes for compactness
-        if seg.startswith("Scroll position changed by "):
-            seg = seg.replace("Scroll position changed by ", "moved ")
-        elif seg.startswith("Page navigated to: "):
-            seg = seg.replace("Page navigated to: ", "nav→")
-        elif seg.startswith("Attribute changes: "):
-            seg = seg.replace("Attribute changes: ", "attr: ")
-        elif seg.startswith("New text appeared: "):
-            seg = seg.replace("New text appeared: ", "text+: ")
-        elif seg.startswith("Text removed: "):
-            seg = seg.replace("Text removed: ", "text-: ")
-        elif seg.startswith("Page title: "):
-            seg = seg.replace("Page title: ", "title: ")
-        elif seg.startswith("No visible DOM changes detected"):
-            seg = "no DOM changes"
-        elif seg.startswith("Current value: "):
-            seg = seg.replace("Current value: ", "val=")
-        elif seg.startswith("WARNING: scroll position did not change"):
-            seg = "AT BOUNDARY"
-        parts.append(seg)
 
+    # Parse diff lines (everything after the first line)
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped or stripped == "DOM changes:":
+            continue
+        if stripped == "No DOM changes.":
+            parts.append("no DOM changes")
+        elif stripped.startswith("+ "):
+            parts.append(f"text+: {stripped[2:]}")
+        elif stripped.startswith("~ "):
+            parts.append(f"attr: {stripped[2:]}")
+        elif stripped.startswith("- "):
+            parts.append(f"text-: {stripped[2:]}")
+        elif stripped.startswith("navigated to: "):
+            parts.append(f"nav→{stripped[14:]}")
+
+    # Extract scroll/value info from the base message first line
+    first_line = lines[0]
+    idx = first_line.find(". ", max(0, len(base_prefix) - 5)) if base_prefix else first_line.find(". ")
+    if idx != -1:
+        for seg in first_line[idx + 2:].split(". "):
+            seg = seg.strip()
+            if not seg:
+                continue
+            if seg.startswith("Scroll position changed by "):
+                seg = seg.replace("Scroll position changed by ", "moved ")
+            elif seg.startswith("Current value: "):
+                seg = seg.replace("Current value: ", "val=")
+            elif seg.startswith("WARNING: scroll position did not change"):
+                seg = "AT BOUNDARY"
+            elif seg.startswith("Page title: "):
+                seg = seg.replace("Page title: ", "title: ")
+            else:
+                continue
+            parts.insert(0, seg)
+
+    if not parts:
+        return None
     result = "; ".join(parts)
     # Cap at 120 chars to keep log lines scannable
     if len(result) > 120:
