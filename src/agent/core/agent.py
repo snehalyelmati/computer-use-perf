@@ -51,6 +51,7 @@ from src.agent.context.snapshot import (
 from src.agent.metrics import (
     MetricsRecorder,
     cost_stats_from_result,
+    get_git_commit,
     new_run_id,
     prepare_run_dir,
     usage_stats_from_result,
@@ -1717,12 +1718,15 @@ class BrowserAgent:
         total_input_tokens = 0
         total_output_tokens = 0
         total_cost_usd: float | None = None
+        git_commit = get_git_commit()
         metrics.emit(
             "run_start",
             target_url=self.agent_config.target_url,
             goal=self.agent_config.goal,
             max_steps=self.agent_config.max_steps,
             model=self.llm_config.model,
+            provider=self.llm_config.provider,
+            git_commit=git_commit,
         )
         logger.info(
             "Run start run_id=%s url=%s max_steps=%s model=%s worker_model=%s filter_model=%s oracle_model=%s",
@@ -2824,6 +2828,9 @@ class BrowserAgent:
                     log_dir=run_dir,
                     run_id=run_id,
                     summary={
+                        "git_commit": git_commit,
+                        "provider": self.llm_config.provider,
+                        "model": self.llm_config.model,
                         "duration_ms": run_duration_ms,
                         "retry_wait_ms": retry_wait_ms,
                         "active_duration_ms": active_duration_ms,

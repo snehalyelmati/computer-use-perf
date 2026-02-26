@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 import uuid
@@ -19,6 +20,21 @@ from src.agent.config import MODEL_PRICES
 
 
 _RUN_DIR_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def get_git_commit() -> str:
+    """Return the short git commit hash, or ``"unknown"`` on failure."""
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return "unknown"
 
 
 def new_run_id() -> str:

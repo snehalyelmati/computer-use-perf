@@ -61,6 +61,11 @@ Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlin
 - All HTML attributes are stored in `ElementSnapshot.attributes`, but only 9 are shown to the LLM in `format_snapshot_for_llm()`
 - **Handler introspection** (`src/agent/context/handlers.py`): a pre-snapshot `page.evaluate()` extracts JS event handler source from inline handlers and framework internals (React/Vue/Angular), stamps elements with `data-agent-hid`, and the snapshot correlates them. Handler hints appear as `[click:fn(); change:fn()]` in the LLM snapshot. Disable with `--no-handlers`.
 
+## Results Tracking
+
+- After a meaningful agent run, regenerate results: `uv run scripts/generate_results.py`
+- Review `results.md` diff before committing to track progress/regressions
+
 ## Architecture
 
 - Entry point: `main.py`
