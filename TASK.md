@@ -10,4 +10,6 @@ Instructions:
 - NEVER INVENT CODES, USE OLD CODES OR TYPE RANDOM CODES. Each step has its own code visible on the page if you look carefully. You can only proceed if you type in the correct code.
 - Only stop after you reach the COMPLETION CRITERIA.
 
-COMPLETION CRITERIA: Reach the final screen after completing 30 challenges which says 'You are here!!! Congratulations! You've completed the challenge!'.
+COMPLETION CRITERIA: 
+1. Complete 30 challenges.
+2. Reach the final screen after completing 30 challenges which says 'YOU ARE HERE!!! Congratulations! You've completed the challenge!'.
