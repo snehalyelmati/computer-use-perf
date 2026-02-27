@@ -555,6 +555,10 @@ def _model_settings(config: LLMConfig) -> dict[str, Any]:
     }
     if config.provider == "openrouter":
         settings["openrouter_usage"] = {"include": True}
+        settings["openrouter_provider"] = {
+            "order": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-vertex", "together"],
+            "only": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-vertex", "together"],
+        }
         if config.reasoning_effort and config.reasoning_effort != "none":
             settings["openrouter_reasoning"] = {"effort": config.reasoning_effort}
     return settings
