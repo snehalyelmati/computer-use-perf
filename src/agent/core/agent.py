@@ -556,8 +556,8 @@ def _model_settings(config: LLMConfig) -> dict[str, Any]:
     if config.provider == "openrouter":
         settings["openrouter_usage"] = {"include": True}
         settings["openrouter_provider"] = {
-            "order": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-vertex", "together"],
-            "only": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-vertex", "together"],
+            "order": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-vertex", "together", "xai"],
+            "only": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-vertex", "together", "xai"],
         }
         if config.reasoning_effort and config.reasoning_effort != "none":
             settings["openrouter_reasoning"] = {"effort": config.reasoning_effort}
@@ -1983,6 +1983,9 @@ class BrowserAgent:
             goal=self.agent_config.goal,
             max_steps=self.agent_config.max_steps,
             model=self.llm_config.model,
+            worker_model=self.llm_config.worker_model,
+            filter_model=self.llm_config.filter_model,
+            oracle_model=self.llm_config.oracle_model,
             provider=self.llm_config.provider,
             git_commit=git_commit,
         )
@@ -3154,6 +3157,9 @@ class BrowserAgent:
                         "git_commit": git_commit,
                         "provider": self.llm_config.provider,
                         "model": self.llm_config.model,
+                        "worker_model": self.llm_config.worker_model,
+                        "filter_model": self.llm_config.filter_model,
+                        "oracle_model": self.llm_config.oracle_model,
                         "duration_ms": run_duration_ms,
                         "retry_wait_ms": retry_wait_ms,
                         "active_duration_ms": active_duration_ms,

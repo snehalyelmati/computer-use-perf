@@ -77,6 +77,9 @@ def _parse_run(run_dir: Path) -> dict | None:
         "git_commit": summary.get("git_commit"),
         "provider": summary.get("provider"),
         "model": summary.get("model"),
+        "worker_model": summary.get("worker_model"),
+        "filter_model": summary.get("filter_model"),
+        "oracle_model": summary.get("oracle_model"),
     }
 
     # Parse metrics.jsonl for run_start info and max challenge step
@@ -102,6 +105,12 @@ def _parse_run(run_dir: Path) -> dict | None:
                         result["provider"] = event.get("provider")
                     if not result["git_commit"]:
                         result["git_commit"] = event.get("git_commit")
+                    if not result["worker_model"]:
+                        result["worker_model"] = event.get("worker_model")
+                    if not result["filter_model"]:
+                        result["filter_model"] = event.get("filter_model")
+                    if not result["oracle_model"]:
+                        result["oracle_model"] = event.get("oracle_model")
 
                 elif event.get("event") == "snapshot":
                     url = event.get("url", "")
@@ -202,10 +211,10 @@ def generate() -> str:
     # Summary table
     lines.append("## Runs\n")
     lines.append(
-        "| Date | Run ID | Commit | Provider | Model | Steps Reached | Stuck On | Duration | Tokens | Cost | Stop Reason |"
+        "| Date | Run ID | Commit | Provider | Model | Worker | Filter | Oracle | Steps Reached | Stuck On | Duration | Tokens | Cost | Stop Reason |"
     )
     lines.append(
-        "|------|--------|--------|----------|-------|---------------|----------|----------|--------|------|-------------|"
+        "|------|--------|--------|----------|-------|--------|--------|--------|---------------|----------|----------|--------|------|-------------|"
     )
 
     for r in runs:
@@ -222,6 +231,15 @@ def generate() -> str:
         provider = r.get("provider") or "—"
         model = r.get("model") or "—"
         model_short = model.split("/")[-1] if "/" in model else model
+
+        def _short(m: str | None) -> str:
+            if not m:
+                return "—"
+            return m.split("/")[-1] if "/" in m else m
+
+        worker_model = _short(r.get("worker_model"))
+        filter_model = _short(r.get("filter_model"))
+        oracle_model = _short(r.get("oracle_model"))
 
         max_step = r.get("max_challenge_step", 0)
         steps_reached = _steps_reached_label(max_step)
@@ -240,7 +258,7 @@ def generate() -> str:
         stop_reason = r.get("stop_reason") or "—"
 
         lines.append(
-            f"| {date_str} | `{run_id_short}` | {commit} | {provider} | {model_short} | {steps_reached} | {stuck_on} | {duration} | {tokens} | {cost} | {stop_reason} |"
+            f"| {date_str} | `{run_id_short}` | {commit} | {provider} | {model_short} | {worker_model} | {filter_model} | {oracle_model} | {steps_reached} | {stuck_on} | {duration} | {tokens} | {cost} | {stop_reason} |"
         )
 
     return "\n".join(lines) + "\n"
