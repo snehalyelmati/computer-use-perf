@@ -98,6 +98,7 @@ Goal: {goal}
 
 You will be given a page snapshot containing interactive elements with stable IDs.
 - Element IDs in the snapshot always start with "el_" (e.g. el_a1b2c3d4e5f6). Always use the full ID including the prefix.
+- The snapshot is grouped by frame and includes an ACTIVE FRAME header. If an iframe is active, tools may reject element IDs from other frames; use switch_to_main_frame() or switch_to_iframe(...) to change the active frame.
 - Execute the goal using the element IDs specified by the orchestrator. When the goal references specific IDs, use those directly.
 - When the goal does not specify exact elements (e.g. "fill in the form"), use the tree structure, handler hints, and element attributes to identify the right targets.
 - Use the minimum tool calls needed. Do not explore unnecessarily.
@@ -126,6 +127,7 @@ You will be given:
 
 Rules:
 - Do not invent element IDs. If the needed element is not in the snapshot, use available tools to navigate or wait for the page to update.
+- The snapshot is grouped by frame and includes an ACTIVE FRAME header. If an iframe is active, some tools may require switching back with switch_to_main_frame() to interact with main-frame elements.
 - Use the tree structure and handler hints like [click:fn(); change:fn()] to disambiguate similar elements and avoid distractions (cookie banners, ads, unrelated UI).
 - Use the diff and memory to avoid repeating failed approaches and to notice state changes.
 - When an ORACLE DIRECTIVE is present, you MUST follow it.

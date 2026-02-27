@@ -1458,7 +1458,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
 
     @agent.tool(name="switch_to_iframe")
     async def switch_to_iframe(ctx: RunContext[WorkerDeps], iframe_id: str) -> ToolExecutionResult:
-        """Switch into an iframe to interact with its elements. Required before clicking or typing inside an iframe. Use element_id from the page snapshot."""
+        """Set the ACTIVE FRAME to an iframe. Use when you need wait/watch_for_text/execute_js/press_key_combination to target that iframe or when a frame error tells you to switch. Use element_id from the page snapshot."""
         start = time.perf_counter()
         result = await semantic.switch_to_iframe(iframe_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -2028,6 +2028,7 @@ class BrowserAgent:
                 full_tree_text = format_snapshot_for_llm(
                     snapshot,
                     max_elements=self.agent_config.max_elements,
+                    active_frame_id=self.state.active_frame_id,
                     class_sanitize_mode=self.agent_config.class_sanitize_mode,
                     class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
                     class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
@@ -2385,6 +2386,7 @@ class BrowserAgent:
                         max_elements=self.agent_config.max_elements,
                         query=unified_query or None,
                         priority_ids=priority_ids,
+                        active_frame_id=self.state.active_frame_id,
                         class_sanitize_mode=self.agent_config.class_sanitize_mode,
                         class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
                         class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
@@ -2573,6 +2575,7 @@ class BrowserAgent:
                     max_elements=self.agent_config.max_elements,
                     query=orchestrator_query or None,
                     priority_ids=priority_ids,
+                    active_frame_id=self.state.active_frame_id,
                     class_sanitize_mode=self.agent_config.class_sanitize_mode,
                     class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
                     class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
@@ -2702,6 +2705,7 @@ class BrowserAgent:
                     max_elements=self.agent_config.max_elements,
                     query=(decision.worker_goal or "")[:600] or None,
                     priority_ids=priority_ids,
+                    active_frame_id=self.state.active_frame_id,
                     class_sanitize_mode=self.agent_config.class_sanitize_mode,
                     class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
                     class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,

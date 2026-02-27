@@ -749,6 +749,7 @@ def format_snapshot_for_llm(
     max_elements: int = 200,
     query: str | None = None,
     priority_ids: Sequence[str] | None = None,
+    active_frame_id: str | None = None,
     class_sanitize_mode: Literal["off", "aggressive"] = "aggressive",
     class_sanitize_max_tokens: int = 6,
     class_sanitize_max_chars: int = 80,
@@ -762,10 +763,69 @@ def format_snapshot_for_llm(
     lines.append(f"URL: {snapshot.url}")
     if title:
         lines.append(f"Title: {title}")
+
+    # Frame context header (ACTIVE FRAME) and sectioning
+    all_elements = list(snapshot.elements)
+    frame_iframe_ids: dict[str, str] = {}
+    frame_hosts: dict[str, str] = {}
+    frame_total_counts: dict[str | None, int] = {}
+    for el in all_elements:
+        fid = el.frame_id
+        frame_total_counts[fid] = frame_total_counts.get(fid, 0) + 1
+        if fid and (el.node_name or "").upper() == "IFRAME" and fid not in frame_iframe_ids:
+            frame_iframe_ids[fid] = el.stable_id
+        if fid and fid not in frame_hosts:
+            host = _hostname(el.frame_url)
+            if host:
+                frame_hosts[fid] = host
+
+    def _main_frame_id() -> str | None:
+        # Prefer a frame id that is not referenced by any iframe element (child frame).
+        # This avoids mislabeling MAIN on pages that embed an iframe with the same URL as the page.
+        child_frame_ids = set(frame_iframe_ids)
+
+        def _pick(exclude: set[str]) -> str | None:
+            by_url: dict[str, int] = {}
+            for el in all_elements:
+                fid = el.frame_id
+                if not fid or fid in exclude:
+                    continue
+                if el.frame_url and el.frame_url == snapshot.url:
+                    by_url[fid] = by_url.get(fid, 0) + 1
+            if by_url:
+                return sorted(by_url.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            by_total: dict[str, int] = {}
+            for el in all_elements:
+                fid = el.frame_id
+                if not fid or fid in exclude:
+                    continue
+                by_total[fid] = by_total.get(fid, 0) + 1
+            if by_total:
+                return sorted(by_total.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            return None
+
+        return _pick(child_frame_ids) or _pick(set())
+
+    main_frame_id = _main_frame_id()
+    effective_active_frame_id = active_frame_id or main_frame_id
+
+    def _frame_label(fid: str | None) -> str:
+        if not fid:
+            return "UNKNOWN"
+        if fid in frame_iframe_ids:
+            return frame_iframe_ids[fid]
+        if fid in frame_hosts:
+            return frame_hosts[fid]
+        return fid
+
+    if active_frame_id is None or (main_frame_id and effective_active_frame_id == main_frame_id):
+        lines.append("ACTIVE FRAME: MAIN")
+    else:
+        lines.append(f"ACTIVE FRAME: IFRAME {_frame_label(effective_active_frame_id)}")
     lines.append("")
     lines.append(f"Interactive elements (showing up to {max_elements}):")
 
-    elements = list(snapshot.elements)
+    elements = list(all_elements)
     if priority_ids:
         index = {element.stable_id: element for element in elements}
         prioritized = [index[stable_id] for stable_id in priority_ids if stable_id in index]
@@ -829,7 +889,7 @@ def format_snapshot_for_llm(
         key = _label_key(el)
         label_counts[key] = label_counts.get(key, 0) + 1
 
-    def _element_label(element: ElementSnapshot) -> str:
+    def _element_label(element: ElementSnapshot, *, include_frame_hint: bool) -> str:
         role = (element.role or "").strip()
         name = (element.name or "").strip()
         text = (element.text or "").strip()
@@ -874,7 +934,7 @@ def format_snapshot_for_llm(
             label = f"{label} ({attr_str})"
         # Hints
         hints_parts: list[str] = []
-        if element.frame_name or element.frame_url:
+        if include_frame_hint and (element.frame_name or element.frame_url):
             fn = element.frame_name or ""
             fu = element.frame_url or ""
             hints_parts.append(f"[frame: {fn} {fu}]".strip())
@@ -897,81 +957,115 @@ def format_snapshot_for_llm(
             handler_str = " " + format_handlers_for_llm(element.handlers)
         return f"- {element.stable_id}: {label}{hints}{handler_str}"
 
-    # --- Try tree output ---
-    has_chains = any(el.parent_chain for el in elements)
-    if not has_chains:
-        # Fallback: flat list (no parent chain data available)
-        for element in elements:
-            lines.append(_element_label(element))
-        return "\n".join(lines).strip()
+    def _format_elements_for_frame(
+        frame_elements: list[ElementSnapshot], *, include_frame_hint: bool
+    ) -> list[str]:
+        """Format a list of elements (single frame) as tree or flat list."""
+        if not frame_elements:
+            return []
+        has_chains = any(el.parent_chain for el in frame_elements)
+        if not has_chains:
+            return [_element_label(element, include_frame_hint=include_frame_hint) for element in frame_elements]
 
-    # Build a tree from parent chains.
-    # Tree node: dict with "tag", "label", "children" (ordered dict by node_idx),
-    #   "elements" (list of ElementSnapshot in DOM order)
-    root: dict = {"tag": "", "label": "", "children": {}, "elements": [], "idx": -1}
+        root: dict = {"tag": "", "label": "", "children": {}, "elements": [], "idx": -1}
+        for element in frame_elements:
+            chain = element.parent_chain or ()
+            node = root
+            for node_idx, tag, label in chain:
+                if node_idx not in node["children"]:
+                    node["children"][node_idx] = {
+                        "tag": tag, "label": label, "children": {}, "elements": [], "idx": node_idx,
+                    }
+                node = node["children"][node_idx]
+            node["elements"].append(element)
 
-    for element in elements:
-        chain = element.parent_chain or ()
-        node = root
-        for node_idx, tag, label in chain:
-            if node_idx not in node["children"]:
-                node["children"][node_idx] = {
-                    "tag": tag, "label": label, "children": {}, "elements": [], "idx": node_idx,
-                }
-            node = node["children"][node_idx]
-        node["elements"].append(element)
+        def _is_meaningful(node: dict) -> bool:
+            if node["label"]:
+                return True
+            if node["tag"] in _SEMANTIC_TAGS:
+                return True
+            child_count = len(node["children"]) + len(node["elements"])
+            if child_count > 1:
+                return True
+            return False
 
-    # Prune: a container is "meaningful" if it has id/class, is semantic, or is a
-    # branching point (multiple child subtrees with interactive elements).
-    def _is_meaningful(node: dict) -> bool:
-        if node["label"]:
-            return True
-        if node["tag"] in _SEMANTIC_TAGS:
-            return True
-        child_count = len(node["children"]) + len(node["elements"])
-        if child_count > 1:
-            return True
-        return False
+        def _container_label(node: dict) -> str:
+            tag = node["tag"] or "div"
+            label = node["label"]
+            if label:
+                return f"<{tag} {label}>"
+            return f"<{tag}>"
 
-    def _container_label(node: dict) -> str:
-        tag = node["tag"] or "div"
-        label = node["label"]
-        if label:
-            # Determine if label is an id or class
-            return f"<{tag} {label}>"
-        return f"<{tag}>"
+        def _walk_tree(node: dict, depth: int, out: list[str]) -> None:
+            sorted_children = sorted(node["children"].values(), key=lambda n: n["idx"])
+            items: list[tuple[int, dict | ElementSnapshot]] = []
+            for child in sorted_children:
+                items.append((child["idx"], child))
+            for el in node["elements"]:
+                el_idx = el.parent_chain[-1][0] + 1 if el.parent_chain else 999999
+                items.append((el_idx, el))
 
-    def _walk_tree(node: dict, depth: int, out: list[str]) -> None:
-        # Sort children by node index (DOM order)
-        sorted_children = sorted(node["children"].values(), key=lambda n: n["idx"])
-        # Interleave containers and elements by index
-        items: list[tuple[int, dict | ElementSnapshot]] = []
-        for child in sorted_children:
-            items.append((child["idx"], child))
-        # Elements don't have a node index from parent_chain, but they appear
-        # after all children in DOM order. Use a high index.
-        for el in node["elements"]:
-            el_idx = el.parent_chain[-1][0] + 1 if el.parent_chain else 999999
-            items.append((el_idx, el))
-
-        for _, item in sorted(items, key=lambda x: x[0]):
-            if isinstance(item, dict):
-                # Container node
-                if _is_meaningful(item):
-                    indent = "  " * depth
-                    out.append(f"{indent}{_container_label(item)}")
-                    _walk_tree(item, depth + 1, out)
+            for _, item in sorted(items, key=lambda x: x[0]):
+                if isinstance(item, dict):
+                    if _is_meaningful(item):
+                        indent = "  " * depth
+                        out.append(f"{indent}{_container_label(item)}")
+                        _walk_tree(item, depth + 1, out)
+                    else:
+                        _walk_tree(item, depth, out)
                 else:
-                    # Skip this level, promote children
-                    _walk_tree(item, depth, out)
-            else:
-                # Interactive element
-                indent = "  " * depth
-                out.append(f"{indent}{_element_label(item)}")
+                    indent = "  " * depth
+                    out.append(f"{indent}{_element_label(item, include_frame_hint=include_frame_hint)}")
 
-    tree_lines: list[str] = []
-    _walk_tree(root, 0, tree_lines)
-    lines.extend(tree_lines)
+        tree_lines: list[str] = []
+        _walk_tree(root, 0, tree_lines)
+        return tree_lines
+
+    # Group selected elements by frame_id (preserving ranking order within each frame)
+    shown_by_frame: dict[str | None, list[ElementSnapshot]] = {}
+    for el in elements:
+        shown_by_frame.setdefault(el.frame_id, []).append(el)
+
+    display_frame_ids: set[str | None] = set(shown_by_frame)
+    if main_frame_id is not None:
+        display_frame_ids.add(main_frame_id)
+    if effective_active_frame_id is not None:
+        display_frame_ids.add(effective_active_frame_id)
+
+    ordered_frame_ids: list[str | None] = []
+    if effective_active_frame_id in display_frame_ids:
+        ordered_frame_ids.append(effective_active_frame_id)
+    if main_frame_id in display_frame_ids and main_frame_id not in ordered_frame_ids:
+        ordered_frame_ids.append(main_frame_id)
+    remaining = [fid for fid in display_frame_ids if fid not in set(ordered_frame_ids)]
+    remaining.sort(
+        key=lambda fid: (-int(frame_total_counts.get(fid, 0)), str(fid or ""))
+    )
+    ordered_frame_ids.extend(remaining)
+
+    def _frame_header(fid: str | None) -> str:
+        total = int(frame_total_counts.get(fid, 0))
+        shown = len(shown_by_frame.get(fid, []))
+        active_suffix = " (ACTIVE)" if fid == effective_active_frame_id else ""
+        if fid and main_frame_id and fid == main_frame_id:
+            return f"[FRAME: MAIN] total={total} shown={shown}{active_suffix}"
+        if active_frame_id is None and fid == main_frame_id:
+            return f"[FRAME: MAIN] total={total} shown={shown}{active_suffix}"
+        label = _frame_label(fid)
+        return f"[FRAME: IFRAME {label}] total={total} shown={shown}{active_suffix}"
+
+    first_section = True
+    for fid in ordered_frame_ids:
+        # Skip empty sections except for active/main.
+        shown = shown_by_frame.get(fid, [])
+        if not shown and fid not in {effective_active_frame_id, main_frame_id}:
+            continue
+        if not first_section:
+            lines.append("")
+        first_section = False
+        lines.append(_frame_header(fid))
+        lines.extend(_format_elements_for_frame(shown, include_frame_hint=False))
+
     return "\n".join(lines).strip()
 
 

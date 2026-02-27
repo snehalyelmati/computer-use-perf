@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import json
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -404,10 +406,111 @@ async def _session_for_element(element: ElementSnapshot | None, context: ToolCon
             return session
     return context.cdp_session
 
-def _active_frame_error(element: ElementSnapshot | None, context: ToolContext) -> ToolResult | None:
-    if context.active_frame_id and element and element.frame_id != context.active_frame_id:
-        return ToolResult(ok=False, message="Element is not in the active frame")
+async def _session_for_active_frame(context: ToolContext) -> CDPSession:
+    """Return the CDP session for the active frame (or the main session)."""
+    if not context.active_frame_id:
+        return context.cdp_session
+    if context.active_frame_id in context.frame_sessions:
+        return context.frame_sessions[context.active_frame_id]
+    iframe_element: ElementSnapshot | None = None
+    for el in context.element_index.elements.values():
+        if (el.node_name or "").upper() == "IFRAME" and el.frame_id == context.active_frame_id:
+            iframe_element = el
+            break
+    if not iframe_element:
+        return context.cdp_session
+    try:
+        session = await _session_for_element(iframe_element, context)
+    except Exception:
+        return context.cdp_session
+    if context.active_frame_id in context.frame_sessions:
+        return context.frame_sessions[context.active_frame_id]
+    return session
+
+def _main_frame_id_from_index(context: ToolContext) -> str | None:
+    """Best-effort guess of the main frame id based on the current snapshot."""
+    page_url = getattr(context.page, "url", "") or ""
+    child_frame_ids = {
+        el.frame_id
+        for el in context.element_index.elements.values()
+        if el.frame_id and (el.node_name or "").upper() == "IFRAME"
+    }
+
+    def _pick(exclude: set[str]) -> str | None:
+        by_url: dict[str, int] = {}
+        by_total: dict[str, int] = {}
+        for el in context.element_index.elements.values():
+            fid = el.frame_id
+            if not fid or fid in exclude:
+                continue
+            by_total[fid] = by_total.get(fid, 0) + 1
+            if el.frame_url and el.frame_url == page_url:
+                by_url[fid] = by_url.get(fid, 0) + 1
+        if by_url:
+            return sorted(by_url.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        if by_total:
+            return sorted(by_total.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        return None
+
+    return _pick(child_frame_ids) or _pick(set())
+
+def _iframe_id_for_frame(frame_id: str | None, context: ToolContext) -> str | None:
+    if not frame_id:
+        return None
+    for el in context.element_index.elements.values():
+        if (el.node_name or "").upper() == "IFRAME" and el.frame_id == frame_id:
+            return el.stable_id
     return None
+
+def _hostname(url: str | None) -> str:
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    return parsed.hostname or ""
+
+def _active_frame_error(element: ElementSnapshot | None, context: ToolContext) -> ToolResult | None:
+    if not context.active_frame_id or not element:
+        return None
+    if element.frame_id == context.active_frame_id:
+        return None
+
+    main_frame_id = _main_frame_id_from_index(context)
+    active_iframe_id = _iframe_id_for_frame(context.active_frame_id, context)
+    active_label = active_iframe_id or context.active_frame_id
+    element_id = element.stable_id
+
+    if element.frame_id is None:
+        return ToolResult(
+            ok=False,
+            message=(
+                f"Element {element_id} is in the main frame, but you are in iframe {active_label}. "
+                "Call switch_to_main_frame() first."
+            ),
+        )
+
+    if element.frame_id == main_frame_id or (
+        main_frame_id is None and element.frame_url == getattr(context.page, "url", "")
+    ):
+        return ToolResult(
+            ok=False,
+            message=(
+                f"Element {element_id} is in the main frame, but you are in iframe {active_label}. "
+                "Call switch_to_main_frame() first."
+            ),
+        )
+
+    target_iframe_id = _iframe_id_for_frame(element.frame_id, context)
+    target_label = target_iframe_id or _hostname(element.frame_url) or (element.frame_id or "unknown")
+    return ToolResult(
+        ok=False,
+        message=(
+            f"Element {element_id} is in iframe {target_label}, but you are in iframe {active_label}. "
+            f"Call switch_to_main_frame(), then switch_to_iframe({target_label})."
+        ),
+    )
 
 
 async def _inject_observer(session: CDPSession) -> bool:
@@ -892,9 +995,7 @@ async def draw(
 async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
     context.last_tool = "wait"
     context.last_element_id = None
-    session = context.cdp_session
-    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
-        session = context.frame_sessions[context.active_frame_id]
+    session = await _session_for_active_frame(context)
     clamped = max(0, min(milliseconds, 10_000))
     buffered = min(clamped + _WAIT_BUFFER_MS, 10_000)
     injected = await _inject_observer(session)
@@ -955,15 +1056,20 @@ async def watch_for_text(
 
     clamped = max(500, min(timeout_ms, _WATCH_MAX_TIMEOUT_MS))
 
-    session = context.cdp_session
-    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
-        session = context.frame_sessions[context.active_frame_id]
+    session = await _session_for_active_frame(context)
     await _inject_observer(session)
 
     try:
-        result = await context.page.evaluate(
-            _WATCH_FOR_TEXT_JS, [text.strip(), clamped]
+        expression = f"({_WATCH_FOR_TEXT_JS})({json.dumps([text.strip(), clamped])})"
+        evaluated = await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "awaitPromise": True,
+                "returnByValue": True,
+            },
         )
+        result = evaluated.get("result", {}).get("value")
     except Exception as exc:
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Watch failed: {exc}")
@@ -1134,11 +1240,52 @@ async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
     context.last_element_id = iframe_id
     element = _resolve_element(iframe_id, context)
     if not element:
-        return ToolResult(ok=False, message=f"Unknown iframe id: {iframe_id}")
+        return ToolResult(ok=False, message=f"Unknown element id: {iframe_id}")
+
+    tag = (element.node_name or "").upper() or "UNKNOWN"
+    if tag != "IFRAME":
+        return ToolResult(ok=False, message=f"Element {iframe_id} is a {tag}, not an IFRAME")
+
     if not element.frame_id:
-        return ToolResult(ok=False, message="Iframe has no frame id")
+        return ToolResult(ok=False, message="Iframe has no frame id (frame not ready)")
+
+    prev_active = context.active_frame_id
+    try:
+        session = await _session_for_element(element, context)
+    except Exception:
+        context.active_frame_id = prev_active
+        return ToolResult(
+            ok=False,
+            message=f"Failed to attach to iframe session for {iframe_id}. Try waiting and switching again.",
+        )
+
+    if session is context.cdp_session and element.frame_id not in context.frame_sessions:
+        context.active_frame_id = prev_active
+        return ToolResult(
+            ok=False,
+            message=f"Failed to attach to iframe session for {iframe_id}. Try waiting and switching again.",
+        )
+
     context.active_frame_id = element.frame_id
-    return ToolResult(ok=True, message=f"Switched to iframe {iframe_id}")
+    elements_in_frame = sum(
+        1
+        for el in context.element_index.elements.values()
+        if el.frame_id == element.frame_id and el.stable_id != iframe_id
+    )
+    frame_label = element.frame_name or element.frame_url or ""
+    if frame_label:
+        message = (
+            f"Active frame set to iframe {iframe_id} ({frame_label}). "
+            f"Elements in this frame: {elements_in_frame}. "
+            "Use switch_to_main_frame() to interact with the main page."
+        )
+    else:
+        message = (
+            f"Active frame set to iframe {iframe_id}. "
+            f"Elements in this frame: {elements_in_frame}. "
+            "Use switch_to_main_frame() to interact with the main page."
+        )
+    return ToolResult(ok=True, message=message)
 
 
 async def switch_to_main_frame(context: ToolContext) -> ToolResult:
@@ -1181,12 +1328,16 @@ async def take_screenshot(context: ToolContext) -> ToolResult:
 async def execute_js(code: str, context: ToolContext) -> ToolResult:
     context.last_tool = "execute_js"
     context.last_element_id = None
-    session = context.cdp_session
-    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
-        session = context.frame_sessions[context.active_frame_id]
+    session = await _session_for_active_frame(context)
     await _inject_observer(session)
     try:
-        await context.page.evaluate(code)
+        await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": code,
+                "awaitPromise": True,
+            },
+        )
     except Exception as exc:  # pragma: no cover - runtime safety
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Execute JS failed: {exc}")
@@ -1197,9 +1348,7 @@ async def execute_js(code: str, context: ToolContext) -> ToolResult:
 async def press_key_combination(keys: list[str], context: ToolContext) -> ToolResult:
     context.last_tool = "press_key_combination"
     context.last_element_id = None
-    session = context.cdp_session
-    if context.active_frame_id and context.active_frame_id in context.frame_sessions:
-        session = context.frame_sessions[context.active_frame_id]
+    session = await _session_for_active_frame(context)
     await _inject_observer(session)
     try:
         await context.page.keyboard.press("+".join(keys))
