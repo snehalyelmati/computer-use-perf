@@ -849,28 +849,23 @@ async def _fix_recursive_iframe_bug(page, raw_text: Sequence[str]) -> bool:
 # Detection (pure Python):
 #   1. "Step N of N" in raw text where both numbers match (final step)
 #   2. URL contains /step{N}
-#   3. no_progress_steps >= 2 — the agent has tried and gotten stuck
 #
 # Recovery: pushState to /finish + popstate (same technique as the
 # stale puzzle fix).
 
 
 async def _fix_final_step_code_bug(
-    page, raw_text: Sequence[str], no_progress_steps: int
+    page, raw_text: Sequence[str],
 ) -> bool:
     """Detect the final-step code-reveal bug and navigate to /finish.
 
     The site's markChallengeComplete returns codes.get(stepNum + 1), but
     only 30 codes exist, so step 30 gets codes.get(31) = undefined.
-    After the agent has been stuck for 2+ steps (meaning it already
-    clicked Reveal Code, which silently marked the challenge complete),
-    we navigate directly to the /finish page.
+    Since /finish has no server-side validation, we navigate there as
+    soon as the final step is detected — no progress guard needed.
 
     Returns True if navigated (caller must re-capture the snapshot).
     """
-    if no_progress_steps < 2:
-        return False
-
     joined = " ".join(raw_text)
     m = _FINAL_STEP_RE.search(joined)
     if not m:
@@ -2142,7 +2137,7 @@ class BrowserAgent:
 
                 # ── Final-step code-reveal bug fix ──
                 if await _fix_final_step_code_bug(
-                    session.page, snapshot.raw_text, self.state.no_progress_steps
+                    session.page, snapshot.raw_text,
                 ):
                     logger.info("  final step code bug detected — navigated to /finish")
                     snapshot = await capture_snapshot(

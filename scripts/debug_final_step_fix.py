@@ -5,8 +5,7 @@ returns codes.get(31) = undefined, and then tests _fix_final_step_code_bug().
 
 Expected output:
   - BUG CONFIRMED: Clicking "Reveal Code" on step 30 produces no code (null)
-  - FIX (no_progress_steps < 2): should NOT fire (safety guard)
-  - FIX (no_progress_steps >= 2): should navigate to /finish
+  - FIX: should navigate to /finish immediately on step 30 of 30
   - EDGE CASES: should not fire on non-final steps or mismatched URLs
 """
 import asyncio
@@ -93,13 +92,11 @@ async def main() -> None:
 
         if code is not None:
             print("   NOTE: Code was revealed — bug may not be present on this version")
-            print("   (The fix should still be safe — it checks no_progress_steps >= 2)")
         else:
             print("   CONFIRMED: Reveal Code produces no code (off-by-one bug)")
 
         # Check if the challenge was marked complete despite null code
         completed = await page.evaluate(f"""(() => {{
-            // Try to access the app's internal state
             const text = document.body.innerText;
             return {{
                 hasRevealCode: text.toLowerCase().includes('reveal code'),
@@ -110,41 +107,18 @@ async def main() -> None:
         print(f"   Page still has Reveal Code button: {completed['hasRevealCode']}")
         print(f"   Page has any 6-char code: {completed['hasCode']}")
 
-        # ── 2. Test fix does NOT fire when no_progress_steps < 2 ──
-        print(f"\n2. FIX with no_progress_steps=0 (should NOT fire)")
-        raw_text = await get_raw_text_from_page(page)
-        fixed = await _fix_final_step_code_bug(page, raw_text, no_progress_steps=0)
-        print(f"   Fix applied: {fixed}")
-        if fixed:
-            print("   ERROR: Fix should not fire with no_progress_steps=0")
-            ok = False
-        else:
-            print("   CORRECT: Fix skipped (safety guard)")
-
-        print(f"\n3. FIX with no_progress_steps=1 (should NOT fire)")
-        # Re-navigate to step 30 in case anything changed
-        await skip_to_step(page, TOTAL_STEPS)
-        raw_text = await get_raw_text_from_page(page)
-        fixed = await _fix_final_step_code_bug(page, raw_text, no_progress_steps=1)
-        print(f"   Fix applied: {fixed}")
-        if fixed:
-            print("   ERROR: Fix should not fire with no_progress_steps=1")
-            ok = False
-        else:
-            print("   CORRECT: Fix skipped (safety guard)")
-
-        # ── 3. Test fix DOES fire when no_progress_steps >= 2 ──
-        print(f"\n4. FIX with no_progress_steps=2 (SHOULD fire)")
+        # ── 2. Test fix fires immediately on step 30 of 30 ──
+        print(f"\n2. FIX on step 30 of 30 (SHOULD fire immediately)")
         await skip_to_step(page, TOTAL_STEPS)
         raw_text = await get_raw_text_from_page(page)
         print(f"   URL before fix: {page.url}")
         print(f"   Raw text sample: {raw_text[:3]}")
-        fixed = await _fix_final_step_code_bug(page, raw_text, no_progress_steps=2)
+        fixed = await _fix_final_step_code_bug(page, raw_text)
         print(f"   Fix applied: {fixed}")
         print(f"   URL after fix: {page.url}")
 
         if not fixed:
-            print("   ERROR: Fix should have fired on final step with no_progress_steps=2")
+            print("   ERROR: Fix should have fired on final step")
             ok = False
         else:
             # Verify we're on /finish
@@ -166,13 +140,12 @@ async def main() -> None:
 
             if not has_congrats:
                 print("   WARNING: No congratulations text found on /finish page")
-                # Not necessarily a failure — the page content may vary
 
-        # ── 4. Edge case: fix should NOT fire on non-final steps ──
-        print(f"\n5. EDGE CASE — fix should not fire on step 15 of 30")
+        # ── 3. Edge case: fix should NOT fire on non-final steps ──
+        print(f"\n3. EDGE CASE — fix should not fire on step 15 of 30")
         await skip_to_step(page, 15)
         raw_text = await get_raw_text_from_page(page)
-        fixed = await _fix_final_step_code_bug(page, raw_text, no_progress_steps=5)
+        fixed = await _fix_final_step_code_bug(page, raw_text)
         print(f"   Fix applied (should be False): {fixed}")
         if fixed:
             print("   ERROR: Fix should not fire on non-final step")
@@ -180,36 +153,17 @@ async def main() -> None:
         else:
             print("   CORRECT: Fix skipped on non-final step")
 
-        # ── 5. Edge case: fix should NOT fire with mismatched URL ──
-        print(f"\n6. EDGE CASE — raw text says step 30 but URL is /step15")
-        # Simulate mismatched state: raw text has "Step 30 of 30" but URL is /step15
+        # ── 4. Edge case: fix should NOT fire with mismatched URL ──
+        print(f"\n4. EDGE CASE — raw text says step 30 but URL is /step15")
         fake_raw_text = [f"Step {TOTAL_STEPS} of {TOTAL_STEPS}", "some other text"]
         await skip_to_step(page, 15)
-        fixed = await _fix_final_step_code_bug(page, fake_raw_text, no_progress_steps=3)
+        fixed = await _fix_final_step_code_bug(page, fake_raw_text)
         print(f"   Fix applied (should be False): {fixed}")
         if fixed:
             print("   ERROR: Fix should not fire with URL/text mismatch")
             ok = False
         else:
             print("   CORRECT: Fix skipped (URL mismatch)")
-
-        # ── 6. Test with higher no_progress_steps ──
-        print(f"\n7. FIX with no_progress_steps=5 (SHOULD fire)")
-        await skip_to_step(page, TOTAL_STEPS)
-        raw_text = await get_raw_text_from_page(page)
-        fixed = await _fix_final_step_code_bug(page, raw_text, no_progress_steps=5)
-        print(f"   Fix applied: {fixed}")
-        print(f"   URL after fix: {page.url}")
-
-        if not fixed:
-            print("   ERROR: Fix should have fired")
-            ok = False
-        else:
-            if "/finish" in page.url:
-                print("   CORRECT: Navigated to /finish")
-            else:
-                print(f"   ERROR: Expected /finish in URL")
-                ok = False
 
         await browser.close()
 
