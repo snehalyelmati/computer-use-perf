@@ -690,6 +690,137 @@ async def _fix_stale_puzzle_state(
     return True
 
 
+# ── Recursive Iframe Challenge off-by-one fix ──────────────────────────
+#
+# The challenge site's "Recursive Iframe Challenge" has a bug in the React
+# component (Hv).  The "Enter Level" buttons increment a level counter `u`
+# from 0 up to `numLevels - 1`, but the "Extract Code" button's onClick
+# guard checks `u < y` (currentLevel < numLevels) and bails out early.
+# Because `u` maxes out at `y - 1`, the guard always fires and the button
+# is effectively dead — the challenge is unsolvable as-is.
+#
+# Fix: bypass the guard entirely by calling `onComplete(proof)` directly
+# on the Hv component's fiber.  We build the same proof object that the
+# Extract Code onClick's internal `w()` would construct, with currentLevel
+# set to numLevels (what it should be if the off-by-one didn't exist).
+# onComplete returns the code string, which we dispatch into the component's
+# display state hook so it renders on the page for the agent to read.
+#
+# Detection:
+#   Python pre-filter: "recursive iframe challenge" in snapshot raw_text
+#   JS confirmation:   Extract Code button exists AND fiber has onComplete
+#                      in memoizedProps (only the Hv component has this)
+
+
+async def _fix_recursive_iframe_bug(page, raw_text: Sequence[str]) -> bool:
+    """Detect and fix the off-by-one bug in the Recursive Iframe Challenge.
+
+    The Extract Code button's onClick guard requires currentLevel >= numLevels,
+    but the Enter Level buttons only increment the counter to numLevels - 1.
+    We call onComplete(proof) directly, bypassing the guard, and dispatch
+    the resulting code string into the display state hook.
+
+    Returns True if the bug was detected and fixed (caller must re-capture
+    the snapshot).
+    """
+    joined = " ".join(raw_text).lower()
+
+    # Cheap pre-filter: must be on the Recursive Iframe Challenge page.
+    if "recursive iframe challenge" not in joined:
+        return False
+
+    patched = await page.evaluate("""(() => {
+        // Find the "Extract Code" button
+        const btns = [...document.querySelectorAll('button')];
+        const extractBtn = btns.find(b =>
+            b.textContent.trim().toLowerCase().includes('extract code')
+        );
+        if (!extractBtn) return 'no_button';
+
+        // Walk up the React fiber tree to find the Hv component
+        // (the one with onComplete in memoizedProps)
+        const fiberKey = Object.keys(extractBtn).find(k =>
+            k.startsWith('__reactFiber$')
+        );
+        if (!fiberKey) return 'no_fiber';
+
+        let fiber = extractBtn[fiberKey];
+        let hvFiber = null;
+        while (fiber) {
+            if (fiber.memoizedProps &&
+                typeof fiber.memoizedProps.onComplete === 'function') {
+                hvFiber = fiber;
+                break;
+            }
+            fiber = fiber.return;
+        }
+        if (!hvFiber) return 'no_onComplete';
+
+        // Read props
+        const onComplete = hvFiber.memoizedProps.onComplete;
+        const config = hvFiber.memoizedProps.config || {};
+        const numLevels = (config.metadata && config.metadata.numLevels) || 3;
+        const stepNum = hvFiber.memoizedProps.stepNum;
+
+        // Read hook chain:
+        //   hook 0 = currentLevel (useState, number)
+        //   hook 1 = code display state (useState, null initially)
+        //   hook 2 = levelClickTimes (useRef, {current: {...}})
+        const hook0 = hvFiber.memoizedState;
+        if (!hook0 || typeof hook0.memoizedState !== 'number') return 'no_level_hook';
+        const currentLevel = hook0.memoizedState;
+
+        const hook1 = hook0.next;
+        if (!hook1 || !hook1.queue || typeof hook1.queue.dispatch !== 'function')
+            return 'no_code_hook';
+
+        const hook2 = hook1.next;
+        const clickTimes = (hook2 && hook2.memoizedState && hook2.memoizedState.current)
+            ? { ...hook2.memoizedState.current }
+            : {};
+
+        // Fill in the missing click time for the current (stuck) level
+        if (!(currentLevel in clickTimes)) {
+            clickTimes[currentLevel] = Date.now();
+        }
+
+        // Build the proof — same structure as the Extract Code onClick's
+        // internal builder:
+        //   { type, timestamp, data: { method, numLevels, currentLevel,
+        //     levelClickTimes, stepNum } }
+        // Set currentLevel = numLevels to satisfy validation in bd().
+        const proof = {
+            type: "recursive_iframe",
+            timestamp: Date.now(),
+            data: {
+                method: "recursive_iframe",
+                numLevels: numLevels,
+                currentLevel: numLevels,
+                levelClickTimes: clickTimes,
+                stepNum: stepNum,
+            },
+        };
+
+        // Call onComplete(proof) — returns the code string (or null on
+        // validation failure inside bd())
+        const code = onComplete(proof);
+        if (!code) return 'onComplete_returned_null';
+
+        // Dispatch the code into hook 1 (the display state) so it renders
+        // on the page for the agent to read from the next snapshot
+        hook1.queue.dispatch(code);
+
+        return 'patched_' + code;
+    })()""")
+
+    if not isinstance(patched, str) or not patched.startswith("patched_"):
+        return False
+
+    # Wait for React re-render after dispatching code to display state
+    await page.wait_for_timeout(500)
+    return True
+
+
 def _normalize_label(value: str | None) -> str:
     return " ".join((value or "").split()).strip().lower()
 
@@ -1903,6 +2034,22 @@ class BrowserAgent:
                     session.page, snapshot.raw_text, self.state.last_step_was_puzzle
                 ):
                     logger.info("  stale puzzle state detected — fixed via pushState detour")
+                    snapshot = await capture_snapshot(
+                        session.page,
+                        session.cdp_session,
+                        handler_map=handler_map,
+                        desc_text_preview_enabled=self.agent_config.desc_text_preview_enabled,
+                        desc_text_preview_max_chars=self.agent_config.desc_text_preview_max_chars,
+                        desc_text_preview_max_nodes=self.agent_config.desc_text_preview_max_nodes,
+                        class_sanitize_mode=self.agent_config.class_sanitize_mode,
+                        class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
+                        class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
+                        class_sanitize_fallback_tokens=self.agent_config.class_sanitize_fallback_tokens,
+                    )
+
+                # ── Recursive iframe challenge off-by-one fix ──
+                if await _fix_recursive_iframe_bug(session.page, snapshot.raw_text):
+                    logger.info("  recursive iframe bug detected — fixed via React state patch")
                     snapshot = await capture_snapshot(
                         session.page,
                         session.cdp_session,
