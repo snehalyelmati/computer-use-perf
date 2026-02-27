@@ -638,6 +638,7 @@ def _format_step_trace(trace: list[dict[str, Any]], *, window: int = 0) -> str:
 # (v1/v5: 19→20, v2/v4: 18→19, v3: 17→18).
 
 _PUZZLE_EQUATION_RE = re.compile(r"\d+\s*\+\s*\d+\s*=\s*\?")
+_FINAL_STEP_RE = re.compile(r"Step\s+(\d+)\s+of\s+(\d+)", re.IGNORECASE)
 
 
 async def _fix_stale_puzzle_state(
@@ -818,6 +819,75 @@ async def _fix_recursive_iframe_bug(page, raw_text: Sequence[str]) -> bool:
 
     # Wait for React re-render after dispatching code to display state
     await page.wait_for_timeout(500)
+    return True
+
+
+# ── Final-step code-reveal off-by-one fix ────────────────────────────
+#
+# The challenge site's markChallengeComplete(stepNum, proof) returns
+# codes.get(stepNum + 1), but only 30 codes exist (indexed 1–30).
+# On the final step (step 30), codes.get(31) is undefined → null,
+# so the "Reveal Code" button never displays a code.
+#
+# The same off-by-one affects validateCode(stepNum): it checks
+# codes.get(stepNum + 1), so code submission on the last step always
+# returns false regardless of what is entered.
+#
+# However, markChallengeComplete still calls
+# completedChallenges.add(stepNum) before returning null, so the
+# challenge IS marked complete in the session after clicking
+# "Reveal Code".
+#
+# The /finish page is a static congratulations page with no server-
+# side validation — navigating there directly works once the final
+# challenge is marked complete (or even without that).
+#
+# Detection (pure Python):
+#   1. "Step N of N" in raw text where both numbers match (final step)
+#   2. URL contains /step{N}
+#   3. no_progress_steps >= 2 — the agent has tried and gotten stuck
+#
+# Recovery: pushState to /finish + popstate (same technique as the
+# stale puzzle fix).
+
+
+async def _fix_final_step_code_bug(
+    page, raw_text: Sequence[str], no_progress_steps: int
+) -> bool:
+    """Detect the final-step code-reveal bug and navigate to /finish.
+
+    The site's markChallengeComplete returns codes.get(stepNum + 1), but
+    only 30 codes exist, so step 30 gets codes.get(31) = undefined.
+    After the agent has been stuck for 2+ steps (meaning it already
+    clicked Reveal Code, which silently marked the challenge complete),
+    we navigate directly to the /finish page.
+
+    Returns True if navigated (caller must re-capture the snapshot).
+    """
+    if no_progress_steps < 2:
+        return False
+
+    joined = " ".join(raw_text)
+    m = _FINAL_STEP_RE.search(joined)
+    if not m:
+        return False
+
+    current_step = m.group(1)
+    total_steps = m.group(2)
+    if current_step != total_steps:
+        return False
+
+    # Confirm URL matches /step{N}
+    url = page.url
+    if f"/step{current_step}" not in url:
+        return False
+
+    # Navigate to /finish via pushState + popstate (triggers React router)
+    await page.evaluate(
+        "window.history.pushState({}, '', '/finish');"
+        "window.dispatchEvent(new PopStateEvent('popstate'));"
+    )
+    await page.wait_for_timeout(1500)
     return True
 
 
@@ -2050,6 +2120,24 @@ class BrowserAgent:
                 # ── Recursive iframe challenge off-by-one fix ──
                 if await _fix_recursive_iframe_bug(session.page, snapshot.raw_text):
                     logger.info("  recursive iframe bug detected — fixed via React state patch")
+                    snapshot = await capture_snapshot(
+                        session.page,
+                        session.cdp_session,
+                        handler_map=handler_map,
+                        desc_text_preview_enabled=self.agent_config.desc_text_preview_enabled,
+                        desc_text_preview_max_chars=self.agent_config.desc_text_preview_max_chars,
+                        desc_text_preview_max_nodes=self.agent_config.desc_text_preview_max_nodes,
+                        class_sanitize_mode=self.agent_config.class_sanitize_mode,
+                        class_sanitize_max_tokens=self.agent_config.class_sanitize_max_tokens,
+                        class_sanitize_max_chars=self.agent_config.class_sanitize_max_chars,
+                        class_sanitize_fallback_tokens=self.agent_config.class_sanitize_fallback_tokens,
+                    )
+
+                # ── Final-step code-reveal bug fix ──
+                if await _fix_final_step_code_bug(
+                    session.page, snapshot.raw_text, self.state.no_progress_steps
+                ):
+                    logger.info("  final step code bug detected — navigated to /finish")
                     snapshot = await capture_snapshot(
                         session.page,
                         session.cdp_session,
