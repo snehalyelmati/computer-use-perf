@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 from playwright.async_api import CDPSession, Page
 
 from src.agent.browser.session import BrowserSession
-from src.agent.context.snapshot import ElementSnapshot, ElementIndex
+from src.agent.context.snapshot import ElementSnapshot, ElementIndex, build_stable_id_from_backend
 
 
 @dataclass(frozen=True)
@@ -80,8 +80,10 @@ _OBSERVER_INJECT_JS = """
     addedElements: [],
     removedElements: [],
     attrChanges: [],
+    interactiveNodes: [],
   };
   const TEXT_CAP = 20;
+  const INTERACTIVE_CAP = 10;
   const charDataNodes = new Map();  // node -> index in addedText
   const IGNORED_TAGS = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META']);
   const TRACKED_ATTRS = new Set([
@@ -89,6 +91,40 @@ _OBSERVER_INJECT_JS = """
     'aria-disabled','disabled','checked','selected','open','hidden',
     'value','href','src'
   ]);
+  const INTERACTIVE_TAGS_SET = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','OPTION','IFRAME']);
+  const INTERACTIVE_ROLES_SET = new Set([
+    'button','checkbox','combobox','link','menuitem','option',
+    'radio','slider','spinbutton','switch','tab','textbox'
+  ]);
+
+  function isInteractive(el) {
+    if (INTERACTIVE_TAGS_SET.has(el.tagName)) return true;
+    const role = el.getAttribute('role');
+    if (role && INTERACTIVE_ROLES_SET.has(role.toLowerCase())) return true;
+    if (el.hasAttribute('contenteditable')) return true;
+    if (el.hasAttribute('tabindex')) return true;
+    if (el.hasAttribute('onclick')) return true;
+    if (el.getAttribute('draggable') === 'true') return true;
+    return false;
+  }
+
+  function collectInteractive(node) {
+    if (node.nodeType !== 1) return;
+    if (data.interactiveNodes.length >= INTERACTIVE_CAP) return;
+    if (isInteractive(node)) {
+      data.interactiveNodes.push(node);
+    }
+    // Check direct children (one level deep) — when a parent container is
+    // appended, only the container appears in addedNodes, not its children.
+    if (node.children) {
+      for (const child of node.children) {
+        if (data.interactiveNodes.length >= INTERACTIVE_CAP) break;
+        if (isInteractive(child)) {
+          data.interactiveNodes.push(child);
+        }
+      }
+    }
+  }
 
   function textOf(node) {
     if (node.nodeType === 3) {
@@ -123,6 +159,7 @@ _OBSERVER_INJECT_JS = """
           }
           if (node.nodeType === 1 && data.addedElements.length < 10)
             data.addedElements.push(tagOf(node));
+          collectInteractive(node);
         }
         for (const node of m.removedNodes) {
           if (node.nodeType === 1 && IGNORED_TAGS.has(node.tagName)) continue;
@@ -182,6 +219,26 @@ _OBSERVER_COLLECT_JS = """
   const pending = observer.takeRecords();
   if (pending.length > 0) callback(pending);
   observer.disconnect();
+
+  // Stamp interactive nodes with temporary markers for CDP resolution
+  const newInteractive = [];
+  for (let i = 0; i < data.interactiveNodes.length; i++) {
+    const el = data.interactiveNodes[i];
+    if (!document.contains(el)) continue;
+    const marker = '__mut_' + i;
+    el.setAttribute('data-agent-mut-id', marker);
+    const text = (el.innerText || el.textContent || '').trim().slice(0, 250);
+    const role = el.getAttribute('role') || '';
+    const name = el.getAttribute('aria-label') || el.getAttribute('name') || '';
+    newInteractive.push({
+      marker: marker,
+      tag: (el.tagName || '').toLowerCase(),
+      role: role,
+      text: text,
+      name: name,
+    });
+  }
+
   delete window.__mutObs;
 
   const seen = new Set();
@@ -201,6 +258,7 @@ _OBSERVER_COLLECT_JS = """
     addedElements: data.addedElements,
     removedElements: data.removedElements,
     attrChanges: data.attrChanges,
+    newInteractive: newInteractive,
     currentUrl: location.href,
     startUrl: startUrl,
     title: document.title || '',
@@ -543,6 +601,110 @@ async def _collect_mutations(
         return None
 
 
+async def _resolve_new_interactive(
+    session: CDPSession, mutations: dict, frame_id: str | None
+) -> None:
+    """Resolve stable element IDs for newly added interactive elements via CDP.
+
+    Enriches mutations dict in-place with 'resolvedInteractive' list.
+    Best-effort: exceptions skip individual elements.
+    """
+    new_items = mutations.get("newInteractive")
+    if not new_items:
+        return
+    resolved: list[dict[str, Any]] = []
+    for item in new_items:
+        marker = item.get("marker")
+        if not marker:
+            continue
+        try:
+            result = await session.send(
+                "Runtime.evaluate",
+                {
+                    "expression": f'document.querySelector("[data-agent-mut-id=\\"{marker}\\"]")',
+                    "returnByValue": False,
+                },
+            )
+            object_id = result.get("result", {}).get("objectId")
+            if not object_id:
+                continue
+            desc = await session.send(
+                "DOM.describeNode",
+                {"objectId": object_id},
+            )
+            backend_node_id = desc.get("node", {}).get("backendNodeId")
+            if not backend_node_id:
+                continue
+            stable_id = build_stable_id_from_backend(frame_id, int(backend_node_id))
+            resolved.append({
+                "stable_id": stable_id,
+                "backend_node_id": int(backend_node_id),
+                "tag": item.get("tag", ""),
+                "role": item.get("role", ""),
+                "text": item.get("text", ""),
+                "name": item.get("name", ""),
+            })
+            # Clean up marker attribute
+            await session.send(
+                "Runtime.evaluate",
+                {
+                    "expression": (
+                        f'document.querySelector("[data-agent-mut-id=\\"{marker}\\"]")'
+                        f'?.removeAttribute("data-agent-mut-id")'
+                    ),
+                    "returnByValue": True,
+                },
+            )
+        except Exception:
+            continue
+    if resolved:
+        mutations["resolvedInteractive"] = resolved
+
+
+def _register_new_elements(
+    resolved: list[dict], context: ToolContext, frame_id: str | None, frame_url: str | None
+) -> None:
+    """Register resolved interactive elements in the element index for immediate use."""
+    for item in resolved:
+        stable_id = item["stable_id"]
+        if stable_id in context.element_index.elements:
+            continue
+        context.element_index.elements[stable_id] = ElementSnapshot(
+            stable_id=stable_id,
+            backend_node_id=item["backend_node_id"],
+            node_name=item.get("tag", "").upper() or None,
+            role=item.get("role") or None,
+            name=item.get("name") or None,
+            text=item.get("text") or None,
+            bounding_box=None,
+            attributes={},
+            frame_id=frame_id,
+            frame_url=frame_url,
+            frame_name=None,
+            interactive_reason="mutation_detected",
+            interactive_confidence=0.8,
+        )
+
+
+async def _collect_mutations_with_ids(
+    session: CDPSession,
+    context: ToolContext,
+    settle_ms: int,
+    *,
+    frame_id: str | None,
+    frame_url: str | None = None,
+) -> dict | None:
+    """Collect mutations and resolve stable IDs for new interactive elements."""
+    mutations = await _collect_mutations(session, settle_ms)
+    if mutations is None:
+        return None
+    await _resolve_new_interactive(session, mutations, frame_id)
+    resolved = mutations.get("resolvedInteractive")
+    if resolved:
+        _register_new_elements(resolved, context, frame_id, frame_url)
+    return mutations
+
+
 def _fmt_text_item(item: Any) -> str:
     """Format a text item (string or {t, tag} dict) for diff output."""
     if isinstance(item, dict):
@@ -590,8 +752,26 @@ def _build_change_lines(mutations: dict) -> list[str]:
     if start_url and current_url and start_url != current_url:
         lines.append(f"  navigated to: {current_url}")
 
-    # Added text  (+)
+    # Build a set of (text_lower, tag) covered by resolved interactive elements
+    # so we can suppress duplicate addedText entries for those.
+    resolved_items = mutations.get("resolvedInteractive", [])
+    resolved_text_keys: set[tuple[str, str]] = set()
+    for item in resolved_items:
+        text = (item.get("text") or "").strip().lower()
+        tag = (item.get("tag") or "").strip().lower()
+        if text:
+            resolved_text_keys.add((text, tag))
+
+    # Added text  (+) — skip entries that have a resolved interactive line
     for item in mutations.get("addedText", []):
+        if isinstance(item, dict):
+            t = (item.get("t") or "").strip().lower()
+            tg = (item.get("tag") or "").strip().lower()
+        else:
+            t = str(item).strip().lower()
+            tg = ""
+        if (t, tg) in resolved_text_keys:
+            continue
         lines.append(f"  + {_fmt_text_item(item)}")
 
     # Attribute changes  (~)
@@ -603,6 +783,16 @@ def _build_change_lines(mutations: dict) -> list[str]:
         old = _fmt_attr_val(attr, raw_old, is_present=raw_old is not None)
         new = _fmt_attr_val(attr, raw_new, is_present=raw_new is not None)
         lines.append(f"  ~ {tag}[{attr}]: {old} -> {new}")
+
+    # New interactive elements with IDs  (+ interactive)
+    for item in resolved_items:
+        sid = item.get("stable_id", "?")
+        tag = item.get("tag", "?")
+        label = item.get("role") or item.get("name") or item.get("text") or ""
+        if label:
+            lines.append(f'  + interactive {sid}: {tag} "{label}"')
+        else:
+            lines.append(f"  + interactive {sid}: {tag}")
 
     # Removed text  (-)
     for item in mutations.get("removedText", []):
@@ -709,14 +899,20 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
             except Exception:
                 re_clicked = False
             if re_clicked:
-                mutations = await _collect_mutations(session, context.timing.settle_ms)
+                mutations = await _collect_mutations_with_ids(
+                    session, context, context.timing.settle_ms,
+                    frame_id=element.frame_id, frame_url=element.frame_url,
+                )
                 message = _format_verification(
                     mutations, f"Re-found and clicked element with text '{label}'"
                 )
                 return ToolResult(ok=True, message=message)
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Click failed")
-    mutations = await _collect_mutations(session, context.timing.settle_ms)
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
     message = _format_verification(mutations, f"Clicked {element_id}")
     return ToolResult(ok=True, message=message)
 
@@ -792,7 +988,10 @@ async def hover_element(element_id: str, context: ToolContext, *, duration_ms: i
             except Exception:
                 pass
 
-    mutations = await _collect_mutations(session, context.timing.settle_ms)
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
     message = _format_verification(mutations, f"Hovered {element_id} for {clamped}ms")
     return ToolResult(ok=True, message=message)
 
@@ -814,7 +1013,10 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
     if not await _insert_text(session, text):
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Type failed")
-    mutations = await _collect_mutations(session, context.timing.settle_ms)
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
     current_value = await _read_input_value(element.backend_node_id, session)
     base_msg = f"Typed into {element_id}"
     if current_value is not None:
@@ -891,7 +1093,10 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
     if not result:
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Drag failed: drop not accepted")
-    mutations = await _collect_mutations(session, context.timing.settle_ms)
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=source.frame_id, frame_url=source.frame_url,
+    )
     return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
 
@@ -944,7 +1149,10 @@ async def draw(
         [{"value": path}],
     )
     if result:
-        mutations = await _collect_mutations(session, context.timing.draw_settle_ms)
+        mutations = await _collect_mutations_with_ids(
+            session, context, context.timing.draw_settle_ms,
+            frame_id=element.frame_id, frame_url=element.frame_url,
+        )
         return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
     # CDP coordinate fallback — for apps that ignore synthetic DOM events
@@ -985,7 +1193,10 @@ async def draw(
             "Input.dispatchMouseEvent",
             {"type": "mouseReleased", "x": last_x, "y": last_y, "button": "left", "clickCount": 1},
         )
-        mutations = await _collect_mutations(session, context.timing.draw_settle_ms)
+        mutations = await _collect_mutations_with_ids(
+            session, context, context.timing.draw_settle_ms,
+            frame_id=element.frame_id, frame_url=element.frame_url,
+        )
         return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
     except Exception:
         await _collect_mutations(session, settle_ms=50)
@@ -1000,7 +1211,10 @@ async def wait(milliseconds: int, context: ToolContext) -> ToolResult:
     buffered = min(clamped + _WAIT_BUFFER_MS, 10_000)
     injected = await _inject_observer(session)
     await asyncio.sleep(buffered / 1000)
-    mutations = await _collect_mutations(session, context.timing.settle_ms) if injected else None
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=context.active_frame_id,
+    ) if injected else None
     return ToolResult(ok=True, message=_format_wait_message(buffered, mutations))
 
 
@@ -1075,7 +1289,10 @@ async def watch_for_text(
         return ToolResult(ok=False, message=f"Watch failed: {exc}")
 
     if result == "found":
-        mutations = await _collect_mutations(session, context.timing.settle_ms)
+        mutations = await _collect_mutations_with_ids(
+            session, context, context.timing.settle_ms,
+            frame_id=context.active_frame_id,
+        )
         base_msg = f"Watched and clicked '{text}'"
         return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
@@ -1212,7 +1429,12 @@ async def scroll(
     except Exception as exc:
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Scroll failed: {exc}")
-    mutations = await _collect_mutations(session, context.timing.settle_ms)
+    _scroll_frame_id = element.frame_id if element else context.active_frame_id
+    _scroll_frame_url = element.frame_url if element else None
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=_scroll_frame_id, frame_url=_scroll_frame_url,
+    )
     if not result:
         msg = f"Scrolled dx={delta_x} dy={delta_y}"
         if element_id:
@@ -1341,7 +1563,10 @@ async def execute_js(code: str, context: ToolContext) -> ToolResult:
     except Exception as exc:  # pragma: no cover - runtime safety
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Execute JS failed: {exc}")
-    mutations = await _collect_mutations(session, context.timing.settle_ms)
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=context.active_frame_id,
+    )
     return ToolResult(ok=True, message=_format_verification(mutations, "Executed script"))
 
 
@@ -1355,7 +1580,10 @@ async def press_key_combination(keys: list[str], context: ToolContext) -> ToolRe
     except Exception as exc:  # pragma: no cover - runtime safety
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Key press failed: {exc}")
-    mutations = await _collect_mutations(session, context.timing.settle_ms)
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=context.active_frame_id,
+    )
     base_msg = f"Pressed {'+'.join(keys)}"
     message = _format_verification(mutations, base_msg)
     return ToolResult(ok=True, message=message)

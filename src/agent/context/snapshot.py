@@ -680,6 +680,7 @@ async def capture_snapshot(
                 # Strip the marker so it doesn't leak into attributes / [+attrs] hint
                 node_attributes.pop("data-agent-hid", None)
             node_attributes.pop("data-agent-scroll", None)
+            node_attributes.pop("data-agent-mut-id", None)
 
             # Upgrade non-interactive elements with detected handlers to interactive
             if element_handlers and not is_interactive:
