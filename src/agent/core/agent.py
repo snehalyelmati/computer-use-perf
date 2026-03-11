@@ -644,6 +644,9 @@ def _format_step_trace(trace: list[dict[str, Any]], *, window: int = 0) -> str:
 
 _PUZZLE_EQUATION_RE = re.compile(r"\d+\s*\+\s*\d+\s*=\s*\?")
 _FINAL_STEP_RE = re.compile(r"Step\s+(\d+)\s+of\s+(\d+)", re.IGNORECASE)
+_PUSHSTATE_DETOUR_MS = 300
+_PUSHSTATE_SETTLE_MS = 600
+_REACT_RERENDER_MS = 300
 
 
 async def _fix_stale_puzzle_state(
@@ -685,13 +688,13 @@ async def _fix_stale_puzzle_state(
         f"window.history.pushState({{}}, '', '{detour_url}');"
         f"window.dispatchEvent(new PopStateEvent('popstate', {{ state: {{}} }}));"
     )
-    await page.wait_for_timeout(500)
+    await page.wait_for_timeout(_PUSHSTATE_DETOUR_MS)
 
     await page.evaluate(
         f"window.history.pushState({{}}, '', '{target_url}');"
         f"window.dispatchEvent(new PopStateEvent('popstate', {{ state: {{}} }}));"
     )
-    await page.wait_for_timeout(1500)
+    await page.wait_for_timeout(_PUSHSTATE_SETTLE_MS)
 
     return True
 
@@ -823,7 +826,7 @@ async def _fix_recursive_iframe_bug(page, raw_text: Sequence[str]) -> bool:
         return False
 
     # Wait for React re-render after dispatching code to display state
-    await page.wait_for_timeout(500)
+    await page.wait_for_timeout(_REACT_RERENDER_MS)
     return True
 
 
@@ -887,7 +890,7 @@ async def _fix_final_step_code_bug(
         "window.history.pushState({}, '', '/finish');"
         "window.dispatchEvent(new PopStateEvent('popstate'));"
     )
-    await page.wait_for_timeout(1500)
+    await page.wait_for_timeout(_PUSHSTATE_SETTLE_MS)
     return True
 
 

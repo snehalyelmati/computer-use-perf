@@ -29,7 +29,7 @@ class ToolResult:
 class ToolTimingConfig:
     """Timing parameters for tool actions (milliseconds)."""
 
-    settle_ms: int = 200
+    settle_ms: int = 100
     draw_settle_ms: int = 400
     draw_point_interval_ms: int = 20
     drag_phase_interval_ms: int = 50
@@ -67,7 +67,7 @@ def build_tool_context(
         timing=timing or ToolTimingConfig(),
     )
 
-_WAIT_BUFFER_MS = 500
+_WAIT_BUFFER_MS = 200
 
 _OBSERVER_INJECT_JS = """
 (() => {
@@ -584,7 +584,7 @@ async def _inject_observer(session: CDPSession) -> bool:
 
 
 async def _collect_mutations(
-    session: CDPSession, settle_ms: int = 200
+    session: CDPSession, settle_ms: int = 100
 ) -> dict | None:
     """Wait for DOM mutations to settle, then collect and disconnect the observer."""
     await asyncio.sleep(settle_ms / 1000.0)
