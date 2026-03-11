@@ -30,6 +30,7 @@ from src.agent.core.pruning import (
     extract_stable_ids,
     match_phrases_to_elements,
 )
+from src.agent.core.history import make_tool_return_compactor
 from src.agent.core.text_compress import compress_text_lines
 
 from src.agent.browser.session import close_browser, launch_browser
@@ -556,8 +557,8 @@ def _model_settings(config: LLMConfig) -> dict[str, Any]:
     if config.provider == "openrouter":
         settings["openrouter_usage"] = {"include": True}
         settings["openrouter_provider"] = {
-            "order": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-vertex", "together", "xai"],
-            "only": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-vertex", "together", "xai"],
+            "order": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-ai-studio", "google-vertex", "together", "xai"],
+            "only": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-ai-studio", "google-vertex", "together", "xai"],
         }
         if config.reasoning_effort and config.reasoning_effort != "none":
             settings["openrouter_reasoning"] = {"effort": config.reasoning_effort}
@@ -1870,22 +1871,31 @@ NOT for finding text already visible in the snapshot — use click_element for t
             ctx.deps.tool_tracker.record(result.ok, tool_name="press_key_combination")
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
+async def _normalize_strict(
+    ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
+) -> list[ToolDefinition]:
+    return [replace(t, strict=False) for t in tool_defs]
+
+
+async def _filter_tools(
+    ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
+) -> list[ToolDefinition]:
+    tool_defs = [replace(t, strict=False) for t in tool_defs]
+    if ctx.deps.allowed_tools is None:
+        return tool_defs
+    return [t for t in tool_defs if t.name in ctx.deps.allowed_tools]
+
+
+def _build_history_processors(keep_recent_tool_rounds: int) -> list:
+    processors: list = []
+    if keep_recent_tool_rounds > 0:
+        processors.append(make_tool_return_compactor(keep_recent=keep_recent_tool_rounds))
+    return processors
+
+
 def build_browser_worker_agent(
-    model: Model, *, model_settings: dict[str, Any]
+    model: Model, *, model_settings: dict[str, Any], keep_recent_tool_rounds: int = 3,
 ) -> Agent[WorkerDeps, StepOutput]:
-    async def _normalize_strict(
-        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
-    ) -> list[ToolDefinition]:
-        return [replace(t, strict=False) for t in tool_defs]
-
-    async def _filter_tools(
-        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
-    ) -> list[ToolDefinition]:
-        tool_defs = [replace(t, strict=False) for t in tool_defs]
-        if ctx.deps.allowed_tools is None:
-            return tool_defs
-        return [t for t in tool_defs if t.name in ctx.deps.allowed_tools]
-
     agent: Agent[WorkerDeps, StepOutput] = Agent(
         model,
         deps_type=WorkerDeps,
@@ -1895,27 +1905,15 @@ def build_browser_worker_agent(
         prepare_tools=_filter_tools,
         prepare_output_tools=_normalize_strict,
         retries=1,
+        history_processors=_build_history_processors(keep_recent_tool_rounds),
     )
     register_browser_tools(agent)
     return agent
 
 
 def build_unified_agent(
-    model: Model, *, model_settings: dict[str, Any]
+    model: Model, *, model_settings: dict[str, Any], keep_recent_tool_rounds: int = 3,
 ) -> Agent[WorkerDeps, UnifiedStepOutput]:
-    async def _normalize_strict(
-        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
-    ) -> list[ToolDefinition]:
-        return [replace(t, strict=False) for t in tool_defs]
-
-    async def _filter_tools(
-        ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
-    ) -> list[ToolDefinition]:
-        tool_defs = [replace(t, strict=False) for t in tool_defs]
-        if ctx.deps.allowed_tools is None:
-            return tool_defs
-        return [t for t in tool_defs if t.name in ctx.deps.allowed_tools]
-
     agent: Agent[WorkerDeps, UnifiedStepOutput] = Agent(
         model,
         deps_type=WorkerDeps,
@@ -1925,6 +1923,7 @@ def build_unified_agent(
         prepare_tools=_filter_tools,
         prepare_output_tools=_normalize_strict,
         retries=1,
+        history_processors=_build_history_processors(keep_recent_tool_rounds),
     )
     register_browser_tools(agent)
     return agent
@@ -2024,10 +2023,15 @@ class BrowserAgent:
         orchestrator = build_orchestrator_agent(model, model_settings=model_settings)
         snapshot_filter = build_snapshot_filter_agent(filter_model, model_settings=model_settings)
         oracle_agent = build_oracle_agent(oracle_model, model_settings=model_settings)
-        browser_worker = build_browser_worker_agent(worker_model, model_settings=model_settings)
+        keep_recent = self.agent_config.keep_recent_tool_rounds
+        browser_worker = build_browser_worker_agent(
+            worker_model, model_settings=model_settings, keep_recent_tool_rounds=keep_recent,
+        )
         unified_agent: Agent[WorkerDeps, UnifiedStepOutput] | None = None
         if self.agent_config.unified:
-            unified_agent = build_unified_agent(worker_model, model_settings=model_settings)
+            unified_agent = build_unified_agent(
+                worker_model, model_settings=model_settings, keep_recent_tool_rounds=keep_recent,
+            )
 
         session = await launch_browser(self.browser_config)
         try:

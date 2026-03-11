@@ -138,3 +138,5 @@ class AgentConfig:
     drag_phase_interval_ms: int = 50
     networkidle_timeout_ms: int = 3000
     unified: bool = False
+    # History compaction
+    keep_recent_tool_rounds: int = 3

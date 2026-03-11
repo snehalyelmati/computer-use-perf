@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max tool calls the worker can make in a single step (default: 10)",
     )
     parser.add_argument(
+        "--keep-recent-tool-rounds",
+        type=int,
+        default=3,
+        help="Keep last N tool-call rounds intact; compact older ones (0=disable, default: 3)",
+    )
+    parser.add_argument(
         "--oracle-trace-window",
         type=int,
         default=15,
@@ -269,6 +275,7 @@ def main() -> None:
         save_pages=bool(args.save_pages),
         max_log_runs=int(args.max_log_runs),
         max_worker_tool_calls=int(args.max_worker_tool_calls),
+        keep_recent_tool_rounds=int(args.keep_recent_tool_rounds),
         oracle_trace_window=int(args.oracle_trace_window),
         step_timeout_seconds=int(args.step_timeout_seconds),
     )
