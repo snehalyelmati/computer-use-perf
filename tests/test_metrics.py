@@ -78,6 +78,26 @@ def test_compute_cost_cache_defaults_to_input_rate() -> None:
         del MODEL_PRICES["_test_no_cache"]
 
 
+def test_extract_openrouter_cost_byok_uses_upstream_when_cost_zero() -> None:
+    """BYOK providers report cost=0; cost_usd should fall back to upstream_inference_cost."""
+    messages = [
+        ModelResponse(
+            parts=[TextPart("a")],
+            provider_response_id="r1",
+            provider_details={"cost": 0, "upstream_inference_cost": 0.005},
+        ),
+        ModelResponse(
+            parts=[TextPart("b")],
+            provider_response_id="r2",
+            provider_details={"cost": 0, "upstream_inference_cost": 0.010},
+        ),
+    ]
+    stats = extract_openrouter_cost(messages)
+    assert stats is not None
+    assert stats.cost_usd == 0.015
+    assert stats.upstream_inference_cost_usd == 0.015
+
+
 def test_extract_openrouter_cost_sums_and_dedupes_by_response_id() -> None:
     messages = [
         ModelResponse(

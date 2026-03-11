@@ -134,12 +134,17 @@ def extract_openrouter_cost(messages: Sequence[ModelMessage]) -> CostStats | Non
 
     Requires OpenRouter to include cost fields in provider_details. If no cost fields
     are present, returns None.
+
+    For BYOK (Bring Your Own Key) providers, OpenRouter reports ``cost=0`` because it
+    doesn't bill you, but ``upstream_inference_cost`` carries the real cost charged by
+    the BYOK provider.  The returned ``cost_usd`` uses ``upstream_inference_cost`` as a
+    fallback when ``cost`` is zero so that run summaries reflect actual spend.
     """
 
-    total_cost = 0.0
+    total_effective = 0.0
     total_upstream = 0.0
     seen: set[str] = set()
-    found_cost = False
+    found_any = False
     found_upstream = False
 
     for message in messages:
@@ -152,17 +157,26 @@ def extract_openrouter_cost(messages: Sequence[ModelMessage]) -> CostStats | Non
             seen.add(response_id)
 
         details = message.provider_details or {}
-        if cost := _safe_float(details.get("cost")):
-            total_cost += cost
-            found_cost = True
-        if upstream := _safe_float(details.get("upstream_inference_cost")):
+        cost = _safe_float(details.get("cost"))
+        upstream = _safe_float(details.get("upstream_inference_cost"))
+
+        # Track upstream total independently
+        if upstream is not None and upstream > 0:
             total_upstream += upstream
             found_upstream = True
 
-    if not found_cost and not found_upstream:
+        # Effective cost: prefer OpenRouter cost; fall back to upstream (BYOK)
+        if cost is not None and cost > 0:
+            total_effective += cost
+            found_any = True
+        elif upstream is not None and upstream > 0:
+            total_effective += upstream
+            found_any = True
+
+    if not found_any:
         return None
     return CostStats(
-        cost_usd=total_cost if found_cost else 0.0,
+        cost_usd=total_effective if found_any else 0.0,
         upstream_inference_cost_usd=total_upstream if found_upstream else None,
     )
 
