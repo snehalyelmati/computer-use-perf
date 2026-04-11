@@ -5,12 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "beautifulsoup4>=4.14.3",
-    "cerebras-cloud-sdk>=1.0.0",
-    "groq>=1.0.0",
-    "lxml>=6.0.2",
     "playwright>=1.58.0",
     "pydantic>=2.12.5",
+    "pydantic-ai>=0.0.17",
+    "openai>=1.70.0",
 ]
 
 [dependency-groups]
