@@ -16,6 +16,9 @@ wheels/
 logs/
 *.log
 
+# Local benchmark assets
+.benchmarks/
+
 # Local debug artifacts
 debug_extraction_data.json
 debug_extraction_data*.json

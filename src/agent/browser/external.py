@@ -16,6 +16,128 @@ def _unwrap(value: Any) -> Any:
     return getattr(value, "_inner", value)
 
 
+def _to_impl(value: Any) -> Any:
+    unwrapped = _unwrap(value)
+    return getattr(unwrapped, "_impl_obj", unwrapped)
+
+
+def _has_playwright_impl(value: Any) -> bool:
+    return getattr(value, "_impl_obj", None) is not None
+
+
+def _playwright_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    aliases = {
+        "full_page": "fullPage",
+        "mask_color": "maskColor",
+        "omit_background": "omitBackground",
+        "wait_until": "waitUntil",
+    }
+    return {aliases.get(key, key): value for key, value in kwargs.items() if value is not None}
+
+
+class AsyncPlaywrightImplCDPSession:
+    """Async wrapper around BrowserGym's underlying Playwright CDP session."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = _to_impl(inner)
+
+    async def send(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        return await self._inner.send(method, params or {})
+
+    async def detach(self) -> None:
+        await self._inner.detach()
+
+
+class AsyncPlaywrightImplKeyboard:
+    """Async wrapper around BrowserGym's underlying Playwright Keyboard."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = _to_impl(inner)
+
+    async def press(self, key: str) -> None:
+        await self._inner.press(key)
+
+
+class AsyncPlaywrightImplFrame:
+    """Async-compatible facade for an underlying Playwright Frame."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = _to_impl(inner)
+
+    @property
+    def child_frames(self) -> list["AsyncPlaywrightImplFrame"]:
+        return [AsyncPlaywrightImplFrame(frame) for frame in self._inner.child_frames]
+
+    @property
+    def url(self) -> str:
+        return self._inner.url
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+
+class AsyncPlaywrightImplBrowserContext:
+    """Async wrapper around BrowserGym's underlying Playwright BrowserContext."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = _to_impl(inner)
+
+    async def new_cdp_session(self, page_or_frame: Any) -> AsyncPlaywrightImplCDPSession:
+        return AsyncPlaywrightImplCDPSession(
+            await self._inner.new_cdp_session(_to_impl(page_or_frame))
+        )
+
+    @property
+    def pages(self) -> list[Any]:
+        return [AsyncPlaywrightImplPage(page) for page in getattr(self._inner, "pages", [])]
+
+
+class AsyncPlaywrightImplPage:
+    """Async facade over BrowserGym's sync page using Playwright's impl object."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = _to_impl(inner)
+
+    @property
+    def url(self) -> str:
+        return self._inner.url
+
+    @property
+    def context(self) -> AsyncPlaywrightImplBrowserContext:
+        return AsyncPlaywrightImplBrowserContext(self._inner.context)
+
+    @property
+    def main_frame(self) -> AsyncPlaywrightImplFrame:
+        return AsyncPlaywrightImplFrame(self._inner.main_frame)
+
+    @property
+    def frames(self) -> list[AsyncPlaywrightImplFrame]:
+        return [AsyncPlaywrightImplFrame(frame) for frame in self._inner.frames]
+
+    @property
+    def keyboard(self) -> AsyncPlaywrightImplKeyboard:
+        return AsyncPlaywrightImplKeyboard(self._inner.keyboard)
+
+    async def evaluate(self, expression: str, arg: Any = None) -> Any:
+        return await self._inner.evaluate(expression, arg)
+
+    async def goto(self, url: str, **kwargs: Any) -> Any:
+        return await self._inner.goto(url, **_playwright_kwargs(kwargs))
+
+    async def screenshot(self, **kwargs: Any) -> bytes:
+        return await self._inner.screenshot(**_playwright_kwargs(kwargs))
+
+    async def title(self) -> str:
+        return await self._inner.title()
+
+    async def wait_for_load_state(self, state: str = "load", **kwargs: Any) -> None:
+        await self._inner.wait_for_load_state(state, **_playwright_kwargs(kwargs))
+
+    async def wait_for_timeout(self, timeout: float) -> None:
+        await self._inner.wait_for_timeout(timeout)
+
+
 class AsyncSyncCDPSession:
     """Async-shaped wrapper around BrowserGym's sync CDP session."""
 
@@ -165,3 +287,23 @@ def build_external_browser_session(page: Any) -> ExternalBrowserSession:
         context=context,
         frame_sessions={},
     )
+
+
+async def build_external_browser_session_async(page: Any) -> ExternalBrowserSession:
+    """Wrap a BrowserGym page while preserving Playwright's owning event loop."""
+
+    if _is_async_method(page, "evaluate"):
+        raise TypeError(
+            "build_external_browser_session_async expects BrowserGym's sync Playwright page"
+        )
+    if _has_playwright_impl(page):
+        async_page = AsyncPlaywrightImplPage(page)
+        context = async_page.context
+        cdp_session = await context.new_cdp_session(async_page)
+        return ExternalBrowserSession(
+            page=async_page,
+            cdp_session=cdp_session,
+            context=context,
+            frame_sessions={},
+        )
+    return build_external_browser_session(page)

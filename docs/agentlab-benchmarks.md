@@ -33,9 +33,17 @@ Use Python 3.12. The project metadata is pinned to `>=3.12,<3.13` so it is compa
 ```bash
 uv sync --extra agentlab
 uv run playwright install chromium
+git clone https://github.com/Farama-Foundation/miniwob-plusplus.git .benchmarks/miniwob-plusplus
+git -C .benchmarks/miniwob-plusplus reset --hard 7fd85d71a4b60325c6585396ec4f48377d049838
 ```
 
 MiniWoB also requires the MiniWoB++ static site at BrowserGym's pinned commit and `MINIWOB_URL` pointing to it. WebArena requires the self-hosted services and the standard `WA_*` environment variables.
+
+For the local smoke runner, the default MiniWoB URL is:
+
+```bash
+export MINIWOB_URL="file://$PWD/.benchmarks/miniwob-plusplus/miniwob/html/miniwob/"
+```
 
 ## AgentLab Configuration
 
@@ -68,6 +76,14 @@ Start with single-task smoke tests before broad runs:
 - `miniwob.enter-text`
 - one form task
 - one scroll or hover task
+
+This repo includes a two-task smoke runner:
+
+```bash
+AGENTLAB_EXP_ROOT="$PWD/logs/agentlab/studies" \
+MINIWOB_URL="file://$PWD/.benchmarks/miniwob-plusplus/miniwob/html/miniwob/" \
+uv run --extra agentlab python benchmarks/agentlab/run_miniwob_smoke.py
+```
 
 For WebArena, first run one self-hosted task, then a small dependency-safe subset, then WebArena Lite or WebArena-Verified, and only then a full run.
 

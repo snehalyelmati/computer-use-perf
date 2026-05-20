@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from dataclasses import dataclass
 import traceback
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
-from src.agent.browser.external import build_external_browser_session
+from src.agent.browser.external import build_external_browser_session_async
 from src.agent.config import AgentConfig, LLMConfig, PROVIDER_DEFAULTS
 from src.agent.core.step_runtime import BrowserAgentStepRuntime, RuntimeStepResult
 
@@ -54,6 +55,23 @@ def _goal_from_obs(obs: dict[str, Any]) -> str:
 
 def _noop_action() -> str:
     return "noop()"
+
+
+T = TypeVar("T")
+
+
+def _run_async_from_sync(
+    coro_factory: Callable[[], Coroutine[Any, Any, T]],
+    sync_owner: Any | None = None,
+) -> T:
+    sync_runner = getattr(sync_owner, "_sync", None)
+    if callable(sync_runner):
+        return sync_runner(coro_factory())
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro_factory())
+    raise RuntimeError("Cannot run async agent step from a synchronous callback")
 
 
 @dataclass
@@ -148,12 +166,15 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
 
     def reset(self, seed: int | None = None) -> None:
         del seed
-        self._raw_page = None
         old_runtime = self._runtime
         try:
-            asyncio.run(old_runtime.close(stop_reason="reset"))
+            _run_async_from_sync(
+                lambda: old_runtime.close(stop_reason="reset"),
+                sync_owner=self._raw_page,
+            )
         except RuntimeError:
             pass
+        self._raw_page = None
         self._runtime = self._runtime_factory(self.agent_config, self.llm_config)
 
     def obs_preprocessor(self, obs: dict[str, Any]) -> dict[str, Any]:
@@ -170,10 +191,11 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
             )
             return _noop_action(), info
 
-        session = None
         try:
-            session = build_external_browser_session(self._raw_page)
-            result = asyncio.run(self._runtime.run_one_step(session, goal=_goal_from_obs(obs)))
+            result = _run_async_from_sync(
+                lambda: self._run_step(obs),
+                sync_owner=self._raw_page,
+            )
             info = self._info_from_result(result)
             return _noop_action(), info
         except Exception as exc:  # pragma: no cover - runtime containment
@@ -186,12 +208,13 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
                 },
             )
             return _noop_action(), info
+
+    async def _run_step(self, obs: dict[str, Any]) -> RuntimeStepResult:
+        session = await build_external_browser_session_async(self._raw_page)
+        try:
+            return await self._runtime.run_one_step(session, goal=_goal_from_obs(obs))
         finally:
-            if session is not None:
-                try:
-                    asyncio.run(session.detach())
-                except Exception:
-                    pass
+            await session.detach()
 
     def _info_from_result(self, result: RuntimeStepResult) -> Any:
         stats = {
