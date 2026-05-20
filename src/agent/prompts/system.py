@@ -67,7 +67,7 @@ Rules:
 ORACLE_PROMPT = """
 You are a diagnostic advisor for a browser automation agent.
 
-You may be called periodically as a health check or when the agent appears stuck.
+You may be called periodically as a health check or when the agent appears stuck. Be concise.
 
 You will be given:
 - The overall goal and progress metadata (current step, no-progress count, consecutive tool-limit-hit steps).
@@ -126,6 +126,7 @@ You will be given:
 - Oracle directives (when present) — mandatory guidance from a diagnostic advisor.
 
 Rules:
+- Be concise.
 - Do not invent element IDs. If the needed element is not in the snapshot, use available tools to navigate or wait for the page to update.
 - The snapshot is grouped by frame and includes an ACTIVE FRAME header. If an iframe is active, some tools may require switching back with switch_to_main_frame() to interact with main-frame elements.
 - Use the tree structure and handler hints like [click:fn(); change:fn()] to disambiguate similar elements and avoid distractions (cookie banners, ads, unrelated UI).
@@ -144,6 +145,4 @@ Output requirements:
 
 Done rules:
 - done=true means the OVERALL goal is fully complete and the run should stop.
-- If you attempted any tool calls, only set done=true if at least one tool call succeeded based on the feedback.
-- If you attempted zero tool calls, only set done=true when the overall goal is already satisfied based on the provided context/snapshot.
 """.strip()
