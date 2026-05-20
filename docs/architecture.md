@@ -12,6 +12,35 @@ This document describes the current code path, not the historical harness. It is
 
 It then calls `run_agent_sync()`, which creates a `BrowserAgent` and runs the async loop.
 
+## AgentLab Entry
+
+`benchmarks/agentlab/computer_use_agent.py` adds a benchmark entry path for AgentLab and BrowserGym. `ComputerUseAgentArgs` is the serializable AgentLab configuration object. It creates `ComputerUseAgentLabAgent`, sets `use_raw_page_output=True`, and uses BrowserGym's raw `obs["page"]` instead of launching a browser.
+
+`obs_preprocessor()` stores the raw Playwright page on the agent and removes it from the observation before AgentLab pickles step data. `get_action()` wraps the BrowserGym sync page with `src/agent/browser/external.py`, runs one `BrowserAgentStepRuntime` step, then returns `noop()` so BrowserGym can observe and validate the page that this agent already mutated.
+
+```mermaid
+sequenceDiagram
+    participant Study as AgentLab Study
+    participant Env as BrowserGym Env
+    participant Adapter as ComputerUseAgentLabAgent
+    participant Bridge as Sync Page Bridge
+    participant Runtime as BrowserAgentStepRuntime
+    participant Tools as Semantic Tools
+
+    Study->>Env: reset/step
+    Env-->>Adapter: raw observation with page
+    Adapter->>Adapter: store page, strip from obs
+    Adapter->>Bridge: wrap sync Playwright page/CDP
+    Adapter->>Runtime: run_one_step(session, goal)
+    Runtime->>Runtime: snapshot + Oracle + Filter + plan
+    Runtime->>Tools: DOM-first actions with stable element IDs
+    Tools-->>Env: mutate live BrowserGym page
+    Adapter-->>Env: noop()
+    Env->>Env: BrowserGym validation
+```
+
+This path deliberately keeps BrowserGym as the source of truth for success. Internal `done=True` is emitted in `AgentInfo` as diagnostic data, but the adapter still returns `noop()` and lets the environment decide termination.
+
 ## Main Loop
 
 The default loop follows this order each step:
@@ -193,3 +222,9 @@ The current loop contains recovery code for known bugs from the external benchma
 - Final-step code-reveal behavior.
 
 These are intentionally documented as benchmark-specific. They should not be presented as general browser-agent architecture, and they should be isolated if this becomes a reusable package.
+
+## Single-Step Runtime
+
+`src/agent/core/step_runtime.py` contains the reusable single-step runtime used by the AgentLab adapter. It mirrors the main loop's per-step behavior: page settlement, handler extraction, scroll-container marking, CDP snapshot capture, diffs/fingerprints, Oracle, Filter, pruned snapshot construction, Orchestrator/Worker or Unified execution, memory, metrics, and run summaries.
+
+Unlike `BrowserAgent.run()`, it does not launch, navigate, or close the browser. The caller supplies an `ExternalBrowserSession`, and only CDP sessions created for the step are detached afterward.

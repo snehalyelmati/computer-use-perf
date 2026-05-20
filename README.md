@@ -21,6 +21,8 @@ The agent itself is not tied to that site. It runs against a target URL and a ta
 uv run main.py --url <target-url> --task TASK.md
 ```
 
+The benchmark path now runs through AgentLab and BrowserGym. In that mode, BrowserGym owns the browser and validation, while this agent runs its normal snapshot, Oracle, Filter, Orchestrator, Worker, metrics, and DOM-first tools inside the live BrowserGym page.
+
 ## Why Browser Agents Are Hard
 
 Browser automation fails in ways that are easy to miss from a raw screenshot or simple DOM dump:
@@ -135,6 +137,13 @@ Run tests:
 uv run pytest -q
 ```
 
+Install optional AgentLab/BrowserGym benchmark dependencies:
+
+```bash
+uv sync --extra agentlab
+uv run playwright install chromium
+```
+
 ## Outputs
 
 Each run writes to `logs/<run_id>/`; `logs/latest` points to the most recent run.
@@ -161,6 +170,7 @@ uv run python scripts/generate_results.py
 
 - `docs/journey.md`: project history from custom harness to modular agent.
 - `docs/architecture.md`: current runtime architecture verified against code.
+- `docs/agentlab-benchmarks.md`: AgentLab + BrowserGym benchmark adapter setup and execution notes.
 - `docs/failure-modes.md`: browser-agent failure modes and mitigations.
 - `docs/benchmark-results.md`: archived benchmark results and interpretation.
 - `docs/observability.md`: logs, metrics, and run artifacts.
