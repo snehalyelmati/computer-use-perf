@@ -1,197 +1,194 @@
 # computer-use-perf
 
-General-purpose browser agent (scaffold).
+`computer-use-perf` is an experimental browser agent focused on making LLM-driven web automation reliable, inspectable, and measurable.
 
-## Structure
-- Entry point: `main.py`
-- Core modules: `src/agent/`
+The project started as a custom Playwright plus LLM harness and evolved into a modular browser-agent runtime with CDP snapshots, stable element IDs, DOM-first tools, multi-agent control, and per-run observability.
 
-```mermaid
-flowchart LR
-    subgraph LLM[LLM Infrastructure]
-        OR[OpenRouter / Cerebras]
-        FILT[Filter — Snapshot Pruner]
-        ORAC[Oracle — Execution Auditor]
-        ORCH[Orchestrator — Goal Planner]
-        WORK[Worker — Browser Executor]
-        OR --> FILT
-        OR --> ORAC
-        OR --> ORCH
-        OR --> WORK
-    end
+## What This Is
 
-    subgraph Browser[Execution Environment]
-        HE[Handler Extraction]
-        CDP[CDP Snapshot]
-        PW[Playwright Actions]
-        HE -->|"data-agent-hid stamps"| CDP
-        CDP --> PW
-    end
+- A general-purpose browser agent runner for arbitrary web targets.
+- A research/engineering artifact for browser-agent reliability patterns.
+- A benchmark history from development against an external browser-agent challenge site.
+- A collection of debugging scripts, logs, metrics, and architecture notes from iterative development.
 
-    HE -->|Handler Map| CDP
-    CDP -->|Full Snapshot + handlers| FILT
-    FILT -->|Pruned Snapshot + useful text| ORCH
-    ORAC -->|Directive when off-track| ORCH
-    ORCH -->|Delegated Goal| WORK
-    FILT -->|Pruned Snapshot| WORK
-    WORK -->|"Semantic Tool Calls (stable ids)"| PW
+## Status
+
+The original external benchmark site used during development may no longer be reliably available. The benchmark results in this repository should be treated as archived historical runs, not as a currently reproducible public benchmark.
+
+The agent itself is not tied to that site. It runs against a target URL and a task file:
+
+```bash
+uv run main.py --url <target-url> --task TASK.md
 ```
 
-## Setup
-- `uv sync`
-- Set `OPENROUTER_API_KEY` for OpenRouter access
+## Why Browser Agents Are Hard
 
-## Run
-- `uv run main.py --url <target> --task TASK.md [--headless] [--max-elements 60] [--stuck-threshold 3] [--unchanged-abort-threshold 5] [--oracle-interval 5] [--widen-on-oracle] [--unified] [--max-tokens 2048] [--log-level INFO] [--no-metrics] [--no-handlers]`
+Browser automation fails in ways that are easy to miss from a raw screenshot or simple DOM dump:
 
-`TASK.md` should contain the full task instructions as plain markdown text.
+- Hidden DOM and `data-*` attributes can contain task-critical values.
+- Interactive elements can be unlabeled, dynamically inserted, or hidden inside iframes.
+- Visual visibility checks can fail because overlays, modals, or z-index layers obscure targets.
+- Element labels can be decoys, stale, or unrelated to the actual page task.
+- Buttons can transition from disabled to enabled without obvious text changes.
+- LLM agents can repeat failed actions, declare success too early, or exhaust tool calls.
+- Tool feedback can become large enough to create token and cost blowups.
 
-Use `--unified` to run a single tool-equipped agent (skips the Orchestrator → Worker handoff). Oracle and Filter remain unchanged.
-
-### Outputs
-- Logs: `logs/agent.log`
-- Metrics (JSONL): `logs/metrics.jsonl` (timings, token usage, and OpenRouter cost when available)
-- Run summary: `logs/run_summary.json`
-- Details: `docs/observability.md`
-- Analyze timings: `uv run python scripts/analyze_metrics.py logs/metrics.jsonl`
+This project explores those problems as systems problems: context extraction, action semantics, feedback loops, state tracking, and observability.
 
 ## Architecture
 
-This project is a general-purpose browser agent built around a clear separation of concerns:
-
-- **PydanticAI** handles orchestration, memory, and structured outputs.
-- **OpenRouter** provides a single OpenAI-compatible gateway to multiple model providers.
-- **CDP** captures rich DOM context for the LLM.
-- **Playwright** executes actions reliably in the browser.
-
-### Agent Framework (PydanticAI)
-
-- Agents are defined with `Agent(model, tools=...)` and return structured outputs.
-- Pydantic models describe the agent outputs and tool payloads.
-- Multi-agent orchestration is handled manually via code-driven delegation.
-
-### LLM Infrastructure (OpenRouter)
-
-- OpenRouter is used as an OpenAI-compatible endpoint.
-- Models (Groq, Cerebras, OpenAI, etc.) are selected via model names.
-- Structured outputs are enforced via JSON schema when supported.
-- Default model: `moonshotai/kimi-k2-0905:exacto` (see `src/agent/config.py`).
-
-### Execution Environment
-
-- **CDP (Chrome DevTools Protocol)** is used for context extraction:
-  - DOM, accessibility, layout, and element metadata for LLM context.
-  - Low-latency, high-fidelity snapshots.
-- **Playwright** is used for action execution:
-  - Robust actions with built-in waiting and retries.
-  - Browser lifecycle and session management.
-- **CDP + Playwright via CDPSession** keeps context extraction and actions aligned.
+The current default runtime is a modular loop. `main.py` builds runtime configuration and calls `BrowserAgent.run()` in `src/agent/core/agent.py`.
 
 ```mermaid
-sequenceDiagram
-    participant HE as Handler Extraction
-    participant CDP as CDP Snapshotter
-    participant Filter as Filter (Pruner)
-    participant Oracle as Oracle (Auditor)
-    participant Orchestrator as Orchestrator
-    participant Worker as Worker
-    participant PW as Playwright Executor
+flowchart TD
+    Start([Run]) --> Browser[Launch Playwright Chromium]
+    Browser --> Page[Open target URL]
+    Page --> Step[Step Loop]
 
-    CDP->>CDP: wait_for_load_state(networkidle)
-    HE->>HE: page.evaluate (stamp data-agent-hid)
-    HE->>CDP: handler map
-    CDP->>CDP: capture snapshot (correlate handlers)
-    HE->>HE: cleanup data-agent-hid
-    CDP->>Filter: Full snapshot + handlers + raw text + diff
-    Filter-->>Orchestrator: Pruned snapshot + useful text
-    Oracle-->>Orchestrator: Directive (when off-track)
-    Orchestrator->>Worker: Goal + pruned snapshot
-    Worker->>PW: Semantic tool calls (stable ids)
-    PW-->>Worker: Tool results + DOM change feedback
-    Worker-->>Orchestrator: Step summary + done?
-    Worker-->>Oracle: Step trace entry
+    Step --> Settle[Wait for page settlement]
+    Settle --> Handlers[Optional JS handler extraction]
+    Handlers --> Scroll[Optional scroll-container marking]
+    Scroll --> Snapshot[CDP snapshot capture]
+    Snapshot --> Diff[Diff + fingerprints]
+    Diff --> Oracle{Oracle trigger?}
+
+    Oracle -->|periodic, stuck, or tool-limit loop| OracleAgent[Oracle advisor]
+    Oracle -->|no| Filter
+    OracleAgent --> Filter[Snapshot filter]
+
+    Filter --> Prune[Build pruned snapshot]
+    Prune --> Mode{Unified mode?}
+
+    Mode -->|no| Orchestrator[Orchestrator chooses worker goal]
+    Orchestrator --> Worker[Worker executes semantic tools]
+
+    Mode -->|yes| Unified[Unified agent plans and executes]
+
+    Worker --> Feedback[Mutation feedback + memory + metrics]
+    Unified --> Feedback
+    Feedback --> Done{Done or stop condition?}
+    Done -->|no| Step
+    Done -->|yes| Summary[Write run summary]
 ```
 
-## Tooling Principles
+Key components:
 
-### Semantic Tools (Preferred)
+- **Snapshot capture:** `src/agent/context/snapshot.py` uses CDP `DOMSnapshot.captureSnapshot`, `Accessibility.getFullAXTree`, and `Page.getFrameTree`.
+- **Handler hints:** `src/agent/context/handlers.py` extracts inline, React, Vue, and Angular handler summaries before snapshot capture.
+- **Filter:** A conservative LLM pruner that keeps likely useful elements and high-signal text.
+- **Oracle:** A diagnostic advisor called periodically, when stuck, or after repeated tool-limit loops.
+- **Orchestrator:** A planner that assigns a small outcome-focused goal to the worker.
+- **Worker:** A tool-equipped executor that uses stable element IDs from the snapshot.
+- **Unified mode:** `--unified` replaces the Orchestrator -> Worker handoff with one tool-equipped agent after Filter/Oracle preprocessing.
 
-The agent uses semantic tools that reference stable element IDs:
+## Tools
 
-- `click_element(element_id: str)`
-- `type_text(element_id: str, text: str)`
-- `drag_and_drop(source_id: str, target_id: str)`
-- `scroll(delta_x: int, delta_y: int, element_id: str | None = None)`
-- `wait(milliseconds: int)` (capped at 10s)
-- `switch_to_iframe(iframe_id: str)`, `switch_to_main_frame()`
-- `press_key_combination(keys: list[str])`
+The default worker tool set is intentionally constrained:
 
-### Available but not in default worker set
+- `click_element(element_id)`
+- `hover_element(element_id, duration_ms=2000)`
+- `type_text(element_id, text)`
+- `drag_and_drop(source_id, target_id)`
+- `draw(element_id, path)`
+- `scroll(delta_x, delta_y, element_id=None)`
+- `wait(milliseconds)`
+- `watch_for_text(text, timeout_ms=10000)`
+- `switch_to_iframe(iframe_id)`
+- `switch_to_main_frame()`
+- `press_key_combination(keys)`
 
-- `find_elements(query: str, limit: int = 8)` — search for elements by text, label, or role
-- `inspect_element(element_id: str)` — returns text content + all HTML attributes
-- `search_page_attributes(query: str)` — searches all DOM elements for matching attributes
-- `take_screenshot()`, `execute_js(code: str)`
+Additional tools such as `inspect_element`, `search_page_attributes`, `execute_js`, `take_screenshot`, and `navigate_to` exist in the tool layer but are not part of the default worker tool set.
 
-### Reference-Based, Not Selectors
+## Quick Start
 
-- The LLM never sees raw CSS/XPath selectors.
-- Each snapshot produces a mapping: `stable_id -> backend node id + frame metadata` (internal only).
-- Tool calls only accept stable element IDs.
+Install dependencies:
 
-### Optional Escape Hatches
+```bash
+uv sync
+```
 
-- `execute_js(code: str)`
-- `press_key_combination(keys: list[str])`
+Set an API key for the provider you want to use:
 
-## Recommended Agent Loop
+```bash
+export OPENROUTER_API_KEY=...
+```
 
-1. **Wait for page settlement** (`domcontentloaded` + `networkidle`) to handle SPA transitions.
-2. **Extract JS handlers** via `page.evaluate()` — stamps elements with `data-agent-hid`, returns handler map. Disabled with `--no-handlers`.
-3. **Extract context via CDP** into a structured snapshot with full element tree. Handler map is correlated via `data-agent-hid`, then marker attributes are cleaned up.
-4. **Oracle health check** (periodic every N steps + when stuck): reviews the execution trace and issues directives. Invalidates filter cache when intervention is needed.
-5. **Filter (tree pruner)**: receives full snapshot + diff + Oracle advice. Conservatively removes only obvious filler elements; keeps everything plausibly useful. Cached when the page fingerprint is unchanged.
-6. **Deterministic guardrails**: compress text blobs, anchor must-keep elements to instruction text (e.g., quoted button labels), and expand kept containers to retain sibling controls.
-7. **Build pruned snapshot**: only kept elements survive. Orchestrator and worker never see removed elements. Optionally, `--widen-on-oracle` bypasses pruning when the Oracle intervenes (`all_clear=false`).
-8. **Orchestrator**: plans the next sub-goal using stable element IDs from the pruned snapshot. Follows Oracle directives when present.
-9. **Worker**: executes the goal using semantic tools against the pruned snapshot. Receives only the goal + snapshot (no memory, no progress info).
-10. **Update step trace + memory + stop criteria** (`done`, `max_steps`, or unchanged fingerprint abort).
-11. **Repeat** until the overall goal is complete.
+Run the agent:
 
-## Guardrails
+```bash
+uv run main.py --url <target-url> --task TASK.md
+```
 
-- Avoid hardcoding site-specific selectors or strings.
-- Pass stable element IDs, never raw selectors, to the LLM.
-- Keep tools generic and reusable across websites.
-- The Oracle fires periodically (default: every 5 steps) and when stuck (default: 3 unchanged steps). It reviews the full execution trace and issues directives that the orchestrator must follow.
-- When the Oracle fires with `all_clear=false`, the filter cache is invalidated to force re-evaluation with Oracle context.
-- Optional: enable `--widen-on-oracle` to keep all interactive elements (minus avoided ids) when `all_clear=false`.
-- If the page fingerprint is unchanged for multiple steps (default: 5), the agent aborts early with a clear stop reason.
-- LLM output is capped at `max_tokens` (default: 2048) with `frequency_penalty` (0.3) to prevent degenerate repetition.
+Useful variants:
+
+```bash
+uv run main.py --url <target-url> --task TASK.md --headless
+uv run main.py --url <target-url> --task TASK.md --unified
+uv run main.py --url <target-url> --task TASK.md --provider groq
+uv run main.py --url <target-url> --task TASK.md --worker-model <model> --filter-model <model> --oracle-model <model>
+uv run main.py --url <target-url> --task TASK.md --save-pages
+```
+
+Run tests:
+
+```bash
+uv run pytest -q
+```
+
+## Outputs
+
+Each run writes to `logs/<run_id>/`; `logs/latest` points to the most recent run.
+
+- `logs/latest/agent.log`: human-readable runtime log.
+- `logs/latest/agent_debug.log`: verbose debug log with prompts, structured outputs, diffs, memory, and traces.
+- `logs/latest/metrics.jsonl`: structured events for snapshots, agent calls, tools, tokens, cost, and timings.
+- `logs/latest/run_summary.json`: final rollup with stop reason, duration, tokens, cost, provider, and models.
+- `logs/latest/pages/`: optional saved HTML snapshots when `--save-pages` is enabled.
+
+Analyze timing metrics:
+
+```bash
+uv run python scripts/analyze_metrics.py logs/latest/metrics.jsonl
+```
+
+Regenerate archived benchmark results:
+
+```bash
+uv run python scripts/generate_results.py
+```
+
+## Documentation
+
+- `docs/journey.md`: project history from custom harness to modular agent.
+- `docs/architecture.md`: current runtime architecture verified against code.
+- `docs/failure-modes.md`: browser-agent failure modes and mitigations.
+- `docs/benchmark-results.md`: archived benchmark results and interpretation.
+- `docs/observability.md`: logs, metrics, and run artifacts.
+- `docs/architecture-options.md`: comparison of six agent architecture options.
+- `docs/challenge-map.md`: archived challenge-site investigation notes.
+- `docs/source-map.md`: where documentation claims come from.
+- `docs/articles/`: long-form engineering writeups about the project journey and lessons learned.
+
+## Design Principles
+
+- Prefer DOM-first actions for click/type/read interactions; use coordinates only when the action is inherently spatial, such as drawing or some drag/drop cases.
+- Pass stable element IDs to the LLM, never raw CSS or XPath selectors.
+- Keep pruning conservative because over-pruning can make a step impossible.
+- Treat tool feedback as part of the agent loop, not just logging.
+- Separate general-purpose architecture from benchmark-specific fixes.
+- Measure tokens, cost, timing, stop reasons, and tool behavior for every run.
+
+## Limitations
+
+- The archived benchmark site may not be available, so historical results may not be independently rerunnable.
+- Some benchmark-specific recovery code remains in the runtime loop and should be isolated if the project becomes a reusable package.
+- The agent is experimental and can still repeat bad actions, over-trust page text, or fail on complex application state.
+- The default worker tool set intentionally excludes powerful escape hatches like arbitrary JavaScript execution.
 
 ## Roadmap
 
-### Phase 1: Scaffolding (Done)
-
-- Create modular package layout under `src/agent/`.
-- Replace legacy docs with updated architecture guidance.
-- Define basic config and entrypoint.
-
-### Phase 2: Context & Tooling (Done)
-
-- Implement CDP snapshot capture for DOM + accessibility.
-- Create hashed stable element-id mapping per snapshot (CDP node IDs stay internal).
-- Wire semantic tools to Playwright/CDP actions with overlay-aware input.
-- Support iframe switching and navigation APIs with frame-aware CDP sessions.
-
-### Phase 3: Agent Loop (Done)
-
-- Add an orchestrator agent that delegates to worker agents.
-- Implement a browser worker agent with tool-calling support.
-- Build an orchestration loop with memory and stop criteria.
-
-### Phase 4: Quality & Reliability
-
-- Add tests for snapshot extraction, id mapping, and tools.
-- Add logging and tracing for agent decisions.
-- Create replay fixtures for debugging.
+- Add a small local demo/mini-benchmark so the repository remains reproducible without the original external benchmark.
+- Isolate benchmark-specific fixes from the general runtime.
+- Build a simple run viewer for logs, metrics, page captures, and step traces.
+- Improve failure classification and result summaries.
+- Add more deterministic validation for overall task completion.
