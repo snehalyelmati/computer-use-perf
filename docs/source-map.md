@@ -68,8 +68,9 @@ Tools implemented but not in the default worker tool set include `inspect_elemen
 
 - Metrics and run directories: `src/agent/metrics.py`.
 - Page capture: `src/agent/capture/page_saver.py`.
-- Metrics analysis scripts: `scripts/analyze_metrics.py`, `scripts/analyze_last_run.py`, `scripts/visualize_api_calls.py`.
+- Metrics analysis scripts: `scripts/analyze_metrics.py`, `scripts/analyze_last_run.py`.
 - Result generation: `scripts/generate_results.py`.
+- BrowserGym benchmark reporting: `benchmarks/agentlab/run_browsergym_benchmark.py`.
 
 Verified facts:
 
@@ -77,6 +78,23 @@ Verified facts:
 - Metrics are JSONL events written to `metrics.jsonl`.
 - Run summaries include provider, models, duration, retry wait, step count, stop reason, tokens, and cost.
 - Page HTML capture is optional via `--save-pages`.
+
+## AgentLab Benchmarks
+
+- Adapter: `benchmarks/agentlab/computer_use_agent.py`.
+- Generic runner and report generation: `benchmarks/agentlab/run_browsergym_benchmark.py`.
+- Legacy MiniWoB smoke runner: `benchmarks/agentlab/run_miniwob_smoke.py`.
+- Regression tests: `tests/test_agentlab_adapter.py`, `tests/test_browsergym_benchmark_runner.py`.
+
+Verified facts:
+
+- BrowserGym owns task setup, browser lifecycle, rewards, termination, and validation.
+- The adapter requests `use_raw_page_output=True`, stores the raw Playwright page, and returns `noop()` after the internal agent mutates the live page.
+- The generic runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny.
+- MiniWoB `verify-five` is a five-task verification subset; MiniWoB `full` uses BrowserGym's default suite with `n_repeats=5` unless overridden.
+- WebArena variants use AgentLab's `ray` backend when `--n-jobs > 1` so BrowserGym task dependencies are preserved.
+- Benchmark reports count missing `cum_reward` rows as zero reward and include those gaps in `warnings.parse_gaps`.
+- Report artifacts are `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`.
 
 ## Historical Commit Sources
 
@@ -106,6 +124,14 @@ Modular architecture commits:
 - Result tracker: `e8a1040`.
 - Dynamic element IDs from mutation feedback: `367d8f9`.
 - Tool-return history compaction: `802664d`.
+
+AgentLab and BrowserGym commits:
+
+- Task file support replacing direct goal CLI usage: `1ce84c4`.
+- AgentLab BrowserGym adapter and Python 3.12 compatibility: `3a41cf5`.
+- MiniWoB smoke benchmark runner and BrowserGym sync bridge: `75159be`.
+- MiniWoB benchmark defaults, option selection, and unified no-action done gating: `55d29be`.
+- MiniWoB visual handling, `click_at`, benchmark shutdown/logging hardening, and resource tracker suppression: `343a670`.
 
 Benchmark-specific commits:
 

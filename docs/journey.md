@@ -123,4 +123,4 @@ Some fixes in the code are benchmark-specific, such as stale puzzle state recove
 
 ## Current State
 
-The current project is an experimental browser-agent runtime, not a polished product package. It can run against arbitrary URLs and tasks, records detailed run artifacts, and includes archived benchmark results from development. The next presentation step is to separate the reusable agent design from benchmark-specific recovery code and add a local demo target so the repo remains reproducible without the original benchmark site.
+The current project is an experimental browser-agent runtime, not a polished product package. It can run against arbitrary URLs and tasks, records detailed run artifacts, includes archived benchmark results from development, and now has a reproducible BrowserGym/AgentLab benchmark path with MiniWoB verification. The next presentation step is to separate the reusable agent design from benchmark-specific recovery code and broaden BrowserGym coverage beyond the verified MiniWoB subset.

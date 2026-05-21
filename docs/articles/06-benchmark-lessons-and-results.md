@@ -56,13 +56,6 @@ These are good debugging stories, but they should be presented separately from t
 
 ## What I Would Add Next
 
-The most useful follow-up is a local mini-benchmark checked into the repository. It should not try to recreate the full external benchmark. It should cover representative hard cases:
+The useful follow-up has shifted from building a repo-local demo benchmark to broadening the BrowserGym/AgentLab path. MiniWoB verification now gives the project a reproducible starting point with BrowserGym-owned validation and local report artifacts.
 
-- Hidden DOM value.
-- Dynamic reveal.
-- Disabled-to-enabled button.
-- Iframe interaction.
-- Hover reveal.
-- Newly inserted interactive element.
-
-That would make the project easier to evaluate even if the original benchmark never comes back.
+The next step is to expand from the verified MiniWoB subset into larger MiniWoB and WebArena-family runs, while keeping full-suite leaderboard-style runs distinct from custom regression subsets.

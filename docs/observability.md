@@ -7,8 +7,17 @@ This agent emits both human-readable logs and machine-readable metrics.
 Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlink points to the most recent run. Old directories are pruned at startup (default: keep last 10; configure with `--max-log-runs`).
 
 - `logs/latest/agent.log`: main runtime log (INFO by default; add `--log-level DEBUG` for per-tool timing lines)
+- `logs/latest/agent_debug.log`: DEBUG log with prompts, structured outputs, diffs, memory, and traces
 - `logs/latest/metrics.jsonl`: structured JSONL events (disable with `--no-metrics`)
 - `logs/latest/run_summary.json`: final rollup for the run (duration, total tokens, total cost, etc.)
+- `logs/latest/pages/`: optional saved HTML snapshots and `manifest.jsonl` when `--save-pages` is enabled
+
+AgentLab benchmark studies also write report artifacts under `logs/agentlab/studies/<study>/`:
+
+- `benchmark_report.json`
+- `benchmark_report.md`
+- `per_task_results.csv`
+- `failed_tasks.md`
 
 ### Metrics events (`logs/latest/metrics.jsonl`)
 

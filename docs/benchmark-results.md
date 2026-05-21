@@ -65,15 +65,8 @@ The repository contains documented investigations for benchmark-site issues, inc
 
 These are valuable debugging case studies, but they should not be presented as general-purpose browser-agent features.
 
-## Future Reproducibility Work
+## Current Reproducibility Path
 
-The best next step is to add a small local demo or mini-benchmark that exercises a representative subset of the hard cases:
+The archived external benchmark results remain historical, but the repository now has a reproducible BrowserGym/AgentLab path. Start with the MiniWoB verification preset documented in `docs/agentlab-benchmarks.md`; it runs under BrowserGym validation and writes `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`.
 
-- Hidden value extraction.
-- Delayed button reveal.
-- Disabled-to-enabled submit flow.
-- Iframe interaction.
-- Hover reveal.
-- Dynamic element insertion.
-
-That would let the repository demonstrate the architecture without depending on the original benchmark site.
+The next reproducibility work is to broaden BrowserGym coverage beyond the verified MiniWoB subset and keep full-suite runs separate from custom local regression subsets.

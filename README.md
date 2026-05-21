@@ -144,6 +144,20 @@ uv sync --extra agentlab
 uv run playwright install chromium
 ```
 
+Run the current MiniWoB verification benchmark path:
+
+```bash
+uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
+  --benchmark miniwob \
+  --preset verify-five \
+  --n-repeats 1 \
+  --max-steps 20 \
+  --env-max-steps 10 \
+  --max-elements 80
+```
+
+The generic benchmark runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny. It writes AgentLab studies under `logs/agentlab/studies/` and emits local report artifacts for score comparison.
+
 ## Outputs
 
 Each run writes to `logs/<run_id>/`; `logs/latest` points to the most recent run.
@@ -153,6 +167,13 @@ Each run writes to `logs/<run_id>/`; `logs/latest` points to the most recent run
 - `logs/latest/metrics.jsonl`: structured events for snapshots, agent calls, tools, tokens, cost, and timings.
 - `logs/latest/run_summary.json`: final rollup with stop reason, duration, tokens, cost, provider, and models.
 - `logs/latest/pages/`: optional saved HTML snapshots when `--save-pages` is enabled.
+
+AgentLab benchmark runs additionally write these files in each study directory:
+
+- `benchmark_report.json`: machine-readable benchmark report.
+- `benchmark_report.md`: human-readable aggregate and per-task summary.
+- `per_task_results.csv`: normalized per-task/per-seed rows.
+- `failed_tasks.md`: failed, errored, truncated, incomplete, or zero-reward episodes with log paths.
 
 Analyze timing metrics:
 
@@ -197,7 +218,7 @@ uv run python scripts/generate_results.py
 
 ## Roadmap
 
-- Add a small local demo/mini-benchmark so the repository remains reproducible without the original external benchmark.
+- Broaden BrowserGym benchmark coverage beyond MiniWoB verification runs.
 - Isolate benchmark-specific fixes from the general runtime.
 - Build a simple run viewer for logs, metrics, page captures, and step traces.
 - Improve failure classification and result summaries.

@@ -2,13 +2,15 @@
 
 Build/Test/Lint:
 - Install deps: `uv sync`
-- Run agent: `uv run main.py --url <target> --goal "<task>"`
+- Install benchmark deps: `uv sync --extra agentlab`
+- Run agent: `uv run main.py --url <target> --task TASK.md`
 - Run tests: `uv run pytest -q`
 
 Common Commands:
-- `uv run main.py --url <target> --goal "<task>"` - run the agent
-- `uv run main.py --url <target> --goal "<task>" --oracle-interval 5 --max-tokens 2048` - run with explicit defaults
-- `uv run main.py --url <target> --goal "<task>" --worker-model <model> --filter-model <model> --oracle-model <model>` - per-role models
+- `uv run main.py --url <target> --task TASK.md` - run the agent
+- `uv run main.py --url <target> --task TASK.md --oracle-interval 5 --max-tokens 2048` - run with explicit defaults
+- `uv run main.py --url <target> --task TASK.md --worker-model <model> --filter-model <model> --oracle-model <model>` - per-role models
+- `uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py --benchmark miniwob --preset verify-five --n-repeats 1 --max-steps 20 --env-max-steps 10 --max-elements 80` - run MiniWoB verification benchmark
 - `uv add <package>` - add a dependency
 
 Observability:
@@ -16,18 +18,21 @@ Observability:
 - Logs: `logs/latest/agent.log`
 - Metrics: `logs/latest/metrics.jsonl` (disable via `--no-metrics`)
 - Run summary: `logs/latest/run_summary.json`
+- AgentLab studies: `logs/agentlab/studies/<study>/` with `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`
 
 Dependencies:
 - `pydantic-ai` - agent orchestration + structured output
 - `openai` - OpenAI-compatible client for OpenRouter
 - `playwright` - browser automation
+- Optional benchmark deps: `agentlab`, `browsergym`, `browsergym-miniwob`, `browsergym-webarena`
 
 Architecture:
 - Root entrypoint in `main.py`; core modules live under `src/agent/`.
 - Uses PydanticAI for orchestration and structured outputs.
-- Uses OpenRouter (OpenAI-compatible) or Cerebras for LLM access.
+- Uses OpenRouter (OpenAI-compatible), Cerebras, or Groq for LLM access.
 - Uses CDP for context extraction and Playwright for action execution.
-- Pipeline: **Handler extraction** (optional JS introspection) → **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor, sees only goal + pruned snapshot).
+- Default pipeline: **Handler extraction** (optional JS introspection) → **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor, sees only goal + pruned snapshot). Unified mode skips the Orchestrator/Worker split after Oracle/Filter and uses a single tool-equipped agent.
+- Benchmark path: `benchmarks/agentlab/computer_use_agent.py` adapts the runtime to BrowserGym-owned pages; `benchmarks/agentlab/run_browsergym_benchmark.py` selects BrowserGym benchmarks and writes report artifacts.
 - Handler extraction runs a single `page.evaluate()` before snapshot capture; stamps elements with `data-agent-hid` for correlation, cleaned up after snapshot. Disable with `--no-handlers`.
 - Oracle advice + diff are fed into the filter; filter cache is invalidated when Oracle intervenes with `all_clear=false`.
 - No database or server components.

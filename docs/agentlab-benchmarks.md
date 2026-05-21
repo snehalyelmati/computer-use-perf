@@ -16,6 +16,8 @@ flowchart LR
     Tools -->|mutate live page| Env
     Adapter -->|returns noop()| Env
     Env --> Validate[BrowserGym Task Validation]
+    Validate --> Results[AgentLab result_df.csv]
+    Results --> Reports[benchmark_report.json + Markdown + per-task CSV]
 ```
 
 The important inversion is browser ownership:
@@ -45,6 +47,37 @@ For the local smoke runner, the default MiniWoB URL is:
 ```bash
 export MINIWOB_URL="file://$PWD/.benchmarks/miniwob-plusplus/miniwob/html/miniwob/"
 ```
+
+## Benchmark Runner
+
+Use the generic runner for current BrowserGym/AgentLab benchmark work:
+
+```bash
+uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
+  --benchmark miniwob \
+  --preset verify-five \
+  --n-repeats 1 \
+  --max-steps 20 \
+  --env-max-steps 10 \
+  --max-elements 80
+```
+
+Supported benchmarks are `miniwob`, `webarena`, `webarena_lite`, `webarena_verified`, and `webarena_tiny`.
+
+Presets:
+
+- `miniwob:verify-five`: `miniwob.click-button`, `miniwob.enter-text`, `miniwob.click-checkboxes`, `miniwob.form-sequence`, and `miniwob.scroll-text`.
+- `miniwob:full`: BrowserGym's default MiniWoB suite with `n_repeats=5` unless overridden.
+- `webarena_tiny:full`: BrowserGym's `webarena_tiny` benchmark.
+- `webarena:full`, `webarena_lite:full`, `webarena_verified:full`: BrowserGym defaults for those suites.
+- `custom`: pass one or more `--task` values.
+
+The runner defaults to unified mode, OpenRouter, `z-ai/glm-4.7:nitro`, `--max-steps 20`, `--env-max-steps 10`, `--max-elements 80`, and sequential execution. Non-WebArena parallel runs use AgentLab's `joblib` backend; WebArena variants use `ray` when `--n-jobs > 1` so BrowserGym task dependencies are honored. Pass `--split-pipeline` only when comparing against the older filter/orchestrator/worker pipeline.
+
+Before creating a study, the runner validates benchmark setup:
+
+- MiniWoB requires `MINIWOB_URL` or the repo-local `.benchmarks/miniwob-plusplus/miniwob/html/miniwob` checkout.
+- WebArena variants require the standard self-hosted `WA_*` URL variables.
 
 ## AgentLab Configuration
 
@@ -79,15 +112,13 @@ Start with single-task smoke tests before broad runs:
 - one form task
 - one scroll or hover task
 
-This repo includes a two-task smoke runner:
+This repo still includes the older two-task MiniWoB smoke runner:
 
 ```bash
 AGENTLAB_EXP_ROOT="$PWD/logs/agentlab/studies" \
 MINIWOB_URL="file://$PWD/.benchmarks/miniwob-plusplus/miniwob/html/miniwob/" \
 uv run --extra agentlab python benchmarks/agentlab/run_miniwob_smoke.py
 ```
-
-Benchmark runs default to unified mode with `z-ai/glm-4.7:nitro`. Pass `--split-pipeline` only when comparing against the older filter/orchestrator/worker pipeline.
 
 For WebArena, first run one self-hosted task, then a small dependency-safe subset, then WebArena Lite or WebArena-Verified, and only then a full run.
 
@@ -102,3 +133,16 @@ AgentLab saves its normal experiment artifacts under its experiment root. This a
 - optional `pages/` captures when enabled
 
 Each `AgentInfo` includes a compact markdown summary, numeric stats for AgentLab aggregation, and `extra_info` with the internal trace, tool call summary, log directory, tokens, cost, and internal stop reason.
+
+The generic runner writes these additional files inside each AgentLab study directory:
+
+- `benchmark_report.json`: canonical machine-readable report with config, aggregate score, per-task aggregates, failed episodes, warnings, git commit, and environment metadata.
+- `benchmark_report.md`: human-readable summary with the command, aggregate score, per-task table, failed-task notes, and reproducibility block.
+- `per_task_results.csv`: normalized per-task/per-seed rows derived from AgentLab's `result_df.csv`.
+- `failed_tasks.md`: only failed, errored, truncated, incomplete, or zero-reward episodes, with paths to the AgentLab experiment and native `agent.log`/`agent_debug.log` when available.
+
+Score reporting treats missing `cum_reward` values in AgentLab result rows as `0.0`, so incomplete experiments stay in the denominator. The report records those cases under `warnings.parse_gaps`.
+
+`--export-leaderboard-json` writes a local draft artifact for full preset runs only. It is explicitly marked as not submitted; leaderboard submission remains manual.
+
+For clean leaderboard-style comparisons, run a `full` preset from a clean git commit and keep the generated `benchmark_report.json`, `per_task_results.csv`, `result_df.csv`, and draft leaderboard JSON together. Custom task subsets are useful for local regression checks, but they should not be compared as full-suite leaderboard results unless the preset definition explicitly names that exact suite.
