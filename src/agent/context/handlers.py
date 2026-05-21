@@ -114,6 +114,54 @@ _EXTRACT_HANDLERS_JS = """
     return candidate.length <= existing.length ? candidate : existing;
   }
 
+  function eventNameFromKey(key) {
+    if (!key) return null;
+    if (key === '__on') return null;
+    const m = String(key).match(/^_+on([A-Za-z][\\w-]*)$/);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function addListenerLikeValue(handlers, eventName, value) {
+    if (!eventName || !value) return;
+    if (typeof value === 'function') {
+      const summary = handlerSummary(value) || 'listener';
+      handlers[eventName] = bestHandler(handlers[eventName], summary);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) addListenerLikeValue(handlers, eventName, item);
+      return;
+    }
+    if (typeof value === 'object') {
+      const nestedEvent = value.type || eventName;
+      const candidates = [value.value, value.listener, value.handler, value.callback];
+      for (const candidate of candidates) {
+        if (typeof candidate === 'function') {
+          const summary = handlerSummary(candidate) || 'listener';
+          handlers[nestedEvent] = bestHandler(handlers[nestedEvent], summary);
+          return;
+        }
+      }
+    }
+  }
+
+  function addPointerAffordance(handlers, el) {
+    try {
+      const nativeTags = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'IFRAME']);
+      const role = (el.getAttribute('role') || '').toLowerCase();
+      const nativeRoles = new Set(['button', 'checkbox', 'combobox', 'link', 'menuitem', 'option', 'radio', 'slider', 'spinbutton', 'switch', 'tab', 'textbox']);
+      if (nativeTags.has(el.tagName) || nativeRoles.has(role)) return;
+
+      const style = window.getComputedStyle(el);
+      if (!style || style.cursor !== 'pointer') return;
+      const label = (el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.textContent || '').trim();
+      if (!label) return;
+      const rects = el.getClientRects();
+      if (!rects || rects.length === 0) return;
+      handlers.click = bestHandler(handlers.click, 'cursor:pointer');
+    } catch(e) {}
+  }
+
   const result = {};
   let hid = 0;
   const allElements = document.querySelectorAll('*');
@@ -123,7 +171,7 @@ _EXTRACT_HANDLERS_JS = """
 
     // 1. React props + fiber (checked first — most descriptive on React pages)
     try {
-      const keys = Object.keys(el);
+      const keys = Array.from(new Set(Object.keys(el).concat(Object.getOwnPropertyNames(el))));
       for (const key of keys) {
         if (key.startsWith('__reactProps$') || key.startsWith('__reactProps')) {
           const props = el[key];
@@ -212,7 +260,24 @@ _EXTRACT_HANDLERS_JS = """
       }
     } catch(e) {}
 
-    // 5. Inline handlers (last — fallback for non-framework pages)
+    // 5. Generic listener-like expandos used by libraries such as D3.
+    try {
+      const keys = Array.from(new Set(Object.keys(el).concat(Object.getOwnPropertyNames(el))));
+      for (const key of keys) {
+        if (key === '__on' && Array.isArray(el[key])) {
+          for (const item of el[key]) {
+            if (item && typeof item === 'object') {
+              addListenerLikeValue(handlers, item.type || 'handler', item);
+            }
+          }
+          continue;
+        }
+        const eventName = eventNameFromKey(key);
+        if (eventName) addListenerLikeValue(handlers, eventName, el[key]);
+      }
+    } catch(e) {}
+
+    // 6. Inline handlers (fallback for non-framework pages)
     for (const attr of INLINE_EVENTS) {
       const fn = el[attr];
       if (fn && typeof fn === 'function') {
@@ -221,6 +286,10 @@ _EXTRACT_HANDLERS_JS = """
         if (summary) handlers[eventName] = bestHandler(handlers[eventName], summary);
       }
     }
+
+    // 7. Last-resort clickable affordance. This catches DOM elements that are
+    // intentionally clickable but do not expose listener source to page JS.
+    addPointerAffordance(handlers, el);
 
     if (Object.keys(handlers).length > 0) {
       const id = String(hid);

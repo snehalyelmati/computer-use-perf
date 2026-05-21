@@ -17,6 +17,7 @@ DEFAULT_MINIWOB_URL = (
     ROOT / ".benchmarks" / "miniwob-plusplus" / "miniwob" / "html" / "miniwob"
 )
 DEFAULT_TASKS = ("miniwob.click-button", "miniwob.enter-text")
+BENCHMARK_DEFAULT_MODEL = "z-ai/glm-4.7:nitro"
 
 
 def _default_miniwob_url() -> str:
@@ -39,7 +40,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="MiniWoB task name to include, e.g. miniwob.click-button. Repeatable.",
     )
     parser.add_argument("--provider", default="openrouter", help="LLM provider for the agent")
-    parser.add_argument("--model", default=None, help="Model override for all agent roles")
+    parser.add_argument(
+        "--model",
+        default=BENCHMARK_DEFAULT_MODEL,
+        help="Model override for all agent roles",
+    )
     parser.add_argument("--worker-model", default=None, help="Worker model override")
     parser.add_argument("--filter-model", default=None, help="Filter model override")
     parser.add_argument("--oracle-model", default=None, help="Oracle model override")
@@ -62,6 +67,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--log-dir",
         default=str(ROOT / "logs" / "agentlab"),
         help="Native agent log directory",
+    )
+    parser.add_argument(
+        "--split-pipeline",
+        action="store_true",
+        help="Use the split filter/orchestrator/worker pipeline instead of unified mode.",
     )
     parser.add_argument(
         "--no-force-exit",
@@ -100,6 +110,7 @@ def main() -> None:
         max_steps=int(args.max_steps),
         max_elements=int(args.max_elements),
         log_dir=args.log_dir,
+        unified=not args.split_pipeline,
     )
     study = make_study(
         agent_args=agent_args,

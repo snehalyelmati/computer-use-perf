@@ -56,7 +56,8 @@ from benchmarks.agentlab import ComputerUseAgentArgs
 
 agent_args = ComputerUseAgentArgs(
     provider="openrouter",
-    model="moonshotai/kimi-k2-0905:exacto",
+    model="z-ai/glm-4.7:nitro",
+    unified=True,
     max_steps=20,
     max_elements=80,
     log_dir="logs/agentlab",
@@ -84,6 +85,8 @@ AGENTLAB_EXP_ROOT="$PWD/logs/agentlab/studies" \
 MINIWOB_URL="file://$PWD/.benchmarks/miniwob-plusplus/miniwob/html/miniwob/" \
 uv run --extra agentlab python benchmarks/agentlab/run_miniwob_smoke.py
 ```
+
+Benchmark runs default to unified mode with `z-ai/glm-4.7:nitro`. Pass `--split-pipeline` only when comparing against the older filter/orchestrator/worker pipeline.
 
 For WebArena, first run one self-hosted task, then a small dependency-safe subset, then WebArena Lite or WebArena-Verified, and only then a full run.
 

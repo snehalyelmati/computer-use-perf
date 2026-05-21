@@ -865,6 +865,68 @@ _CLICK_BY_TEXT_JS = """
 """
 
 
+async def _select_option_element(
+    element: ElementSnapshot,
+    session: CDPSession,
+    context: ToolContext,
+) -> ToolResult:
+    result = await _call_on_node(
+        int(element.backend_node_id or 0),
+        session,
+        """
+        function () {
+            const option = this;
+            const select = option.closest && option.closest('select');
+            if (!select) {
+                return { ok: false, message: 'Option has no parent select' };
+            }
+            option.scrollIntoView({block: 'center', inline: 'center'});
+            const options = Array.from(select.options || []);
+            const index = options.indexOf(option);
+            if (index < 0) {
+                return { ok: false, message: 'Option is not in parent select' };
+            }
+            select.selectedIndex = index;
+            option.selected = true;
+            if (option.value !== undefined) {
+                select.value = option.value;
+            }
+            select.dispatchEvent(new Event('input', { bubbles: true }));
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            return {
+                ok: true,
+                value: select.value,
+                text: (option.textContent || '').trim(),
+                selectedIndex: select.selectedIndex
+            };
+        }
+        """,
+    )
+    details = (result or {}).get("result", {}).get("value")
+    if not isinstance(details, dict) or not details.get("ok"):
+        await _collect_mutations(session, settle_ms=50)
+        message = "Select option failed"
+        if isinstance(details, dict) and details.get("message"):
+            message = str(details["message"])
+        return ToolResult(ok=False, message=message)
+
+    mutations = await _collect_mutations_with_ids(
+        session,
+        context,
+        context.timing.settle_ms,
+        frame_id=element.frame_id,
+        frame_url=element.frame_url,
+    )
+    selected_text = str(details.get("text") or "")
+    selected_value = str(details.get("value") or "")
+    selected_index = details.get("selectedIndex")
+    base = (
+        f"Selected option {element.stable_id}"
+        f' text="{selected_text}" value="{selected_value}" index={selected_index}'
+    )
+    return ToolResult(ok=True, message=_format_verification(mutations, base))
+
+
 async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     context.last_tool = "click_element"
     context.last_element_id = element_id
@@ -876,6 +938,8 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
         return frame_error
     session = await _session_for_element(element, context)
     await _inject_observer(session)
+    if (element.node_name or "").upper() == "OPTION":
+        return await _select_option_element(element, session, context)
     result = await _call_on_node(
         element.backend_node_id,
         session,

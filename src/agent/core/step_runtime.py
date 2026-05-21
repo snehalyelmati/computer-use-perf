@@ -195,6 +195,7 @@ class BrowserAgentStepRuntime:
             provider=self.llm_config.provider,
             git_commit=self._git_commit,
             harness="agentlab_browsergym",
+            unified=self.agent_config.unified,
         )
         logger.info(
             "External run start run_id=%s url=%s max_steps=%s model=%s",
@@ -283,6 +284,7 @@ class BrowserAgentStepRuntime:
                     "total_tokens": self._total_input_tokens + self._total_output_tokens,
                     "cost_usd": self._total_cost_usd,
                     "harness": "agentlab_browsergym",
+                    "unified": self.agent_config.unified,
                 },
             )
         except Exception:
@@ -959,9 +961,10 @@ class BrowserAgentStepRuntime:
             )
             step_output = unified_result.output
 
-        if step_output.done and tool_tracker.success_count == 0 and tool_tracker.failure_count > 0:
+        if step_output.done and tool_tracker.success_count == 0:
+            prefix = "[no successful tools]" if tool_tracker.failure_count > 0 else "[no tools executed]"
             step_output = step_output.model_copy(
-                update={"done": False, "summary": f"[no successful tools] {step_output.summary}"}
+                update={"done": False, "summary": f"{prefix} {step_output.summary}"}
             )
         self._finish_tool_step(
             step_output=step_output,

@@ -10,7 +10,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.agent.context.snapshot import ElementIndex
-from src.agent.core.agent import build_browser_worker_agent, build_orchestrator_agent, WorkerDeps
+from src.agent.config import LLMConfig
+from src.agent.core.agent import (
+    WorkerDeps,
+    build_browser_worker_agent,
+    build_orchestrator_agent,
+    _model_settings,
+)
 from src.agent.metrics import MetricsRecorder
 from src.agent.models.actions import OrchestratorDecision, StepOutput
 from src.agent.tools.semantic import ToolContext
@@ -74,3 +80,9 @@ async def test_browser_worker_registers_semantic_tools() -> None:
         "execute_js",
         "press_key_combination",
     }.issubset(tool_names)
+
+
+def test_openrouter_settings_do_not_restrict_provider_by_default() -> None:
+    settings = _model_settings(LLMConfig(provider="openrouter"))
+
+    assert "openrouter_provider" not in settings

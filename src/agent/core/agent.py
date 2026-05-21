@@ -556,10 +556,6 @@ def _model_settings(config: LLMConfig) -> dict[str, Any]:
     }
     if config.provider == "openrouter":
         settings["openrouter_usage"] = {"include": True}
-        settings["openrouter_provider"] = {
-            "order": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-ai-studio", "google-vertex", "together", "xai"],
-            "only": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-ai-studio", "google-vertex", "together", "xai"],
-        }
         if config.reasoning_effort and config.reasoning_effort != "none":
             settings["openrouter_reasoning"] = {"effort": config.reasoning_effort}
     return settings
@@ -2743,11 +2739,12 @@ class BrowserAgent:
                         )
                         step_output = unified_result.output
 
-                    # Done-gate: override done=True when tool calls were attempted and none succeeded
-                    if step_output.done and tool_tracker.success_count == 0 and tool_tracker.failure_count > 0:
+                    # Done-gate: override done=True when no browser tool actually succeeded.
+                    if step_output.done and tool_tracker.success_count == 0:
                         logger.info("    done-gate: overriding done=True (no successful tool calls)")
+                        prefix = "[no successful tools]" if tool_tracker.failure_count > 0 else "[no tools executed]"
                         step_output = step_output.model_copy(
-                            update={"done": False, "summary": f"[no successful tools] {step_output.summary}"}
+                            update={"done": False, "summary": f"{prefix} {step_output.summary}"}
                         )
 
                     self.state.active_frame_id = tool_context.active_frame_id

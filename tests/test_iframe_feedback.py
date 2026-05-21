@@ -94,6 +94,77 @@ async def test_active_frame_error_explains_main_vs_iframe() -> None:
     assert "el_iframe" in result.message
 
 
+@pytest.mark.asyncio
+async def test_click_option_sets_parent_select(monkeypatch: pytest.MonkeyPatch) -> None:
+    option = _el(
+        "el_option",
+        node_name="OPTION",
+        backend_node_id=456,
+        role="option",
+        text="Appolonia",
+        frame_id="frame_main",
+        frame_url="https://example.com",
+    )
+    element_index = ElementIndex(elements={"el_option": option})
+
+    class _FrameSession:
+        async def send(self, _method: str, _params: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {}
+
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={"frame_main": cast(Any, _FrameSession())},
+        active_frame_id=None,
+    )
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_call_on_node(
+        backend_node_id: int,
+        _session: Any,
+        function_body: str,
+        args: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        del args
+        assert backend_node_id == 456
+        assert "selectedIndex" in function_body
+        assert "dispatchEvent(new Event('change'" in function_body
+        return {
+            "result": {
+                "value": {
+                    "ok": True,
+                    "text": "Appolonia",
+                    "value": "Appolonia",
+                    "selectedIndex": 3,
+                }
+            }
+        }
+
+    async def fake_collect_mutations_with_ids(
+        _session: Any,
+        _context: ToolContext,
+        _settle_ms: int,
+        *,
+        frame_id: str | None = None,
+        frame_url: str | None = None,
+    ) -> dict[str, Any]:
+        assert frame_id == "frame_main"
+        assert frame_url == "https://example.com"
+        return {}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_call_on_node", fake_call_on_node)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.click_element("el_option", context)
+
+    assert result.ok is True
+    assert 'Selected option el_option text="Appolonia" value="Appolonia" index=3' in result.message
+
+
 def test_format_snapshot_for_llm_groups_by_frame_and_marks_active() -> None:
     elements = [
         _el("el_iframe", node_name="IFRAME", frame_id="frame_iframe", frame_url="https://iframe.example"),

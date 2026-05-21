@@ -57,6 +57,8 @@ def _noop_action() -> str:
     return "noop()"
 
 
+BENCHMARK_DEFAULT_MODEL = "z-ai/glm-4.7:nitro"
+
 T = TypeVar("T")
 
 
@@ -81,7 +83,7 @@ class ComputerUseAgentArgs(AgentArgs):
     agent_name: str = "computer-use-agent"
     use_raw_page_output: bool = True
     provider: str = "openrouter"
-    model: str | None = None
+    model: str | None = BENCHMARK_DEFAULT_MODEL
     worker_model: str | None = None
     filter_model: str | None = None
     oracle_model: str | None = None
@@ -101,7 +103,7 @@ class ComputerUseAgentArgs(AgentArgs):
     metrics_enabled: bool = True
     handlers_enabled: bool = True
     save_pages: bool = False
-    unified: bool = False
+    unified: bool = True
 
     def make_agent(self) -> "ComputerUseAgentLabAgent":
         defaults = PROVIDER_DEFAULTS[self.provider]

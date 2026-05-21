@@ -93,8 +93,11 @@ class _StubRuntime:
 def test_agent_args_enable_raw_page_output_by_default() -> None:
     args = ComputerUseAgentArgs()
     assert args.use_raw_page_output is True
+    assert args.unified is True
+    assert args.model == "z-ai/glm-4.7:nitro"
     agent = args.make_agent()
     assert isinstance(agent, ComputerUseAgentLabAgent)
+    assert agent.agent_config.unified is True
 
 
 def test_obs_preprocessor_strips_raw_page_before_pickle() -> None:
