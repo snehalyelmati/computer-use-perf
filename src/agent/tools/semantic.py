@@ -81,6 +81,7 @@ _OBSERVER_INJECT_JS = """
     removedElements: [],
     attrChanges: [],
     interactiveNodes: [],
+    formStart: [],
   };
   const TEXT_CAP = 20;
   const INTERACTIVE_CAP = 10;
@@ -96,9 +97,17 @@ _OBSERVER_INJECT_JS = """
     'button','checkbox','combobox','link','menuitem','option',
     'radio','slider','spinbutton','switch','tab','textbox'
   ]);
+  const SVG_INTERACTIVE_TAGS_SET = new Set([
+    'CIRCLE','ELLIPSE','G','LINE','PATH','POLYGON','POLYLINE','RECT','TEXT','TSPAN'
+  ]);
+  const SVG_ATTRS = [
+    'class','id','fill','stroke','x','y','x1','y1','x2','y2','cx','cy','r','rx','ry',
+    'width','height','data-index'
+  ];
 
   function isInteractive(el) {
     if (INTERACTIVE_TAGS_SET.has(el.tagName)) return true;
+    if ((el.ownerSVGElement || el.tagName === 'SVG') && SVG_INTERACTIVE_TAGS_SET.has(el.tagName)) return true;
     const role = el.getAttribute('role');
     if (role && INTERACTIVE_ROLES_SET.has(role.toLowerCase())) return true;
     if (el.hasAttribute('contenteditable')) return true;
@@ -146,6 +155,33 @@ _OBSERVER_INJECT_JS = """
     }
     return '';
   }
+
+  function attrsOf(el) {
+    const attrs = {};
+    if (!el.getAttribute) return attrs;
+    for (const key of SVG_ATTRS) {
+      const value = el.getAttribute(key);
+      if (value !== null && value !== '') attrs[key] = value;
+    }
+    return attrs;
+  }
+
+  function formValues() {
+    const controls = Array.from(document.querySelectorAll('input, textarea, select'));
+    return controls.slice(0, 60).map((el, index) => {
+      const tag = (el.tagName || '').toLowerCase();
+      const key = el.id || el.name || el.getAttribute('aria-label') ||
+        el.getAttribute('placeholder') || `${tag}:${index}`;
+      return {
+        key,
+        tag,
+        value: el.value !== undefined ? String(el.value) : '',
+        checked: el.checked === undefined ? null : Boolean(el.checked),
+      };
+    });
+  }
+
+  data.formStart = formValues();
 
   const callback = (mutations) => {
     for (const m of mutations) {
@@ -216,6 +252,33 @@ _OBSERVER_COLLECT_JS = """
 (() => {
   if (!window.__mutObs) return null;
   const { observer, data, callback, startUrl } = window.__mutObs;
+  const SVG_ATTRS = [
+    'class','id','fill','stroke','x','y','x1','y1','x2','y2','cx','cy','r','rx','ry',
+    'width','height','data-index'
+  ];
+  function attrsOf(el) {
+    const attrs = {};
+    if (!el.getAttribute) return attrs;
+    for (const key of SVG_ATTRS) {
+      const value = el.getAttribute(key);
+      if (value !== null && value !== '') attrs[key] = value;
+    }
+    return attrs;
+  }
+  function formValues() {
+    const controls = Array.from(document.querySelectorAll('input, textarea, select'));
+    return controls.slice(0, 60).map((el, index) => {
+      const tag = (el.tagName || '').toLowerCase();
+      const key = el.id || el.name || el.getAttribute('aria-label') ||
+        el.getAttribute('placeholder') || `${tag}:${index}`;
+      return {
+        key,
+        tag,
+        value: el.value !== undefined ? String(el.value) : '',
+        checked: el.checked === undefined ? null : Boolean(el.checked),
+      };
+    });
+  }
   const pending = observer.takeRecords();
   if (pending.length > 0) callback(pending);
   observer.disconnect();
@@ -236,10 +299,41 @@ _OBSERVER_COLLECT_JS = """
       role: role,
       text: text,
       name: name,
+      attrs: attrsOf(el),
     });
   }
 
   delete window.__mutObs;
+
+  const formEnd = formValues();
+  const startByKey = new Map();
+  for (const item of data.formStart || []) {
+    startByKey.set(`${item.tag}|${item.key}`, item);
+  }
+  const formChanges = [];
+  for (const item of formEnd) {
+    if (formChanges.length >= 12) break;
+    const previous = startByKey.get(`${item.tag}|${item.key}`);
+    if (!previous) continue;
+    if (previous.value !== item.value) {
+      formChanges.push({
+        tag: item.tag,
+        key: item.key,
+        attr: 'value',
+        old: previous.value,
+        new: item.value,
+      });
+    }
+    if (previous.checked !== item.checked) {
+      formChanges.push({
+        tag: item.tag,
+        key: item.key,
+        attr: 'checked',
+        old: previous.checked,
+        new: item.checked,
+      });
+    }
+  }
 
   const seen = new Set();
   const uniqueAdded = [];
@@ -258,6 +352,7 @@ _OBSERVER_COLLECT_JS = """
     addedElements: data.addedElements,
     removedElements: data.removedElements,
     attrChanges: data.attrChanges,
+    formChanges: formChanges,
     newInteractive: newInteractive,
     currentUrl: location.href,
     startUrl: startUrl,
@@ -275,6 +370,14 @@ def _resolve_element(element_id: str, context: ToolContext) -> ElementSnapshot |
         if element is not None:
             logger.warning("Auto-corrected element id %r -> %r", element_id, corrected)
     return element
+
+
+def _unknown_element_message(element_id: str) -> str:
+    return (
+        f"Unknown element id: {element_id}. The page likely changed after a prior tool call; "
+        "stop this step and wait for a fresh snapshot before using another element id."
+    )
+
 
 async def _resolve_object_id(backend_node_id: int, session: CDPSession) -> str | None:
     try:
@@ -299,7 +402,7 @@ async def _call_on_node(
         object_id = await _resolve_object_id(backend_node_id, session)
         if not object_id:
             return None
-        return await session.send(
+        result = await session.send(
             "Runtime.callFunctionOn",
             {
                 "objectId": object_id,
@@ -308,6 +411,9 @@ async def _call_on_node(
                 "returnByValue": True,
             },
         )
+        if result.get("exceptionDetails"):
+            return None
+        return result
     except Exception:
         return None
 
@@ -324,6 +430,30 @@ async def _viewport_info(backend_node_id: int, session: CDPSession) -> dict[str,
             const hit = document.elementFromPoint(x, y);
             const onTop = !!(hit && (this.contains(hit) || hit.contains(this)));
             return {x, y, width: rect.width, height: rect.height, onTop};
+        }
+        """,
+    )
+
+
+async def _element_rect_info(backend_node_id: int, session: CDPSession) -> dict[str, Any] | None:
+    return await _call_on_node(
+        backend_node_id,
+        session,
+        """
+        function () {
+            const before = this.getBoundingClientRect();
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const rect = this.getBoundingClientRect();
+            return {
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+                beforeLeft: before.left,
+                beforeTop: before.top,
+                beforeWidth: before.width,
+                beforeHeight: before.height,
+            };
         }
         """,
     )
@@ -381,6 +511,36 @@ async def _insert_text(session: CDPSession, text: str) -> bool:
     except Exception:
         return False
     return True
+
+
+async def _set_text_value(backend_node_id: int, session: CDPSession, text: str) -> bool:
+    """Set input-like values through native setters and dispatch form events."""
+    result = await _call_on_node(
+        backend_node_id,
+        session,
+        """
+        function (value) {
+            const tag = (this.tagName || '').toUpperCase();
+            if (!('value' in this) || !['INPUT', 'TEXTAREA'].includes(tag)) {
+                return false;
+            }
+            const proto = tag === 'TEXTAREA'
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype;
+            const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (descriptor && descriptor.set) {
+                descriptor.set.call(this, value);
+            } else {
+                this.value = value;
+            }
+            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('change', { bubbles: true }));
+            return this.value === value;
+        }
+        """,
+        [{"value": text}],
+    )
+    return bool(result and result.get("result", {}).get("value"))
 
 async def _dom_focus(backend_node_id: int, session: CDPSession) -> bool:
     """Focus an element via DOM, bypassing visual obscuration."""
@@ -635,6 +795,22 @@ async def _resolve_new_interactive(
             backend_node_id = desc.get("node", {}).get("backendNodeId")
             if not backend_node_id:
                 continue
+            rect_value: dict[str, Any] = {}
+            try:
+                rect = await session.send(
+                    "Runtime.callFunctionOn",
+                    {
+                        "objectId": object_id,
+                        "functionDeclaration": (
+                            "function () { const r = this.getBoundingClientRect(); "
+                            "return {x: r.left, y: r.top, w: r.width, h: r.height}; }"
+                        ),
+                        "returnByValue": True,
+                    },
+                )
+                rect_value = rect.get("result", {}).get("value") or {}
+            except Exception:
+                rect_value = {}
             stable_id = build_stable_id_from_backend(frame_id, int(backend_node_id))
             resolved.append({
                 "stable_id": stable_id,
@@ -643,6 +819,8 @@ async def _resolve_new_interactive(
                 "role": item.get("role", ""),
                 "text": item.get("text", ""),
                 "name": item.get("name", ""),
+                "attrs": item.get("attrs") if isinstance(item.get("attrs"), dict) else {},
+                "bbox": rect_value,
             })
             # Clean up marker attribute
             await session.send(
@@ -661,6 +839,35 @@ async def _resolve_new_interactive(
         mutations["resolvedInteractive"] = resolved
 
 
+def _bbox_from_resolved_item(item: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    bbox = item.get("bbox")
+    if not isinstance(bbox, dict) or not {"x", "y", "w", "h"} <= set(bbox):
+        return None
+    try:
+        return (
+            float(bbox["x"]),
+            float(bbox["y"]),
+            float(bbox["w"]),
+            float(bbox["h"]),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_click_driven_visual_surface(element: ElementSnapshot) -> bool:
+    tag = (element.node_name or "").upper()
+    handlers = {name.lower() for name in (element.handlers or {})}
+    visual_tag = tag in {"CANVAS", "SVG", "G", "PATH", "LINE", "RECT", "CIRCLE", "ELLIPSE", "POLYGON", "POLYLINE"}
+    drag_handlers = handlers & {"mousedown", "mousemove", "mouseup", "pointerdown", "pointermove", "pointerup", "dragstart"}
+    return visual_tag and "click" in handlers and not drag_handlers
+
+
+def _is_clickable_svg_leaf(element: ElementSnapshot) -> bool:
+    tag = (element.node_name or "").upper()
+    handlers = {name.lower() for name in (element.handlers or {})}
+    return tag in {"CIRCLE", "ELLIPSE", "LINE", "PATH", "POLYGON", "POLYLINE", "RECT", "TEXT", "TSPAN"} and "click" in handlers
+
+
 def _register_new_elements(
     resolved: list[dict], context: ToolContext, frame_id: str | None, frame_url: str | None
 ) -> None:
@@ -676,8 +883,8 @@ def _register_new_elements(
             role=item.get("role") or None,
             name=item.get("name") or None,
             text=item.get("text") or None,
-            bounding_box=None,
-            attributes={},
+            bounding_box=_bbox_from_resolved_item(item),
+            attributes=item.get("attrs") if isinstance(item.get("attrs"), dict) else {},
             frame_id=frame_id,
             frame_url=frame_url,
             frame_name=None,
@@ -742,6 +949,13 @@ def _fmt_attr_val(attr: str, raw_val: str | None, *, is_present: bool) -> str:
         return labels[0] if is_present else labels[1]
     return "set" if is_present else "removed"
 
+def _fmt_form_val(raw_val: Any) -> str:
+    if raw_val is None:
+        return "unset"
+    if raw_val == "":
+        return '""'
+    return str(raw_val)
+
 def _build_change_lines(mutations: dict) -> list[str]:
     """Build diff-style change lines from mutation data."""
     lines: list[str] = []
@@ -784,19 +998,55 @@ def _build_change_lines(mutations: dict) -> list[str]:
         new = _fmt_attr_val(attr, raw_new, is_present=raw_new is not None)
         lines.append(f"  ~ {tag}[{attr}]: {old} -> {new}")
 
+    # Form property changes are not always reflected as DOM attributes.
+    for change in mutations.get("formChanges", []):
+        tag = change.get("tag", "?")
+        key = str(change.get("key") or "").strip()
+        attr = change.get("attr", "?")
+        old = _fmt_form_val(change.get("old"))
+        new = _fmt_form_val(change.get("new"))
+        key_hint = f" {key}" if key else ""
+        lines.append(f"  ~ {tag}{key_hint}[{attr}]: {old} -> {new}")
+
+    # Visual updates can add SVG/canvas children with no text.
+    for tag in mutations.get("addedElements", [])[:8]:
+        if tag:
+            lines.append(f"  + element <{tag}>")
+
     # New interactive elements with IDs  (+ interactive)
     for item in resolved_items:
         sid = item.get("stable_id", "?")
         tag = item.get("tag", "?")
+        attrs = item.get("attrs") if isinstance(item.get("attrs"), dict) else {}
+        attr_bits = [
+            f'{key}="{attrs[key]}"'
+            for key in ("data-index", "id", "class", "x", "y", "cx", "cy", "width", "height")
+            if attrs.get(key)
+        ]
+        attr_hint = f" ({' '.join(attr_bits)})" if attr_bits else ""
         label = item.get("role") or item.get("name") or item.get("text") or ""
+        item_bbox = _bbox_from_resolved_item(item)
+        bbox_hint = ""
+        if item_bbox is not None:
+            x, y, w, h = item_bbox
+            bbox_hint = (
+                f" bbox={int(round(x))},"
+                f"{int(round(y))},"
+                f"{int(round(w))},"
+                f"{int(round(h))}"
+            )
         if label:
-            lines.append(f'  + interactive {sid}: {tag} "{label}"')
+            lines.append(f'  + interactive {sid}: {tag} "{label}"{attr_hint}{bbox_hint}')
         else:
-            lines.append(f"  + interactive {sid}: {tag}")
+            lines.append(f"  + interactive {sid}: {tag}{attr_hint}{bbox_hint}")
 
     # Removed text  (-)
     for item in mutations.get("removedText", []):
         lines.append(f"  - {_fmt_text_item(item)}")
+
+    for tag in mutations.get("removedElements", [])[:8]:
+        if tag:
+            lines.append(f"  - element <{tag}>")
 
     return lines
 
@@ -932,7 +1182,7 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
@@ -946,7 +1196,31 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
         """
         function () {
             this.scrollIntoView({block: 'center', inline: 'center'});
-            this.click();
+            const tag = (this.tagName || '').toUpperCase();
+            const isSvg = !!this.ownerSVGElement || tag === 'SVG';
+            if (!isSvg && typeof this.click === 'function') {
+                this.click();
+                return true;
+            }
+            const rect = this.getBoundingClientRect();
+            const clientX = rect.left + rect.width / 2;
+            const clientY = rect.top + rect.height / 2;
+            const opts = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: 1,
+                clientX,
+                clientY,
+                screenX: window.screenX + clientX,
+                screenY: window.screenY + clientY,
+            };
+            this.dispatchEvent(new MouseEvent('mouseover', opts));
+            this.dispatchEvent(new MouseEvent('mousemove', opts));
+            this.dispatchEvent(new MouseEvent('mousedown', opts));
+            this.dispatchEvent(new MouseEvent('mouseup', {...opts, buttons: 0}));
+            this.dispatchEvent(new MouseEvent('click', {...opts, buttons: 0}));
             return true;
         }
         """,
@@ -981,12 +1255,131 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     return ToolResult(ok=True, message=message)
 
 
+async def click_at(
+    element_id: str,
+    x: float,
+    y: float,
+    context: ToolContext,
+) -> ToolResult:
+    context.last_tool = "click_at"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+
+    if _is_clickable_svg_leaf(element):
+        result = await _call_on_node(
+            element.backend_node_id,
+            session,
+            """
+            function () {
+                this.scrollIntoView({block: 'center', inline: 'center'});
+                const rect = this.getBoundingClientRect();
+                const clientX = rect.left + rect.width / 2;
+                const clientY = rect.top + rect.height / 2;
+                const opts = {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    button: 0,
+                    buttons: 1,
+                    clientX,
+                    clientY,
+                    screenX: window.screenX + clientX,
+                    screenY: window.screenY + clientY,
+                };
+                this.dispatchEvent(new MouseEvent('mouseover', opts));
+                this.dispatchEvent(new MouseEvent('mousemove', opts));
+                this.dispatchEvent(new MouseEvent('mousedown', opts));
+                this.dispatchEvent(new MouseEvent('mouseup', {...opts, buttons: 0}));
+                this.dispatchEvent(new MouseEvent('click', {...opts, buttons: 0}));
+                return true;
+            }
+            """,
+        )
+        if not result:
+            await _collect_mutations(session, settle_ms=50)
+            return ToolResult(ok=False, message="Click-at failed: SVG element is no longer available")
+        mutations = await _collect_mutations_with_ids(
+            session, context, context.timing.settle_ms,
+            frame_id=element.frame_id, frame_url=element.frame_url,
+        )
+        base_msg = f"Clicked {element_id} SVG element"
+        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+    info = await _element_rect_info(element.backend_node_id, session)
+    value = (info or {}).get("result", {}).get("value")
+    if not value:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Click-at failed: cannot locate element")
+
+    width = float(value.get("width") or 0)
+    height = float(value.get("height") or 0)
+    if width <= 0 or height <= 0:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Click-at failed: element has no visible area")
+
+    left = float(value.get("left") or 0)
+    top = float(value.get("top") or 0)
+    before_left = float(value.get("beforeLeft", left) or 0)
+    before_top = float(value.get("beforeTop", top) or 0)
+    before_width = float(value.get("beforeWidth", width) or 0)
+    before_height = float(value.get("beforeHeight", height) or 0)
+    raw_x = float(x)
+    raw_y = float(y)
+    if (
+        before_width > 0
+        and before_height > 0
+        and before_left <= raw_x <= before_left + before_width
+        and before_top <= raw_y <= before_top + before_height
+    ):
+        local_x = raw_x - before_left
+        local_y = raw_y - before_top
+        page_x = left + local_x
+        page_y = top + local_y
+        coord_mode = "viewport"
+    else:
+        local_x = max(0.0, min(raw_x, width))
+        local_y = max(0.0, min(raw_y, height))
+        page_x = left + local_x
+        page_y = top + local_y
+        coord_mode = "relative"
+    try:
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": page_x, "y": page_y, "button": "none"},
+        )
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": page_x, "y": page_y, "button": "left", "clickCount": 1},
+        )
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": page_x, "y": page_y, "button": "left", "clickCount": 1},
+        )
+    except Exception as exc:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message=f"Click-at failed: {exc}")
+
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    base_msg = f"Clicked {element_id} at ({local_x:.1f}, {local_y:.1f}) {coord_mode}"
+    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+
 async def hover_element(element_id: str, context: ToolContext, *, duration_ms: int = 2000) -> ToolResult:
     context.last_tool = "hover_element"
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
@@ -1065,7 +1458,7 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
@@ -1077,15 +1470,29 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
     if not await _insert_text(session, text):
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Type failed")
+    typing_settle_ms = max(context.timing.settle_ms, 600)
     mutations = await _collect_mutations_with_ids(
-        session, context, context.timing.settle_ms,
+        session, context, typing_settle_ms,
         frame_id=element.frame_id, frame_url=element.frame_url,
     )
     current_value = await _read_input_value(element.backend_node_id, session)
+    used_value_fallback = False
+    if current_value is not None and current_value != text:
+        if await _set_text_value(element.backend_node_id, session, text):
+            used_value_fallback = True
+            fallback_mutations = await _collect_mutations_with_ids(
+                session, context, typing_settle_ms,
+                frame_id=element.frame_id, frame_url=element.frame_url,
+            )
+            if fallback_mutations:
+                mutations = fallback_mutations
+            current_value = await _read_input_value(element.backend_node_id, session)
     base_msg = f"Typed into {element_id}"
     if current_value is not None:
         display = current_value[:250] + "..." if len(current_value) > 250 else current_value
         base_msg = f"Typed into {element_id}. Current value: \"{display}\""
+        if used_value_fallback:
+            base_msg += " (set value via form events after keyboard input did not stick)"
     message = _format_verification(mutations, base_msg)
     return ToolResult(ok=True, message=message)
 
@@ -1173,7 +1580,7 @@ async def draw(
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
@@ -1217,6 +1624,15 @@ async def draw(
             session, context, context.timing.draw_settle_ms,
             frame_id=element.frame_id, frame_url=element.frame_url,
         )
+        if not _build_change_lines(mutations or {}) and _is_click_driven_visual_surface(element):
+            return ToolResult(
+                ok=False,
+                message=(
+                    f"{base_msg}\nNo observable drawing change followed. "
+                    "This visual target exposes a click handler; use click_at(element_id, x, y) "
+                    "for a single target point instead of draw."
+                ),
+            )
         return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
     # CDP coordinate fallback — for apps that ignore synthetic DOM events
@@ -1287,28 +1703,43 @@ _WATCH_MAX_TIMEOUT_MS = 10_000
 _WATCH_FOR_TEXT_JS = """
 ([text, timeoutMs]) => new Promise(resolve => {
     const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','META','LINK','HEAD']);
+    const CLICKABLE = 'button,a,input,select,textarea,option,summary,[role="button"],[role="option"],[onclick],[tabindex],svg text,svg rect,svg circle,svg path,svg line';
+    function norm(value) {
+        return (value || '').replace(/\\s+/g, ' ').trim();
+    }
+    function clickableTarget(el) {
+        let cur = el;
+        while (cur && cur !== document.body) {
+            if (cur.matches && cur.matches(CLICKABLE)) return cur;
+            cur = cur.parentElement;
+        }
+        return null;
+    }
     function find() {
         const all = document.querySelectorAll('*');
         for (const el of all) {
             if (SKIP.has(el.tagName)) continue;
-            if (el.children.length === 0) {
-                const t = (el.textContent || '').trim();
-                if (t.includes(text)) return el;
-            }
+            const t = norm(el.textContent);
+            if (t !== text) continue;
+            const target = clickableTarget(el);
+            if (target) return target;
         }
         return null;
     }
     const immediate = find();
     if (immediate) {
         immediate.click();
-        return resolve('found');
+        return resolve({status: 'found', tag: immediate.tagName || '', text: norm(immediate.textContent)});
     }
     const observer = new MutationObserver(() => {
         const el = find();
         if (el) {
             observer.disconnect();
             clearTimeout(timer);
-            setTimeout(() => { el.click(); resolve('found'); }, 50);
+            setTimeout(() => {
+                el.click();
+                resolve({status: 'found', tag: el.tagName || '', text: norm(el.textContent)});
+            }, 50);
         }
     });
     observer.observe(document.body, {
@@ -1317,7 +1748,7 @@ _WATCH_FOR_TEXT_JS = """
     });
     const timer = setTimeout(() => {
         observer.disconnect();
-        resolve('timeout');
+        resolve({status: 'timeout'});
     }, timeoutMs);
 })
 """
@@ -1352,13 +1783,25 @@ async def watch_for_text(
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Watch failed: {exc}")
 
-    if result == "found":
+    if isinstance(result, dict) and result.get("status") == "found":
         mutations = await _collect_mutations_with_ids(
             session, context, context.timing.settle_ms,
             frame_id=context.active_frame_id,
         )
-        base_msg = f"Watched and clicked '{text}'"
-        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+        clicked_tag = str(result.get("tag") or "element").lower()
+        clicked_text = str(result.get("text") or text)
+        base_msg = f"Watched and clicked exact text '{text}' on {clicked_tag}"
+        message = _format_verification(mutations, base_msg)
+        if not _build_change_lines(mutations or {}):
+            return ToolResult(
+                ok=True,
+                message=(
+                    f"Found exact text '{clicked_text}' and clicked it, but no observable "
+                    "page change followed. Do not repeat this watch; if the relevant field already has the "
+                    "desired value, proceed, otherwise stop this step and wait for a fresh snapshot or use a stable element ID."
+                ),
+            )
+        return ToolResult(ok=True, message=message)
 
     mutations = await _collect_mutations(session, settle_ms=50)
     timeout_msg = f"Watch timeout: '{text}' not found within {clamped}ms"
@@ -1380,7 +1823,7 @@ async def inspect_element(element_id: str, context: ToolContext) -> ToolResult:
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
@@ -1526,7 +1969,7 @@ async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
     context.last_element_id = iframe_id
     element = _resolve_element(iframe_id, context)
     if not element:
-        return ToolResult(ok=False, message=f"Unknown element id: {iframe_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(iframe_id))
 
     tag = (element.node_name or "").upper() or "UNKNOWN"
     if tag != "IFRAME":

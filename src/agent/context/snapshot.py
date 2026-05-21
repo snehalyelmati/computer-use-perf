@@ -42,6 +42,50 @@ INTERACTIVE_TAGS = {
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _CLASS_DROP_CHARS: frozenset[str] = frozenset("[](){}:/\\@%=")
+_SVG_GRAPHIC_TAGS = {
+    "CIRCLE",
+    "ELLIPSE",
+    "G",
+    "LINE",
+    "PATH",
+    "POLYGON",
+    "POLYLINE",
+    "RECT",
+    "SVG",
+    "TEXT",
+    "TSPAN",
+}
+_SVG_SUMMARY_TAGS = {
+    "CIRCLE",
+    "ELLIPSE",
+    "LINE",
+    "PATH",
+    "POLYGON",
+    "POLYLINE",
+    "RECT",
+    "TEXT",
+    "TSPAN",
+}
+_SVG_SUMMARY_ATTRS = (
+    "class",
+    "id",
+    "fill",
+    "stroke",
+    "x",
+    "y",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "cx",
+    "cy",
+    "r",
+    "rx",
+    "ry",
+    "width",
+    "height",
+    "data-index",
+)
 
 
 def sanitize_class_value(
@@ -118,6 +162,7 @@ class ElementSnapshot:
     parent_chain: tuple[tuple[int, str, str], ...] | None = None
     handlers: dict[str, str] | None = None  # {event_name: truncated_source}
     descendant_text: str | None = None  # short preview for unlabeled containers
+    graphics: str | None = None  # compact SVG/canvas descendant summary
 
 
 @dataclass(frozen=True)
@@ -329,6 +374,8 @@ def element_text_blob(element: ElementSnapshot) -> str:
             parts.append(str(value))
     if element.descendant_text:
         parts.append(str(element.descendant_text))
+    if element.graphics:
+        parts.append(str(element.graphics))
     attrs = element.attributes or {}
     for key in [
         "id",
@@ -344,6 +391,30 @@ def element_text_blob(element: ElementSnapshot) -> str:
         if value := attrs.get(key):
             parts.append(str(value))
     return " ".join(parts)
+
+
+def _needs_svg_text_fallback(element: ElementSnapshot) -> bool:
+    return bool(
+        not (element.name or element.text or element.descendant_text)
+        and element.backend_node_id
+        and (element.node_name or "").upper() in _SVG_GRAPHIC_TAGS
+    )
+
+
+def _iter_svg_text_fallback_candidates(
+    elements: Iterable[ElementSnapshot],
+    *,
+    limit: int = 40,
+) -> Iterable[ElementSnapshot]:
+    attempts = 0
+    for element in elements:
+        if attempts >= limit:
+            break
+        if not _needs_svg_text_fallback(element):
+            continue
+        attempts += 1
+        yield element
+
 
 def _hostname(url: str | None) -> str:
     if not url:
@@ -562,6 +633,70 @@ async def capture_snapshot(
                         stack.append(child)
             out = " ".join(pieces).strip()
             return out or None
+
+        def _short_descendant_text(start_index: int, *, max_chars: int = 60) -> str | None:
+            if not (0 <= start_index < node_count):
+                return None
+            pieces: list[str] = []
+            stack: list[int] = [start_index]
+            visited = 0
+            while stack and visited < 40 and sum(len(p) for p in pieces) < max_chars:
+                idx = stack.pop()
+                visited += 1
+                node_name_local = _decode_string(node_names[idx], strings)
+                if node_name_local == "#text":
+                    node_value_local = _decode_string(node_values[idx], strings) if idx < len(node_values) else ""
+                    if isinstance(text_values, dict):
+                        text_value_raw_local = text_values.get(idx, "")
+                    else:
+                        text_value_raw_local = text_values[idx] if idx < len(text_values) else ""
+                    text_value_local = _decode_string(text_value_raw_local, strings)
+                    normalized = _normalize_text(text_value_local or node_value_local)
+                    if normalized:
+                        pieces.append(normalized)
+                children = children_by_parent[idx] if 0 <= idx < len(children_by_parent) else []
+                for child in reversed(children):
+                    stack.append(child)
+            out = " ".join(pieces).strip()
+            if len(out) > max_chars:
+                out = out[: max_chars - 3].rstrip() + "..."
+            return out or None
+
+        def _svg_graphics_summary(start_index: int) -> str | None:
+            """Summarize visible SVG descendants with local geometry attributes."""
+            if not (0 <= start_index < node_count):
+                return None
+            start_name = (_decode_string(node_names[start_index], strings) or "").upper()
+            if start_name not in {"SVG", "G"}:
+                return None
+            items: list[str] = []
+            stack: list[int] = list(reversed(children_by_parent[start_index]))
+            visited = 0
+            while stack and visited < 300 and len(items) < 14:
+                idx = stack.pop()
+                visited += 1
+                tag = (_decode_string(node_names[idx], strings) or "").upper()
+                children = children_by_parent[idx] if 0 <= idx < len(children_by_parent) else []
+                for child in reversed(children):
+                    stack.append(child)
+                if tag not in _SVG_SUMMARY_TAGS:
+                    continue
+                attrs = attribute_map(attributes[idx], strings) if idx < len(attributes) else {}
+                parts: list[str] = [tag.lower()]
+                text_hint = _short_descendant_text(idx)
+                if text_hint:
+                    parts.append(f'text="{text_hint}"')
+                for key in _SVG_SUMMARY_ATTRS:
+                    value = attrs.get(key)
+                    if not value:
+                        continue
+                    parts.append(f"{key}={truncate_attr_value(str(value), max_len=32)}")
+                if len(parts) > 1:
+                    items.append(" ".join(parts))
+            if not items:
+                return None
+            suffix = "" if len(items) < 14 else "; ..."
+            return "; ".join(items) + suffix
         last_text_parent_index: int | None = None
         for index in range(node_count):
             node_name = _decode_string(node_names[index], strings)
@@ -697,6 +832,13 @@ async def capture_snapshot(
                 and (node_name or "").upper() in preview_container_tags
             ):
                 descendant_text = _descendant_text_preview(index)
+            if (
+                is_interactive
+                and preview_enabled
+                and not text
+                and (node_name or "").upper() in _SVG_GRAPHIC_TAGS
+            ):
+                descendant_text = descendant_text or _short_descendant_text(index)
 
             bbox = bounds_map.get(index)
             in_viewport = _in_viewport(bbox, viewport_width=viewport_width, viewport_height=viewport_height)
@@ -705,6 +847,7 @@ async def capture_snapshot(
                 _, _, w, h = bbox
                 if w and h and w > 0 and h > 0:
                     area = float(w * h)
+            graphics = _svg_graphics_summary(index) if is_interactive else None
             elements.append(
                 ElementSnapshot(
                     stable_id=stable_id,
@@ -725,8 +868,36 @@ async def capture_snapshot(
                     parent_chain=parent_chain,
                     handlers=element_handlers,
                     descendant_text=descendant_text,
+                    graphics=graphics,
                 )
             )
+
+    for element in _iter_svg_text_fallback_candidates(elements, limit=40):
+        try:
+            resolved = await cdp_session.send(
+                "DOM.resolveNode",
+                {"backendNodeId": int(element.backend_node_id)},
+            )
+            object_id = resolved.get("object", {}).get("objectId")
+            if not object_id:
+                continue
+            value = await cdp_session.send(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": object_id,
+                    "functionDeclaration": (
+                        "function () { return (this.textContent || this.innerHTML || '').trim().slice(0, 80); }"
+                    ),
+                    "returnByValue": True,
+                },
+            )
+            if value.get("exceptionDetails"):
+                continue
+            text_value = (value.get("result", {}).get("value") or "").strip()
+            if text_value:
+                element.descendant_text = text_value
+        except Exception:
+            continue
 
     started = time.perf_counter()
     title = await page.title()
@@ -890,6 +1061,11 @@ def format_snapshot_for_llm(
         key = _label_key(el)
         label_counts[key] = label_counts.get(key, 0) + 1
 
+    def _is_graphical_element(element: ElementSnapshot) -> bool:
+        tag = (element.node_name or "").upper()
+        role = (element.role or "").lower()
+        return tag in _SVG_GRAPHIC_TAGS or role in {"graphics-symbol", "image"}
+
     def _element_label(element: ElementSnapshot, *, include_frame_hint: bool) -> str:
         role = (element.role or "").strip()
         name = (element.name or "").strip()
@@ -941,7 +1117,12 @@ def format_snapshot_for_llm(
             hints_parts.append(f"[frame: {fn} {fu}]".strip())
         if element.interactive_reason and (element.interactive_confidence or 0.0) < 0.55:
             hints_parts.append(f"reason={element.interactive_reason}")
-        if label_counts.get(_label_key(element), 0) > 1 and element.bounding_box:
+        low_label_graphic = (
+            _is_graphical_element(element)
+            and not name
+            and not (element.text or "").strip()
+        )
+        if (label_counts.get(_label_key(element), 0) > 1 or low_label_graphic) and element.bounding_box:
             x, y, w, h = element.bounding_box
             hints_parts.append(f"bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}")
         if element.in_viewport is False:
@@ -956,7 +1137,10 @@ def format_snapshot_for_llm(
         handler_str = ""
         if element.handlers:
             handler_str = " " + format_handlers_for_llm(element.handlers)
-        return f"- {element.stable_id}: {label}{hints}{handler_str}"
+        graphics_str = ""
+        if element.graphics:
+            graphics_str = f" [graphics: {truncate_attr_value(element.graphics, max_len=500)}]"
+        return f"- {element.stable_id}: {label}{hints}{handler_str}{graphics_str}"
 
     def _format_elements_for_frame(
         frame_elements: list[ElementSnapshot], *, include_frame_hint: bool

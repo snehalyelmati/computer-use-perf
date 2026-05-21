@@ -24,6 +24,7 @@ The important inversion is browser ownership:
 - The adapter requests `use_raw_page_output=True`, stores `obs["page"]`, and removes it before observations are pickled.
 - `BrowserAgentStepRuntime` runs one internal step against the live page.
 - The adapter returns `noop()` after the internal tool calls have already changed the page.
+- The benchmark snapshot includes compact SVG graphics summaries and bounding boxes when labels are not enough; the worker can use `click_at` for coordinate targets and `draw` for path targets.
 - BrowserGym remains the source of truth for task success. Internal `done=True` is logged in `AgentInfo` but does not replace BrowserGym termination.
 
 ## Installation

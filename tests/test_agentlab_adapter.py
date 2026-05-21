@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,10 @@ if str(ROOT) not in sys.path:
 from benchmarks.agentlab.computer_use_agent import (
     ComputerUseAgentArgs,
     ComputerUseAgentLabAgent,
+)
+from benchmarks.agentlab.run_miniwob_smoke import (
+    _RESOURCE_TRACKER_WARNING_FILTER,
+    _suppress_resource_tracker_shutdown_noise,
 )
 from src.agent.config import AgentConfig, LLMConfig
 from src.agent.core.step_runtime import RuntimeStepResult
@@ -100,6 +105,16 @@ def test_agent_args_enable_raw_page_output_by_default() -> None:
     assert agent.agent_config.unified is True
 
 
+def test_miniwob_runner_suppresses_resource_tracker_shutdown_warning(monkeypatch: Any) -> None:
+    monkeypatch.setenv("PYTHONWARNINGS", "default")
+
+    _suppress_resource_tracker_shutdown_noise()
+
+    filters = os.environ["PYTHONWARNINGS"].split(",")
+    assert "default" in filters
+    assert _RESOURCE_TRACKER_WARNING_FILTER in filters
+
+
 def test_obs_preprocessor_strips_raw_page_before_pickle() -> None:
     runtime = _StubRuntime(AgentConfig(), LLMConfig())
     agent = ComputerUseAgentLabAgent(
@@ -146,3 +161,19 @@ def test_get_action_without_raw_page_returns_noop_with_error() -> None:
     assert action == "noop()"
     assert info["stats"]["computer_use_error"] == 1
     assert runtime.calls == []
+
+
+def test_close_closes_runtime_and_clears_page() -> None:
+    runtime = _StubRuntime(AgentConfig(), LLMConfig())
+    agent = ComputerUseAgentLabAgent(
+        agent_config=AgentConfig(metrics_enabled=False),
+        llm_config=LLMConfig(),
+        runtime_factory=lambda _ac, _lc: runtime,
+    )
+    page = _SyncPage()
+    agent.obs_preprocessor({"page": page, "goal": "Click the button"})
+
+    agent.close()
+
+    assert runtime.closed == ["close"]
+    assert agent._raw_page is None

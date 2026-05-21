@@ -179,6 +179,17 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
         self._raw_page = None
         self._runtime = self._runtime_factory(self.agent_config, self.llm_config)
 
+    def close(self) -> None:
+        old_runtime = self._runtime
+        try:
+            _run_async_from_sync(
+                lambda: old_runtime.close(stop_reason="close"),
+                sync_owner=self._raw_page,
+            )
+        except RuntimeError:
+            pass
+        self._raw_page = None
+
     def obs_preprocessor(self, obs: dict[str, Any]) -> dict[str, Any]:
         processed = dict(obs)
         self._raw_page = processed.pop("page", None)

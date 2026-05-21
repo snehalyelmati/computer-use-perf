@@ -80,6 +80,7 @@ logger = logging.getLogger(__name__)
 
 _LOG_INDENT = "  "
 _STEP_SEPARATOR = "─" * 64
+_AGENT_LOG_HANDLER_ATTR = "_computer_use_agent_log_handler"
 
 
 class _ShortNameFilter(logging.Filter):
@@ -418,6 +419,7 @@ class WorkerDeps:
 
 DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
     "click_element",
+    "click_at",
     "hover_element",
     "type_text",
     "drag_and_drop",
@@ -449,13 +451,29 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
     short_name_filter = _ShortNameFilter()
 
     # ── agent.log: user-configured level ──
-    log_path = str(Path(log_dir) / "agent.log")
+    log_path = str((Path(log_dir) / "agent.log").resolve())
+    debug_log_path = str((Path(log_dir) / "agent_debug.log").resolve())
+    active_log_paths = {log_path, debug_log_path}
+
+    for handler in list(root.handlers):
+        if not getattr(handler, _AGENT_LOG_HANDLER_ATTR, False):
+            continue
+        handler_path = getattr(handler, "baseFilename", None)
+        if isinstance(handler, logging.FileHandler) and handler_path in active_log_paths:
+            continue
+        root.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
     has_file = any(
         isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == log_path
         for handler in root.handlers
     )
     if not has_file:
         file_handler = logging.FileHandler(log_path)
+        setattr(file_handler, _AGENT_LOG_HANDLER_ATTR, True)
         file_handler.setFormatter(plain_formatter)
         file_handler.setLevel(configured_level)
         file_handler.addFilter(short_name_filter)
@@ -468,13 +486,13 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
                     handler.addFilter(short_name_filter)
 
     # ── agent_debug.log: always DEBUG ──
-    debug_log_path = str(Path(log_dir) / "agent_debug.log")
     has_debug_file = any(
         isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == debug_log_path
         for handler in root.handlers
     )
     if not has_debug_file:
         debug_file_handler = logging.FileHandler(debug_log_path)
+        setattr(debug_file_handler, _AGENT_LOG_HANDLER_ATTR, True)
         debug_file_handler.setFormatter(debug_formatter)
         debug_file_handler.setLevel(logging.DEBUG)
         debug_file_handler.addFilter(short_name_filter)
@@ -487,6 +505,7 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
     )
     if not has_stream:
         stream_handler = logging.StreamHandler()
+        setattr(stream_handler, _AGENT_LOG_HANDLER_ATTR, True)
         stream_handler.setFormatter(color_formatter)
         stream_handler.setLevel(configured_level)
         stream_handler.addFilter(short_name_filter)
@@ -513,6 +532,8 @@ def _teardown_logging() -> None:
     """Remove and close handlers added by _setup_logging."""
     root = logging.getLogger()
     for handler in list(root.handlers):
+        if not getattr(handler, _AGENT_LOG_HANDLER_ATTR, False):
+            continue
         try:
             handler.close()
             root.removeHandler(handler)
@@ -1183,7 +1204,7 @@ def build_snapshot_filter_agent(
         output_type=SnapshotFilterOutput,
         system_prompt=FILTER_PROMPT,
         model_settings=model_settings,
-        retries=1,
+        retries=2,
     )
 
 
@@ -1235,6 +1256,49 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
         )
         if ctx.deps.tool_tracker:
             ctx.deps.tool_tracker.record(result.ok, tool_name="click_element", element_id=element_id)
+        return ToolExecutionResult(ok=result.ok, message=result.message)
+
+    @agent.tool(name="click_at")
+    async def click_at(ctx: RunContext[WorkerDeps], element_id: str, x: float, y: float) -> ToolExecutionResult:
+        """Click a specific point inside a visual target. Use for SVG, canvas, map, image, or geometry tasks where the snapshot gives coordinates. Coordinates are CSS pixels relative to the element's top-left corner; viewport coordinates inside the element bbox are also accepted. Use element_id from the page snapshot."""
+        start = time.perf_counter()
+        result = await semantic.click_at(element_id, x, y, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "click_at",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=f"x={x:.1f} y={y:.1f}" if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Clicked {element_id}") if result.ok else None,
+            )
+        )
+        logger.debug(
+            "tool=click_at step=%s ok=%s element_id=%s x=%s y=%s duration_ms=%s full_message=%s",
+            ctx.deps.step,
+            result.ok,
+            element_id,
+            x,
+            y,
+            duration_ms,
+            result.message,
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="click_at",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            element_id=element_id,
+            x=x,
+            y=y,
+        )
+        if ctx.deps.tool_tracker:
+            ctx.deps.tool_tracker.record(result.ok, tool_name="click_at", element_id=element_id)
         return ToolExecutionResult(ok=result.ok, message=result.message)
 
     @agent.tool(name="hover_element")

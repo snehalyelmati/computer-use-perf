@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import warnings
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +19,21 @@ DEFAULT_MINIWOB_URL = (
 )
 DEFAULT_TASKS = ("miniwob.click-button", "miniwob.enter-text")
 BENCHMARK_DEFAULT_MODEL = "z-ai/glm-4.7:nitro"
+_RESOURCE_TRACKER_WARNING_FILTER = "ignore:resource_tracker:UserWarning"
+
+
+def _suppress_resource_tracker_shutdown_noise() -> None:
+    """Silence multiprocessing's resource_tracker semaphore warning from AgentLab cleanup."""
+    existing = os.environ.get("PYTHONWARNINGS", "")
+    filters = [item for item in existing.split(",") if item]
+    if _RESOURCE_TRACKER_WARNING_FILTER not in filters:
+        filters.append(_RESOURCE_TRACKER_WARNING_FILTER)
+        os.environ["PYTHONWARNINGS"] = ",".join(filters)
+    warnings.filterwarnings(
+        "ignore",
+        message=r"resource_tracker: There appear to be .* leaked semaphore objects",
+        category=UserWarning,
+    )
 
 
 def _default_miniwob_url() -> str:
@@ -82,6 +98,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    _suppress_resource_tracker_shutdown_noise()
     args = _build_parser().parse_args()
     tasks = tuple(args.tasks or DEFAULT_TASKS)
     miniwob_url = args.miniwob_url or os.environ.get("MINIWOB_URL") or _default_miniwob_url()

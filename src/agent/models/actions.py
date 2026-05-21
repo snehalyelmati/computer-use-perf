@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import re
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+_ELEMENT_ID_RE = re.compile(r"\bel_[a-f0-9]{12}(?:[-_]\d+)?\b")
+_LIST_MARKER_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+")
 
 
 class Action(BaseModel):
@@ -95,3 +100,21 @@ class SnapshotFilterOutput(BaseModel):
         None,
         description="Optional short notes about what matters on the page right now.",
     )
+
+    @field_validator("useful_text_lines", mode="before")
+    @classmethod
+    def _coerce_useful_text_lines(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return [
+                _LIST_MARKER_RE.sub("", line).strip()
+                for line in value.splitlines()
+                if line.strip()
+            ]
+        return value
+
+    @field_validator("priority_element_ids", mode="before")
+    @classmethod
+    def _coerce_priority_element_ids(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return list(dict.fromkeys(_ELEMENT_ID_RE.findall(value)))
+        return value

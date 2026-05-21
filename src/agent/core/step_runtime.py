@@ -901,6 +901,7 @@ class BrowserAgentStepRuntime:
             f"Page snapshot:\n{snapshot_text}\n"
             f"{oracle_hint}"
         )
+        logger.debug("unified prompt step=%s chars=%s:\n%s", self.state.step, len(prompt), prompt)
         tool_tracker = runtime.ToolCallTracker()
         deps = runtime.WorkerDeps(
             tool_context=tool_context,
