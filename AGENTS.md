@@ -20,6 +20,10 @@ Observability:
 - Run summary: `logs/latest/run_summary.json`
 - AgentLab studies: `logs/agentlab/studies/<study>/` with `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`
 
+Results Tracking:
+- `logs/` is gitignored, so meaningful BrowserGym/AgentLab benchmark runs need a version-controlled note under `docs/benchmark-results/` with the study path, command, config, score, cost/tokens, runtime, and primary artifacts.
+- Keep `docs/benchmark-results/README.md` updated with an index entry for each recorded BrowserGym/AgentLab run.
+
 Dependencies:
 - `pydantic-ai` - agent orchestration + structured output
 - `openai` - OpenAI-compatible client for OpenRouter

@@ -70,3 +70,7 @@ These are valuable debugging case studies, but they should not be presented as g
 The archived external benchmark results remain historical, but the repository now has a reproducible BrowserGym/AgentLab path. Start with the MiniWoB verification preset documented in `docs/agentlab-benchmarks.md`; it runs under BrowserGym validation and writes `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`.
 
 The next reproducibility work is to broaden BrowserGym coverage beyond the verified MiniWoB subset and keep full-suite runs separate from custom local regression subsets.
+
+## Recorded BrowserGym Runs
+
+- `2026-05-21`: MiniWoB full suite, one repeat, `125` episodes, `58.4%` score, `$38.80` logged cost. See `docs/benchmark-results/miniwob-full-run-2026-05-21.md`.

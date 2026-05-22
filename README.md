@@ -193,7 +193,7 @@ uv run python scripts/generate_results.py
 - `docs/architecture.md`: current runtime architecture verified against code.
 - `docs/agentlab-benchmarks.md`: AgentLab + BrowserGym benchmark adapter setup and execution notes.
 - `docs/failure-modes.md`: browser-agent failure modes and mitigations.
-- `docs/benchmark-results.md`: archived benchmark results and interpretation.
+- `docs/benchmark-results/README.md`: archived benchmark results and interpretation.
 - `docs/observability.md`: logs, metrics, and run artifacts.
 - `docs/architecture-options.md`: comparison of six agent architecture options.
 - `docs/challenge-map.md`: archived challenge-site investigation notes.
