@@ -60,6 +60,8 @@ The report records the resolved Python invocation as:
 - Truncated episodes: `20`
 - Incomplete episodes: `0`
 
+An all-cases review and failure backlog is recorded in [miniwob-full-run-2026-05-21-failure-analysis.md](miniwob-full-run-2026-05-21-failure-analysis.md).
+
 ## Cost And Runtime
 
 Cost and token totals were aggregated from `result_df.csv`.
@@ -97,4 +99,3 @@ Cost was concentrated in failed and truncated tasks:
 - `logs/agentlab/studies/2026-05-21_22-05-01_computer-use-agent-on-miniwob-full/per_task_results.csv`
 - `logs/agentlab/studies/2026-05-21_22-05-01_computer-use-agent-on-miniwob-full/failed_tasks.md`
 - `logs/agentlab/studies/2026-05-21_22-05-01_computer-use-agent-on-miniwob-full/result_df.csv`
-

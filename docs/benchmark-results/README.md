@@ -73,4 +73,4 @@ The next reproducibility work is to broaden BrowserGym coverage beyond the verif
 
 ## Recorded BrowserGym Runs
 
-- `2026-05-21`: MiniWoB full suite, one repeat, `125` episodes, `58.4%` score, `$38.80` logged cost. See `docs/benchmark-results/miniwob-full-run-2026-05-21.md`.
+- `2026-05-21`: MiniWoB full suite, one repeat, `125` episodes, `58.4%` score, `$38.80` logged cost. See [run summary](miniwob-full-run-2026-05-21.md); all-cases review and failure backlog in [failure analysis](miniwob-full-run-2026-05-21-failure-analysis.md).
