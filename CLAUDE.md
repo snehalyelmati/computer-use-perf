@@ -12,6 +12,7 @@ A general-purpose browser agent. Python 3.12, managed with [uv](https://docs.ast
 - `uv sync --extra agentlab` — install optional AgentLab/BrowserGym benchmark dependencies
 - `uv run main.py --url <target> --task TASK.md` — run the agent
 - `uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py --benchmark miniwob --preset verify-five --n-repeats 1 --max-steps 20 --env-max-steps 10 --max-elements 80` — run the MiniWoB verification benchmark
+- `uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py --benchmark miniwob --task-set terminal-readback --iteration-profile cheap --n-repeats 1` — run a cheap targeted BrowserGym subset
 - `uv add <package>` — add a dependency
 
 ## Observability
@@ -37,6 +38,10 @@ Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlin
 
 - When possible, write a local debug script (e.g. `debug_<feature>.py`) to verify changes against a minimal test page before running the full agent end-to-end
 
+## Documentation
+
+- When runtime behavior, CLI flags, benchmark workflow, report schemas, AgentInfo fields, or Mermaid-documented architecture changes, update the relevant docs in the same change. At minimum check `README.md`, `docs/architecture.md`, `docs/agentlab-benchmarks.md`, `docs/observability.md`, and `docs/source-map.md`.
+
 ## Code Guidelines
 
 - **DO NOT HARDCODE** values, selectors, keywords, or patterns specific to particular websites/challenges
@@ -44,7 +49,7 @@ Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlin
 - Let the LLM decide what to click/type based on context, not hardcoded rules
 - Keep element selection generic: pass stable element IDs to the LLM and let it decide
 - Never pass raw CSS/XPath selectors to the LLM
-- When significant changes are made, update docs and Mermaid diagrams to match the current behavior
+- When significant changes are made, especially to runtime control flow, validation/completion policy, CLI flags, benchmark workflow, logs/reports, or public data fields, update docs and Mermaid diagrams to match the current behavior
 
 ## Browser Interaction Principles
 
@@ -70,6 +75,7 @@ Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlin
 - After a meaningful agent run, regenerate archived challenge results: `uv run python scripts/generate_results.py`
 - Review `results.md` diff before committing to track progress/regressions
 - For BrowserGym benchmarks, use `benchmarks/agentlab/run_browsergym_benchmark.py`; missing `cum_reward` rows are scored as zero and reported in `warnings.parse_gaps`
+- `AgentInfo.stats` token/cost fields are per-step deltas; cumulative native run totals live under `extra_info.cumulative_usage`.
 
 ## Architecture
 

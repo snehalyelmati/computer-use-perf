@@ -92,7 +92,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-force-exit",
         action="store_true",
-        help="Return normally after the study instead of forcing process exit.",
+        help=(
+            "Testing/debug only: return normally after the study instead of forcing "
+            "process exit. Real AgentLab runs may leave cleanup resources that keep "
+            "Python alive."
+        ),
     )
     return parser
 

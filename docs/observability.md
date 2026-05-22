@@ -19,6 +19,8 @@ AgentLab benchmark studies also write report artifacts under `logs/agentlab/stud
 - `per_task_results.csv`
 - `failed_tasks.md`
 
+Each AgentLab step also carries an `AgentInfo` payload. The numeric `stats` token/cost fields are per-step deltas so AgentLab aggregation does not double-count cumulative totals. The cumulative native run totals are preserved under `extra_info.cumulative_usage`, and `extra_info.validation` records the latest external BrowserGym validation signal when available.
+
 ### Metrics events (`logs/latest/metrics.jsonl`)
 
 Each line is a standalone JSON object with common fields:
@@ -42,6 +44,7 @@ Event types:
 
 - Token usage comes from PydanticAI `RunUsage`.
 - Cost is extracted from OpenRouter response metadata when OpenRouter provides it; if not present, cost fields are `null`/omitted.
+- In AgentLab reports, use `AgentInfo.stats` for per-step accounting and `AgentInfo.extra_info.cumulative_usage` for native cumulative totals.
 
 ### Quick inspection
 

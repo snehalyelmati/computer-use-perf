@@ -16,7 +16,7 @@ It then calls `run_agent_sync()`, which creates a `BrowserAgent` and runs the as
 
 `benchmarks/agentlab/computer_use_agent.py` adds a benchmark entry path for AgentLab and BrowserGym. `ComputerUseAgentArgs` is the serializable AgentLab configuration object. It creates `ComputerUseAgentLabAgent`, sets `use_raw_page_output=True`, and uses BrowserGym's raw `obs["page"]` instead of launching a browser.
 
-`obs_preprocessor()` stores the raw Playwright page on the agent and removes it from the observation before AgentLab pickles step data. `get_action()` wraps the BrowserGym sync page with `src/agent/browser/external.py`, runs one `BrowserAgentStepRuntime` step, then returns `noop()` so BrowserGym can observe and validate the page that this agent already mutated.
+`obs_preprocessor()` stores the raw Playwright page on the agent, converts any BrowserGym reward/termination fields into a `ValidationSignal`, and removes the page before AgentLab pickles step data. `get_action()` wraps the BrowserGym sync page with `src/agent/browser/external.py`, runs one `BrowserAgentStepRuntime` step with the latest validation signal, then returns `noop()` so BrowserGym can observe and validate the page that this agent already mutated.
 
 ```mermaid
 sequenceDiagram
@@ -31,7 +31,7 @@ sequenceDiagram
     Env-->>Adapter: raw observation with page
     Adapter->>Adapter: store page, strip from obs
     Adapter->>Bridge: wrap sync Playwright page/CDP
-    Adapter->>Runtime: run_one_step(session, goal)
+    Adapter->>Runtime: run_one_step(session, goal, validation)
     Runtime->>Runtime: snapshot + Oracle + Filter + plan
     Runtime->>Tools: DOM-first actions with stable element IDs
     Tools-->>Env: mutate live BrowserGym page
@@ -39,7 +39,7 @@ sequenceDiagram
     Env->>Env: BrowserGym validation
 ```
 
-This path deliberately keeps BrowserGym as the source of truth for success. Internal `done=True` is emitted in `AgentInfo` as diagnostic data, but the adapter still returns `noop()` and lets the environment decide termination.
+This path deliberately keeps BrowserGym as the source of truth for success. Positive terminal BrowserGym validation stops as success; terminal zero/negative validation stops as failure. Internal `done=True` is only a proposal unless the completion policy accepts it.
 
 ## Main Loop
 
@@ -59,7 +59,8 @@ The default loop follows this order each step:
 12. Call Filter when the page fingerprint changes or the filter cache is invalidated.
 13. Build a pruned snapshot with deterministic guardrails.
 14. Run either the default Orchestrator -> Worker path or the `--unified` path.
-15. Update memory, trace, metrics, and stop conditions.
+15. Run the completion policy against external validation, `done=true` proposals, observable tool/page evidence, progress state, and tool-limit state.
+16. Update compact memory, trace, metrics, and stop conditions.
 
 ```mermaid
 sequenceDiagram
@@ -96,6 +97,7 @@ sequenceDiagram
         Worker->>Tools: semantic tool calls
         Tools-->>Worker: mutation feedback
         Worker-->>Agent: step output
+        Agent->>Agent: completion policy
         Agent->>Agent: memory + trace + metrics
     end
 ```
@@ -164,20 +166,20 @@ It returns `SnapshotFilterOutput` with useful text lines and priority element ID
 
 ## Orchestrator And Worker
 
-The Orchestrator sees the goal, useful lines, diff, memory, worker tool list, pruned snapshot, and Oracle directive. It returns an `OrchestratorDecision` with a small `worker_goal`.
+The Orchestrator sees the goal, useful lines, diff, compact runtime state, worker tool list, pruned snapshot, and Oracle directive. It returns an `OrchestratorDecision` with a small `worker_goal`. If it marks the overall goal complete, it must include `completion_evidence`; the runtime still validates that proposal before stopping.
 
 The Worker receives:
 
 - The delegated goal.
-- Recent step summaries.
+- Compact runtime state: last distinct page state, last unique action attempts, latest validation, recovery state, and blocked reason.
 - Page context from filtered useful lines.
 - The pruned page snapshot.
 
-The Worker can only use the default worker tool set and returns `StepOutput`. A worker `done=true` only means the delegated worker goal is complete. The run continues until the Orchestrator or Unified agent marks the overall goal complete, or another stop condition fires.
+The Worker can only use the default worker tool set and returns `StepOutput`. A worker `done=true` only means the delegated worker goal is complete. The run continues until the Orchestrator or Unified agent marks the overall goal complete and the completion policy accepts it, or another stop condition fires.
 
 ## Unified Mode
 
-`--unified` keeps snapshot capture, Oracle, Filter, pruning, tools, metrics, and memory, but replaces the Orchestrator -> Worker handoff with a single tool-equipped agent. The unified agent returns `UnifiedStepOutput`, where `done=true` means the overall run goal is complete.
+`--unified` keeps snapshot capture, Oracle, Filter, pruning, tools, metrics, and memory, but replaces the Orchestrator -> Worker handoff with a single tool-equipped agent. The unified agent returns `UnifiedStepOutput`, where `done=true` means the overall run goal is complete. It must provide `completion_evidence`; naked `done=true` without external success or observable evidence becomes one recovery attempt and then a blocked stop.
 
 This mode exists to test the tradeoff between separation of concerns and handoff overhead.
 
@@ -199,7 +201,7 @@ Default tools:
 - `switch_to_main_frame`
 - `press_key_combination`
 
-The tool implementation lives in `src/agent/tools/semantic.py`. Many tools inject a MutationObserver before action execution and return feedback after a settle period.
+The tool implementation lives in `src/agent/tools/semantic.py`. Many tools inject a MutationObserver before action execution and return feedback after a settle period. Tool wrappers persist compact structured facts such as DOM/value/URL/focus changes and block repeated identical no-change calls inside a step after two attempts.
 
 ## Observability
 
@@ -225,6 +227,6 @@ These are intentionally documented as benchmark-specific. They should not be pre
 
 ## Single-Step Runtime
 
-`src/agent/core/step_runtime.py` contains the reusable single-step runtime used by the AgentLab adapter. It mirrors the main loop's per-step behavior: page settlement, handler extraction, scroll-container marking, CDP snapshot capture, diffs/fingerprints, Oracle, Filter, pruned snapshot construction, Orchestrator/Worker or Unified execution, memory, metrics, and run summaries.
+`src/agent/core/step_runtime.py` contains the reusable single-step runtime used by the AgentLab adapter. It mirrors the main loop's per-step behavior: page settlement, handler extraction, scroll-container marking, CDP snapshot capture, diffs/fingerprints, Oracle, Filter, pruned snapshot construction, Orchestrator/Worker or Unified execution, completion policy, compact trace, metrics, and run summaries.
 
 Unlike `BrowserAgent.run()`, it does not launch, navigate, or close the browser. The caller supplies an `ExternalBrowserSession`, and only CDP sessions created for the step are detached afterward.

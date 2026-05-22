@@ -10,6 +10,7 @@ from typing import Any, Callable, TypeVar
 
 from src.agent.browser.external import build_external_browser_session_async
 from src.agent.config import AgentConfig, LLMConfig, PROVIDER_DEFAULTS
+from src.agent.core.completion import ValidationSignal
 from src.agent.core.step_runtime import BrowserAgentStepRuntime, RuntimeStepResult
 
 try:  # pragma: no cover - exercised when optional benchmark deps are installed
@@ -55,6 +56,107 @@ def _goal_from_obs(obs: dict[str, Any]) -> str:
 
 def _noop_action() -> str:
     return "noop()"
+
+
+_VALIDATION_OBS_KEY = "__computer_use_validation"
+
+
+def _install_agentlab_validation_bridge() -> None:
+    """Attach AgentLab step validation to observations before preprocessing."""
+    try:
+        from browsergym.experiments.loop import StepInfo
+    except Exception:  # pragma: no cover - depends on optional AgentLab deps
+        return
+
+    if getattr(StepInfo, "_computer_use_validation_bridge", False):
+        return
+
+    original_from_step = StepInfo.from_step
+
+    def from_step_with_validation(self: Any, env: Any, action: str, obs_preprocessor: Any) -> Any:
+        if obs_preprocessor is None:
+            return original_from_step(self, env, action, obs_preprocessor)
+
+        def wrapped_preprocessor(obs: dict[str, Any]) -> Any:
+            enriched = dict(obs)
+            enriched[_VALIDATION_OBS_KEY] = {
+                "reward": getattr(self, "reward", None),
+                "raw_reward": getattr(self, "raw_reward", None),
+                "terminated": getattr(self, "terminated", None),
+                "truncated": getattr(self, "truncated", None),
+                "task_info": getattr(self, "task_info", None),
+            }
+            return obs_preprocessor(enriched)
+
+        return original_from_step(self, env, action, wrapped_preprocessor)
+
+    StepInfo.from_step = from_step_with_validation
+    StepInfo._computer_use_validation_bridge = True
+
+
+if bgym is not None:
+    _install_agentlab_validation_bridge()
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+    return None
+
+
+def _validation_from_obs(obs: dict[str, Any]) -> ValidationSignal | None:
+    reward = None
+    for key in ("reward", "raw_reward", "last_reward", "cum_reward"):
+        reward = _coerce_float(obs.get(key))
+        if reward is not None:
+            break
+    terminated = _coerce_bool(obs.get("terminated"))
+    truncated = _coerce_bool(obs.get("truncated"))
+    done = _coerce_bool(obs.get("done"))
+    terminal = bool(terminated or truncated or done)
+    if reward is None and not terminal:
+        return None
+    status = "unknown"
+    if reward is not None and reward > 0:
+        status = "success"
+    elif terminal:
+        status = "failure"
+    elif reward is not None:
+        status = "neutral"
+    evidence = []
+    if reward is not None:
+        evidence.append(f"reward={reward:g}")
+    if terminated is not None:
+        evidence.append(f"terminated={terminated}")
+    if truncated is not None:
+        evidence.append(f"truncated={truncated}")
+    if done is not None:
+        evidence.append(f"done={done}")
+    return ValidationSignal(
+        source="browsergym",
+        status=status,  # type: ignore[arg-type]
+        terminal=terminal,
+        reward=reward,
+        evidence=tuple(evidence),
+        reason="BrowserGym validation",
+    )
 
 
 BENCHMARK_DEFAULT_MODEL = "z-ai/glm-4.7:nitro"
@@ -164,6 +266,7 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
         self._runtime_factory = runtime_factory or BrowserAgentStepRuntime
         self._runtime = self._runtime_factory(agent_config, llm_config)
         self._raw_page: Any | None = None
+        self._last_validation: ValidationSignal | None = None
         self.action_set = _FallbackActionSet() if bgym is None else bgym.HighLevelActionSet()
 
     def reset(self, seed: int | None = None) -> None:
@@ -177,6 +280,7 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
         except RuntimeError:
             pass
         self._raw_page = None
+        self._last_validation = None
         self._runtime = self._runtime_factory(self.agent_config, self.llm_config)
 
     def close(self) -> None:
@@ -193,6 +297,11 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
     def obs_preprocessor(self, obs: dict[str, Any]) -> dict[str, Any]:
         processed = dict(obs)
         self._raw_page = processed.pop("page", None)
+        validation_payload = processed.pop(_VALIDATION_OBS_KEY, None)
+        if validation_payload is not None:
+            self._last_validation = _validation_from_obs(validation_payload)
+        else:
+            self._last_validation = _validation_from_obs(processed)
         return processed
 
     def get_action(self, obs: dict[str, Any]) -> tuple[str, Any]:
@@ -225,18 +334,30 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
     async def _run_step(self, obs: dict[str, Any]) -> RuntimeStepResult:
         session = await build_external_browser_session_async(self._raw_page)
         try:
-            return await self._runtime.run_one_step(session, goal=_goal_from_obs(obs))
+            return await self._runtime.run_one_step(
+                session,
+                goal=_goal_from_obs(obs),
+                validation=self._last_validation,
+            )
         finally:
             await session.detach()
 
     def _info_from_result(self, result: RuntimeStepResult) -> Any:
+        step_input_tokens = int(result.step_input_tokens)
+        step_output_tokens = int(result.step_output_tokens)
+        step_total_tokens = step_input_tokens + step_output_tokens
+        step_cost = result.step_cost_usd if result.step_cost_usd is not None else 0.0
         stats = {
             "computer_use_steps": result.step,
             "computer_use_step_elapsed": result.duration_ms / 1000.0,
-            "computer_use_input_tokens": result.input_tokens,
-            "computer_use_output_tokens": result.output_tokens,
-            "computer_use_total_tokens": result.total_tokens,
-            "computer_use_cost_usd": result.cost_usd or 0.0,
+            "computer_use_input_tokens": step_input_tokens,
+            "computer_use_output_tokens": step_output_tokens,
+            "computer_use_total_tokens": step_total_tokens,
+            "computer_use_cost_usd": step_cost,
+            "computer_use_cumulative_input_tokens": result.input_tokens,
+            "computer_use_cumulative_output_tokens": result.output_tokens,
+            "computer_use_cumulative_total_tokens": result.total_tokens,
+            "computer_use_cumulative_cost_usd": result.cost_usd or 0.0,
             "computer_use_internal_done": int(result.done),
         }
         lines = [
@@ -258,6 +379,19 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
                 "tool_calls": result.tool_calls,
                 "log_dir": result.log_dir,
                 "trace": result.trace,
+                "validation": result.validation,
+                "step_usage": {
+                    "input_tokens": step_input_tokens,
+                    "output_tokens": step_output_tokens,
+                    "total_tokens": step_total_tokens,
+                    "cost_usd": step_cost,
+                },
+                "cumulative_usage": {
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
+                    "total_tokens": result.total_tokens,
+                    "cost_usd": result.cost_usd or 0.0,
+                },
             },
         )
 

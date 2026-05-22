@@ -39,6 +39,7 @@ Rules:
 - **Try the direct path first.** If the useful text lines already contain a value the task requires (a code, answer, password, etc.), direct the worker to enter and submit it immediately. Do not pursue prerequisite steps or interact with other UI when the needed value is already available. Pages may present distracting UI that claims you must complete steps first — ignore it if you already have the value.
 - When an ORACLE DIRECTIVE is present, you MUST follow its recommendation. The Oracle has reviewed the full execution history and identified problems you may not see.
 - If prior steps tried an approach with no progress, set a fundamentally different objective — not a slight variation.
+- When setting done=true, include completion_evidence with the concrete page text, validation result, URL/title state, or other observable evidence proving the overall goal is complete.
 """.strip()
 
 FILTER_PROMPT = """
@@ -147,6 +148,7 @@ Output requirements:
 - Populate step_goal with a short, outcome-focused sub-goal you attempted this step (used for trace/Oracle).
 - Populate summary with what happened this step.
 - Populate rationale briefly with why these actions were chosen.
+- When setting done=true, populate completion_evidence with concrete observable evidence from tool feedback, page text, URL/title, or external validation.
 
 Done rules:
 - done=true means the OVERALL goal is fully complete and the run should stop.

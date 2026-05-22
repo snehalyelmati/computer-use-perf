@@ -89,12 +89,14 @@ Verified facts:
 Verified facts:
 
 - BrowserGym owns task setup, browser lifecycle, rewards, termination, and validation.
-- The adapter requests `use_raw_page_output=True`, stores the raw Playwright page, and returns `noop()` after the internal agent mutates the live page.
+- The adapter requests `use_raw_page_output=True`, stores the raw Playwright page, passes BrowserGym reward/termination into the runtime as external validation, and returns `noop()` after the internal agent mutates the live page.
 - The generic runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny.
 - MiniWoB `verify-five` is a five-task verification subset; MiniWoB `full` uses BrowserGym's default suite with `n_repeats=5` unless overridden.
+- Iteration profiles are `full`, `balanced`, and `cheap`; checked-in task-set manifests live under `benchmarks/agentlab/task_sets/`.
 - WebArena variants use AgentLab's `ray` backend when `--n-jobs > 1` so BrowserGym task dependencies are preserved.
 - Benchmark reports count missing `cum_reward` rows as zero reward and include those gaps in `warnings.parse_gaps`.
 - Report artifacts are `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`.
+- AgentLab `AgentInfo.stats` token/cost values are per-step deltas; cumulative totals live in `extra_info.cumulative_usage`.
 
 ## Historical Commit Sources
 

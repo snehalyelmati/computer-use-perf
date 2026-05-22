@@ -29,6 +29,7 @@ from src.agent.context.snapshot import (
     capture_snapshot,
     format_snapshot_for_llm,
 )
+from src.agent.core.completion import CompletionInputs, ValidationSignal, decide_completion
 from src.agent.core import agent as runtime
 from src.agent.core.pruning import (
     extract_instruction_phrases,
@@ -58,6 +59,38 @@ from src.agent.tools import semantic
 logger = logging.getLogger(__name__)
 
 
+def _validation_payload(validation: ValidationSignal | None) -> dict[str, Any] | None:
+    if validation is None:
+        return None
+    return {
+        "source": validation.source,
+        "status": validation.status,
+        "terminal": validation.terminal,
+        "reward": validation.reward,
+        "evidence": list(validation.evidence),
+        "reason": validation.reason,
+    }
+
+
+def _diff_has_observable_change(diff_text: str) -> bool:
+    first = (diff_text or "").split("\n", 1)[0]
+    return bool(
+        diff_text
+        and not first.startswith("First snapshot")
+        and (
+            first != "new_elements=0 changed_labels=0 removed_elements=0"
+            or any(
+                line.startswith(("text_changes=", "+text ", "-text "))
+                for line in diff_text.splitlines()[1:]
+            )
+        )
+    )
+
+
+def _authoritative_terminal_validation(validation: ValidationSignal | None) -> bool:
+    return bool(validation and validation.terminal)
+
+
 @dataclass(frozen=True)
 class RuntimeStepResult:
     """Structured result from one internal agent step."""
@@ -74,6 +107,10 @@ class RuntimeStepResult:
     duration_ms: int
     log_dir: str | None
     trace: list[dict[str, Any]]
+    step_input_tokens: int = 0
+    step_output_tokens: int = 0
+    step_cost_usd: float | None = None
+    validation: dict[str, Any] | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -106,7 +143,11 @@ class BrowserAgentStepRuntime:
         self._total_input_tokens = 0
         self._total_output_tokens = 0
         self._total_cost_usd: float | None = None
+        self._step_input_tokens = 0
+        self._step_output_tokens = 0
+        self._step_cost_usd: float | None = None
         self._prev_snapshot: PageSnapshot | None = None
+        self._terminal_stop_reason: str | None = None
         self._closed = False
 
     @property
@@ -222,8 +263,11 @@ class BrowserAgentStepRuntime:
         cost = cost_stats_from_result(result, model_name)
         self._total_input_tokens += usage.input_tokens
         self._total_output_tokens += usage.output_tokens
+        self._step_input_tokens += usage.input_tokens
+        self._step_output_tokens += usage.output_tokens
         if cost:
             self._total_cost_usd = (self._total_cost_usd or 0.0) + cost.cost_usd
+            self._step_cost_usd = (self._step_cost_usd or 0.0) + cost.cost_usd
         self._emit(
             "agent_call",
             step=step,
@@ -291,14 +335,61 @@ class BrowserAgentStepRuntime:
             logger.warning("Failed to write external run summary", exc_info=True)
 
     async def run_one_step(
-        self, session: ExternalBrowserSession, *, goal: str | None = None
+        self,
+        session: ExternalBrowserSession,
+        *,
+        goal: str | None = None,
+        validation: ValidationSignal | None = None,
     ) -> RuntimeStepResult:
         page_url = getattr(session.page, "url", "") or ""
         self._ensure_started(goal or self.agent_config.goal or "", page_url)
         assert self._agents is not None
+        self.state.last_validation_signal = validation
+
+        validation_decision = decide_completion(CompletionInputs(validation=validation))
+        if validation_decision.terminal:
+            if _authoritative_terminal_validation(validation):
+                self._terminal_stop_reason = validation_decision.stop_reason
+            self._write_run_summary(stop_reason=validation_decision.stop_reason)
+            return RuntimeStepResult(
+                step=self.state.step,
+                done=True,
+                summary=validation_decision.reason,
+                stop_reason=validation_decision.stop_reason,
+                worker_goal=self.state.last_worker_goal,
+                tool_calls="",
+                input_tokens=self._total_input_tokens,
+                output_tokens=self._total_output_tokens,
+                cost_usd=self._total_cost_usd,
+                duration_ms=0,
+                log_dir=self._run_dir,
+                trace=list(self.state.step_trace),
+                validation=_validation_payload(validation),
+            )
+
+        if self._terminal_stop_reason is not None:
+            if validation is not None and not validation.terminal:
+                self._terminal_stop_reason = None
+            else:
+                return RuntimeStepResult(
+                    step=self.state.step,
+                    done=True,
+                    summary=f"Internal runtime already stopped: {self._terminal_stop_reason}.",
+                    stop_reason=self._terminal_stop_reason,
+                    worker_goal=self.state.last_worker_goal,
+                    tool_calls="",
+                    input_tokens=self._total_input_tokens,
+                    output_tokens=self._total_output_tokens,
+                    cost_usd=self._total_cost_usd,
+                    duration_ms=0,
+                    log_dir=self._run_dir,
+                    trace=list(self.state.step_trace),
+                    validation=_validation_payload(validation),
+                )
 
         if self.state.step >= self.agent_config.max_steps:
             self._write_run_summary(stop_reason="max_steps")
+            self._terminal_stop_reason = "max_steps"
             return RuntimeStepResult(
                 step=self.state.step,
                 done=True,
@@ -312,9 +403,13 @@ class BrowserAgentStepRuntime:
                 duration_ms=0,
                 log_dir=self._run_dir,
                 trace=list(self.state.step_trace),
+                validation=_validation_payload(validation),
             )
 
         self.state.step += 1
+        self._step_input_tokens = 0
+        self._step_output_tokens = 0
+        self._step_cost_usd = None
         step_started = time.perf_counter()
         stop_reason: str | None = None
         logger.info("")
@@ -392,6 +487,7 @@ class BrowserAgentStepRuntime:
 
         if self.state.no_progress_steps >= self.agent_config.unchanged_abort_threshold:
             stop_reason = "unchanged_fingerprint_abort"
+            self._terminal_stop_reason = stop_reason
             self._emit(
                 "step_end",
                 step=self.state.step,
@@ -895,7 +991,15 @@ class BrowserAgentStepRuntime:
         )
         prompt = (
             f"Overall goal: {self.agent_config.goal}\n\n"
-            f"Memory (recent):\n{runtime._format_memory(self.state.memory, limit=self.agent_config.memory_steps)}\n\n"
+            "Compact runtime state:\n"
+            f"{runtime._format_compact_runtime_context(
+                self.state.step_trace,
+                latest_validation=self.state.last_validation_signal,
+                recovery_attempted=self.state.recovery_attempted,
+                recovery_reason=self.state.recovery_reason,
+                blocked_reason=self.state.last_blocked_reason,
+                window=max(1, self.agent_config.worker_context_steps),
+            )}\n\n"
             f"Filtered useful lines:\n{useful_block}\n\n"
             f"Diff since prior snapshot:\n{diff_text}\n\n"
             f"Page snapshot:\n{snapshot_text}\n"
@@ -962,11 +1066,25 @@ class BrowserAgentStepRuntime:
             )
             step_output = unified_result.output
 
-        if step_output.done and tool_tracker.success_count == 0:
-            prefix = "[no successful tools]" if tool_tracker.failure_count > 0 else "[no tools executed]"
-            step_output = step_output.model_copy(
-                update={"done": False, "summary": f"{prefix} {step_output.summary}"}
-            )
+        tool_limit_hit = step_output.summary.startswith("Tool call limit reached")
+        completion_inputs = runtime._completion_inputs_from_step(
+            self.state,
+            validation=self.state.last_validation_signal,
+            model_done=bool(step_output.done),
+            completion_evidence=step_output.completion_evidence,
+            worker_goal=step_output.step_goal,
+            tool_context=tool_context,
+            tool_tracker=tool_tracker,
+            prev_url=prev_url,
+            tool_limit_hit=tool_limit_hit,
+        )
+        completion_decision = decide_completion(completion_inputs)
+        step_output = runtime._apply_completion_decision(
+            self.state,
+            completion_decision,
+            step_output=step_output,
+            observable_change=completion_inputs.observable_evidence,
+        )
         self._finish_tool_step(
             step_output=step_output,
             worker_goal=step_output.step_goal,
@@ -980,13 +1098,13 @@ class BrowserAgentStepRuntime:
             step=self.state.step,
             done=bool(step_output.done),
             duration_ms=int((time.perf_counter() - step_started) * 1000),
-            **({"stop_reason": "done"} if step_output.done else {}),
+            **({"stop_reason": completion_decision.stop_reason or "done"} if step_output.done else {}),
         )
         return self._result(
             step_started=step_started,
             done=bool(step_output.done),
             summary=step_output.summary,
-            stop_reason="done" if step_output.done else None,
+            stop_reason=completion_decision.stop_reason if step_output.done else None,
             worker_goal=step_output.step_goal,
             tool_calls=tool_tracker.calls_summary(),
         )
@@ -1032,20 +1150,59 @@ class BrowserAgentStepRuntime:
                 worker_goal=self.state.last_worker_goal,
                 tool_calls="",
             )
+        previous_worker_goal = self.state.last_worker_goal
         self.state.last_worker_goal = decision.worker_goal
         if decision.done:
+            completion_inputs = CompletionInputs(
+                validation=self.state.last_validation_signal,
+                model_done=True,
+                completion_evidence=decision.completion_evidence or decision.rationale,
+                successful_tools=0,
+                same_worker_goal=bool(
+                    decision.worker_goal and decision.worker_goal == previous_worker_goal
+                ),
+                dom_changed=_diff_has_observable_change(diff_text),
+                recovery_attempted=self.state.recovery_attempted,
+                no_progress_steps=self.state.no_progress_steps,
+                consecutive_tool_limit_steps=self.state.consecutive_tool_limit_steps,
+            )
+            completion_decision = decide_completion(completion_inputs)
+            if completion_decision.action == "recover_once":
+                summary = (
+                    f"[recovery required] {decision.rationale or 'Orchestrator marked task complete.'} "
+                    f"({completion_decision.reason})"
+                )
+                self.state.recovery_attempted = True
+                self.state.recovery_reason = completion_decision.reason
+                self.state.memory.append(f"[step {self.state.step}, 0 ok, 0 failed] {summary}")
+                self.state.last_summary = self.state.memory[-1]
+                self._emit(
+                    "step_end",
+                    step=self.state.step,
+                    done=False,
+                    duration_ms=int((time.perf_counter() - step_started) * 1000),
+                )
+                return self._result(
+                    step_started=step_started,
+                    done=False,
+                    summary=summary,
+                    stop_reason=None,
+                    worker_goal=decision.worker_goal,
+                    tool_calls="",
+                )
+            stop_reason = completion_decision.stop_reason if completion_decision.terminal else "done"
             self._emit(
                 "step_end",
                 step=self.state.step,
                 done=True,
-                stop_reason="done",
+                stop_reason=stop_reason,
                 duration_ms=int((time.perf_counter() - step_started) * 1000),
             )
             return self._result(
                 step_started=step_started,
                 done=True,
-                summary=decision.rationale or "Orchestrator marked task complete.",
-                stop_reason="done",
+                summary=decision.rationale or completion_decision.reason or "Orchestrator marked task complete.",
+                stop_reason=stop_reason,
                 worker_goal=decision.worker_goal,
                 tool_calls="",
             )
@@ -1060,6 +1217,23 @@ class BrowserAgentStepRuntime:
             priority_ids=priority_ids,
             step_deadline=step_deadline,
         )
+        completion_decision = self.state.last_completion_decision
+        if completion_decision and completion_decision.terminal:
+            self._emit(
+                "step_end",
+                step=self.state.step,
+                done=True,
+                stop_reason=completion_decision.stop_reason,
+                duration_ms=int((time.perf_counter() - step_started) * 1000),
+            )
+            return self._result(
+                step_started=step_started,
+                done=True,
+                summary=worker_result.summary,
+                stop_reason=completion_decision.stop_reason,
+                worker_goal=decision.worker_goal,
+                tool_calls=self.state.step_trace[-1].get("tool_calls", "") if self.state.step_trace else "",
+            )
         self._emit(
             "step_end",
             step=self.state.step,
@@ -1069,7 +1243,7 @@ class BrowserAgentStepRuntime:
         )
         return self._result(
             step_started=step_started,
-            done=bool(worker_result.done),
+            done=False,
             summary=worker_result.summary,
             stop_reason=None,
             worker_goal=decision.worker_goal,
@@ -1180,8 +1354,17 @@ class BrowserAgentStepRuntime:
         )
         worker_context = ""
         if self.state.memory and self.agent_config.worker_context_steps > 0:
-            recent = self.state.memory[-self.agent_config.worker_context_steps :]
-            worker_context = "\n\nRecent steps:\n" + "\n".join(f"- {m}" for m in recent)
+            worker_context = (
+                "\n\nCompact runtime state:\n"
+                + runtime._format_compact_runtime_context(
+                    self.state.step_trace,
+                    latest_validation=self.state.last_validation_signal,
+                    recovery_attempted=self.state.recovery_attempted,
+                    recovery_reason=self.state.recovery_reason,
+                    blocked_reason=self.state.last_blocked_reason,
+                    window=max(1, self.agent_config.worker_context_steps),
+                )
+            )
         prompt = (
             STEP_PROMPT.format(goal=decision.worker_goal)
             + worker_context
@@ -1245,10 +1428,25 @@ class BrowserAgentStepRuntime:
             )
             step_output = result.output
 
-        if step_output.done and tool_tracker.success_count == 0:
-            step_output = step_output.model_copy(
-                update={"done": False, "summary": f"[no successful tools] {step_output.summary}"}
-            )
+        tool_limit_hit = step_output.summary.startswith("Tool call limit reached")
+        completion_inputs = runtime._completion_inputs_from_step(
+            self.state,
+            validation=self.state.last_validation_signal,
+            model_done=False,
+            completion_evidence=None,
+            worker_goal=decision.worker_goal,
+            tool_context=tool_context,
+            tool_tracker=tool_tracker,
+            prev_url=prev_url,
+            tool_limit_hit=tool_limit_hit,
+        )
+        completion_decision = decide_completion(completion_inputs)
+        step_output = runtime._apply_completion_decision(
+            self.state,
+            completion_decision,
+            step_output=step_output,
+            observable_change=completion_inputs.observable_evidence,
+        )
         self._finish_tool_step(
             step_output=step_output,
             worker_goal=decision.worker_goal,
@@ -1290,7 +1488,16 @@ class BrowserAgentStepRuntime:
                 "diff_summary": diff_text.split("\n")[0] if diff_text else "",
                 "url_changed": prev_url != (getattr(tool_context.page, "url", "") or ""),
                 "tool_calls": tool_tracker.calls_summary(),
+                "tool_results": tool_tracker.results[-6:],
+                "blocked_repeats": tool_tracker.blocked_repeats,
                 "tool_limit_hit": step_output.summary.startswith("Tool call limit reached"),
+                "completion_decision": (
+                    self.state.last_completion_decision.action
+                    if self.state.last_completion_decision
+                    else None
+                ),
+                "blocked_reason": self.state.last_blocked_reason,
+                "validation": _validation_payload(self.state.last_validation_signal),
             }
         )
 
@@ -1320,4 +1527,8 @@ class BrowserAgentStepRuntime:
             duration_ms=duration_ms,
             log_dir=self._run_dir,
             trace=list(self.state.step_trace),
+            step_input_tokens=self._step_input_tokens,
+            step_output_tokens=self._step_output_tokens,
+            step_cost_usd=self._step_cost_usd,
+            validation=_validation_payload(self.state.last_validation_signal),
         )

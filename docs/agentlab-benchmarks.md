@@ -10,6 +10,7 @@ flowchart LR
     Env -->|raw obs includes page| Adapter[ComputerUseAgentLabAgent]
     Adapter --> Bridge[Sync Playwright Bridge]
     Bridge --> Runtime[Single-Step Agent Runtime]
+    Env -->|reward/termination| Adapter
     Runtime --> Snapshot[CDP Snapshot + Handler Hints]
     Snapshot --> Agents[Oracle + Filter + Orchestrator + Worker]
     Agents --> Tools[DOM-First Semantic Tools]
@@ -27,7 +28,8 @@ The important inversion is browser ownership:
 - `BrowserAgentStepRuntime` runs one internal step against the live page.
 - The adapter returns `noop()` after the internal tool calls have already changed the page.
 - The benchmark snapshot includes compact SVG graphics summaries and bounding boxes when labels are not enough; the worker can use `click_at` for coordinate targets and `draw` for path targets.
-- BrowserGym remains the source of truth for task success. Internal `done=True` is logged in `AgentInfo` but does not replace BrowserGym termination.
+- BrowserGym remains the source of truth for task success. BrowserGym reward/termination is passed into the runtime as external validation; terminal positive validation stops success, and terminal zero/negative validation stops failure.
+- Internal `done=True` is treated as a proposal. It is accepted only with external success or concrete observable completion evidence.
 
 ## Installation
 
@@ -72,7 +74,19 @@ Presets:
 - `webarena:full`, `webarena_lite:full`, `webarena_verified:full`: BrowserGym defaults for those suites.
 - `custom`: pass one or more `--task` values.
 
-The runner defaults to unified mode, OpenRouter, `z-ai/glm-4.7:nitro`, `--max-steps 20`, `--env-max-steps 10`, `--max-elements 80`, and sequential execution. Non-WebArena parallel runs use AgentLab's `joblib` backend; WebArena variants use `ray` when `--n-jobs > 1` so BrowserGym task dependencies are honored. Pass `--split-pipeline` only when comparing against the older filter/orchestrator/worker pipeline.
+Iteration profiles:
+
+- `full`: comparable defaults, including `max_worker_tool_calls=10`, `worker_context_steps=3`, `stuck_threshold=3`, `unchanged_abort_threshold=8`, `oracle_interval=5`, and `env_max_steps=10`.
+- `balanced`: cheaper iteration defaults: `max_worker_tool_calls=6`, `worker_context_steps=2`, `stuck_threshold=2`, `unchanged_abort_threshold=4`, `oracle_interval=0`.
+- `cheap`: smallest local loop defaults: `max_worker_tool_calls=4`, `worker_context_steps=1`, `stuck_threshold=1`, `unchanged_abort_threshold=2`, `oracle_interval=0`, and `env_max_steps=5`.
+
+Task sets:
+
+- Checked-in manifests live under `benchmarks/agentlab/task_sets/`.
+- Use `--task-set <name>` for targeted local regression subsets such as `terminal-readback`, `email-icon-controls`, `social-icon-controls`, `drag-draw-slider`, and `noninteractive-text`.
+- Task-set runs apply low caps by default unless the corresponding CLI flag is explicitly provided.
+
+The runner defaults to unified mode, OpenRouter, `z-ai/glm-4.7:nitro`, `--iteration-profile full`, `--max-steps 20`, `--env-max-steps 10`, `--max-elements 80`, and sequential execution. Non-WebArena parallel runs use AgentLab's `joblib` backend; WebArena variants use `ray` when `--n-jobs > 1` so BrowserGym task dependencies are honored. Pass `--split-pipeline` only when comparing against the older filter/orchestrator/worker pipeline.
 
 Before creating a study, the runner validates benchmark setup:
 
@@ -132,7 +146,7 @@ AgentLab saves its normal experiment artifacts under its experiment root. This a
 - `run_summary.json`
 - optional `pages/` captures when enabled
 
-Each `AgentInfo` includes a compact markdown summary, numeric stats for AgentLab aggregation, and `extra_info` with the internal trace, tool call summary, log directory, tokens, cost, and internal stop reason.
+Each `AgentInfo` includes a compact markdown summary, numeric stats for AgentLab aggregation, and `extra_info` with the internal trace, tool call summary, log directory, validation signal, step token/cost usage, cumulative token/cost usage, and internal stop reason. AgentLab `stats` token/cost fields are per-step deltas; cumulative totals live under `extra_info.cumulative_usage`.
 
 The generic runner writes these additional files inside each AgentLab study directory:
 

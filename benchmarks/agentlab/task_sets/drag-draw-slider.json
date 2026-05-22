@@ -1,0 +1,14 @@
+{
+  "benchmark": "miniwob",
+  "description": "Pointer, drag, drawing, resize, and slider tasks.",
+  "tasks": [
+    "miniwob.drag-box",
+    "miniwob.drag-circle",
+    "miniwob.drag-items-grid",
+    "miniwob.draw-circle",
+    "miniwob.draw-line",
+    "miniwob.resize-textarea",
+    "miniwob.use-slider",
+    "miniwob.use-slider-2"
+  ]
+}

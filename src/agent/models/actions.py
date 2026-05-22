@@ -28,6 +28,10 @@ class ToolExecutionResult(BaseModel):
 
     ok: bool = Field(..., description="Whether the tool succeeded")
     message: str = Field(..., description="Human-readable tool outcome")
+    facts: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Compact machine-readable facts about observable state changes",
+    )
 
 
 class StepOutput(BaseModel):
@@ -62,6 +66,12 @@ class UnifiedStepOutput(BaseModel):
         "",
         description="Brief why these actions were chosen.",
     )
+    completion_evidence: str | None = Field(
+        None,
+        description=(
+            "Observable evidence that the overall goal is complete; required when done=true."
+        ),
+    )
 
 
 class OrchestratorDecision(BaseModel):
@@ -73,6 +83,12 @@ class OrchestratorDecision(BaseModel):
     rationale: str | None = Field(
         None,
         description="Optional brief rationale for why this next goal was chosen",
+    )
+    completion_evidence: str | None = Field(
+        None,
+        description=(
+            "Observable evidence that the overall goal is complete; required when done=true."
+        ),
     )
 
 

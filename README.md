@@ -156,7 +156,17 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --max-elements 80
 ```
 
-The generic benchmark runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny. It writes AgentLab studies under `logs/agentlab/studies/` and emits local report artifacts for score comparison.
+Run a cheap targeted iteration subset:
+
+```bash
+uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
+  --benchmark miniwob \
+  --task-set terminal-readback \
+  --iteration-profile cheap \
+  --n-repeats 1
+```
+
+The generic benchmark runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny. It writes AgentLab studies under `logs/agentlab/studies/` and emits local report artifacts for score comparison. Use `--iteration-profile {full,balanced,cheap}` for cost caps and `--task-set <name>` for checked-in regression subsets under `benchmarks/agentlab/task_sets/`.
 
 ## Outputs
 
@@ -174,6 +184,8 @@ AgentLab benchmark runs additionally write these files in each study directory:
 - `benchmark_report.md`: human-readable aggregate and per-task summary.
 - `per_task_results.csv`: normalized per-task/per-seed rows.
 - `failed_tasks.md`: failed, errored, truncated, incomplete, or zero-reward episodes with log paths.
+
+AgentLab `AgentInfo.stats` token/cost fields are per-step deltas. Cumulative token/cost totals are stored in `extra_info.cumulative_usage`.
 
 Analyze timing metrics:
 

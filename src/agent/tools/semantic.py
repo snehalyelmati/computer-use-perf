@@ -1464,6 +1464,11 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
         return frame_error
     session = await _session_for_element(element, context)
     await _inject_observer(session)
+    try:
+        previous_value = await _read_input_value(element.backend_node_id, session)
+    except Exception:
+        logger.debug("Failed to read live input value before typing", exc_info=True)
+        previous_value = (element.attributes or {}).get("value")
     if not await _dom_focus(element.backend_node_id, session):
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Type failed: element not focusable")
@@ -1491,6 +1496,9 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
     if current_value is not None:
         display = current_value[:250] + "..." if len(current_value) > 250 else current_value
         base_msg = f"Typed into {element_id}. Current value: \"{display}\""
+        if previous_value is not None:
+            prev_display = previous_value[:250] + "..." if len(previous_value) > 250 else previous_value
+            base_msg += f'. Previous value: "{prev_display}"'
         if used_value_fallback:
             base_msg += " (set value via form events after keyboard input did not stick)"
     message = _format_verification(mutations, base_msg)

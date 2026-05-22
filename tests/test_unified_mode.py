@@ -141,8 +141,8 @@ async def test_unified_done_gate_overrides_done_without_tool_calls(
     await agent.run()
 
     assert captured_summary.get("steps") == 2
-    assert captured_summary.get("stop_reason") == "max_steps"
-    assert str(captured_summary.get("last_summary")).startswith("[step 2, 0 ok, 0 failed] [no tools executed]")
+    assert captured_summary.get("stop_reason") == "blocked_done_without_evidence"
+    assert "[blocked_done_without_evidence]" in str(captured_summary.get("last_summary"))
 
 
 @pytest.mark.asyncio
@@ -230,4 +230,4 @@ async def test_unified_done_gate_overrides_done_when_all_tool_calls_fail(
     await agent.run()
 
     assert captured_summary.get("steps") == 2
-    assert captured_summary.get("stop_reason") == "max_steps"
+    assert captured_summary.get("stop_reason") == "blocked_done_without_evidence"

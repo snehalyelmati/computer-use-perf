@@ -1,0 +1,11 @@
+{
+  "benchmark": "miniwob",
+  "description": "Email inbox tasks where decisive controls are icon-like actions.",
+  "tasks": [
+    "miniwob.email-inbox",
+    "miniwob.email-inbox-delete",
+    "miniwob.email-inbox-forward",
+    "miniwob.email-inbox-important",
+    "miniwob.email-inbox-star-reply"
+  ]
+}

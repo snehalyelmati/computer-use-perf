@@ -11,6 +11,7 @@ Common Commands:
 - `uv run main.py --url <target> --task TASK.md --oracle-interval 5 --max-tokens 2048` - run with explicit defaults
 - `uv run main.py --url <target> --task TASK.md --worker-model <model> --filter-model <model> --oracle-model <model>` - per-role models
 - `uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py --benchmark miniwob --preset verify-five --n-repeats 1 --max-steps 20 --env-max-steps 10 --max-elements 80` - run MiniWoB verification benchmark
+- `uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py --benchmark miniwob --task-set terminal-readback --iteration-profile cheap --n-repeats 1` - run a cheap targeted BrowserGym subset
 - `uv add <package>` - add a dependency
 
 Observability:
@@ -23,6 +24,7 @@ Observability:
 Results Tracking:
 - `logs/` is gitignored, so meaningful BrowserGym/AgentLab benchmark runs need a version-controlled note under `docs/benchmark-results/` with the study path, command, config, score, cost/tokens, runtime, and primary artifacts.
 - Keep `docs/benchmark-results/README.md` updated with an index entry for each recorded BrowserGym/AgentLab run.
+- When runtime behavior, CLI flags, benchmark workflow, report schemas, AgentInfo fields, or Mermaid-documented architecture changes, update the relevant docs in the same change. At minimum check `README.md`, `docs/architecture.md`, `docs/agentlab-benchmarks.md`, `docs/observability.md`, and `docs/source-map.md`.
 
 Dependencies:
 - `pydantic-ai` - agent orchestration + structured output
@@ -56,7 +58,7 @@ Code Guidelines:
 - Let the LLM decide what to click/type based on context, not hardcoded rules.
 - Keep element selection generic: pass stable element IDs to the LLM and let it decide.
 - Never pass raw CSS/XPath selectors to the LLM.
-- When significant changes are made, update docs and Mermaid diagrams to match the current behavior.
+- When significant changes are made, especially to runtime control flow, validation/completion policy, CLI flags, benchmark workflow, logs/reports, or public data fields, update docs and Mermaid diagrams to match the current behavior.
 
 Code Style:
 - Prefer small, pure helper functions and explicit types in signatures.

@@ -1,0 +1,12 @@
+{
+  "benchmark": "miniwob",
+  "description": "Tasks where important information is visible as non-interactive text.",
+  "tasks": [
+    "miniwob.highlight-text",
+    "miniwob.highlight-text-2",
+    "miniwob.odd-or-even",
+    "miniwob.read-table",
+    "miniwob.text-transform",
+    "miniwob.visual-addition"
+  ]
+}

@@ -12,12 +12,18 @@ if str(ROOT) not in sys.path:
 
 from benchmarks.agentlab.run_browsergym_benchmark import (
     DEFAULT_FULL_REPEATS,
+    DEFAULT_MAX_WORKER_TOOL_CALLS,
+    DEFAULT_ORACLE_INTERVAL,
+    DEFAULT_UNCHANGED_ABORT_THRESHOLD,
+    DEFAULT_WORKER_CONTEXT_STEPS,
     MINIWOB_VERIFY_FIVE_TASKS,
     BenchmarkConfigurationError,
     ReportContext,
     check_benchmark_environment,
     expand_preset,
     generate_report_artifacts,
+    load_task_set,
+    resolve_iteration_options,
     select_parallel_backend,
     validate_miniwob_setup,
 )
@@ -52,6 +58,58 @@ def test_webarena_tiny_full_resolves_browsergym_key() -> None:
 def test_custom_task_mode_requires_task() -> None:
     with pytest.raises(BenchmarkConfigurationError, match="requires at least one"):
         expand_preset("miniwob", "custom")
+
+
+def test_iteration_profile_full_preserves_current_defaults() -> None:
+    options = resolve_iteration_options(profile="full")
+
+    assert options.max_worker_tool_calls == DEFAULT_MAX_WORKER_TOOL_CALLS
+    assert options.worker_context_steps == DEFAULT_WORKER_CONTEXT_STEPS
+    assert options.oracle_interval == DEFAULT_ORACLE_INTERVAL
+    assert options.unchanged_abort_threshold == DEFAULT_UNCHANGED_ABORT_THRESHOLD
+
+
+def test_iteration_profile_balanced_and_cheap_apply_defaults() -> None:
+    balanced = resolve_iteration_options(profile="balanced")
+    cheap = resolve_iteration_options(profile="cheap")
+
+    assert balanced.max_worker_tool_calls == 6
+    assert balanced.worker_context_steps == 2
+    assert balanced.stuck_threshold == 2
+    assert balanced.unchanged_abort_threshold == 4
+    assert balanced.oracle_interval == 0
+    assert cheap.max_worker_tool_calls == 4
+    assert cheap.worker_context_steps == 1
+    assert cheap.stuck_threshold == 1
+    assert cheap.unchanged_abort_threshold == 2
+    assert cheap.oracle_interval == 0
+    assert cheap.env_max_steps == 5
+
+
+def test_explicit_iteration_overrides_beat_profile_and_task_set_caps() -> None:
+    options = resolve_iteration_options(
+        profile="cheap",
+        task_set="terminal-readback",
+        env_max_steps=9,
+        max_worker_tool_calls=7,
+        worker_context_steps=3,
+        oracle_interval=5,
+    )
+
+    assert options.env_max_steps == 9
+    assert options.max_worker_tool_calls == 7
+    assert options.worker_context_steps == 3
+    assert options.oracle_interval == 5
+
+
+def test_task_set_expands_checked_in_manifest_tasks() -> None:
+    tasks = load_task_set("miniwob", "email-icon-controls")
+    selection = expand_preset("miniwob", task_set="email-icon-controls")
+
+    assert "miniwob.email-inbox" in tasks
+    assert selection.tasks == tasks
+    assert selection.task_set == "email-icon-controls"
+    assert selection.n_repeats == 1
 
 
 def test_miniwob_environment_check_fails_without_url_or_local_checkout(tmp_path: Path) -> None:

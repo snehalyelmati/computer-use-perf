@@ -40,6 +40,12 @@ DEFAULT_MAX_STEPS = 20
 DEFAULT_ENV_MAX_STEPS = 10
 DEFAULT_MAX_ELEMENTS = 80
 DEFAULT_N_JOBS = 1
+DEFAULT_MAX_WORKER_TOOL_CALLS = 10
+DEFAULT_WORKER_CONTEXT_STEPS = 3
+DEFAULT_ORACLE_INTERVAL = 5
+DEFAULT_STUCK_THRESHOLD = 3
+DEFAULT_UNCHANGED_ABORT_THRESHOLD = 8
+TASK_SET_DIR = ROOT / "benchmarks" / "agentlab" / "task_sets"
 SUPPORTED_BENCHMARKS = (
     "miniwob",
     "webarena",
@@ -69,6 +75,40 @@ MINIWOB_VERIFY_FIVE_TASKS = (
     "miniwob.form-sequence",
     "miniwob.scroll-text",
 )
+ITERATION_PROFILE_DEFAULTS: dict[str, dict[str, int]] = {
+    "full": {
+        "max_worker_tool_calls": DEFAULT_MAX_WORKER_TOOL_CALLS,
+        "worker_context_steps": DEFAULT_WORKER_CONTEXT_STEPS,
+        "stuck_threshold": DEFAULT_STUCK_THRESHOLD,
+        "unchanged_abort_threshold": DEFAULT_UNCHANGED_ABORT_THRESHOLD,
+        "oracle_interval": DEFAULT_ORACLE_INTERVAL,
+        "env_max_steps": DEFAULT_ENV_MAX_STEPS,
+    },
+    "balanced": {
+        "max_worker_tool_calls": 6,
+        "worker_context_steps": 2,
+        "stuck_threshold": 2,
+        "unchanged_abort_threshold": 4,
+        "oracle_interval": 0,
+        "env_max_steps": DEFAULT_ENV_MAX_STEPS,
+    },
+    "cheap": {
+        "max_worker_tool_calls": 4,
+        "worker_context_steps": 1,
+        "stuck_threshold": 1,
+        "unchanged_abort_threshold": 2,
+        "oracle_interval": 0,
+        "env_max_steps": 5,
+    },
+}
+TASK_SET_CAPS: dict[str, int] = {
+    "env_max_steps": 5,
+    "max_worker_tool_calls": 4,
+    "worker_context_steps": 1,
+    "oracle_interval": 0,
+    "stuck_threshold": 1,
+    "unchanged_abort_threshold": 2,
+}
 DEFAULT_FULL_REPEATS = {
     "miniwob": 5,
     "webarena": 1,
@@ -94,6 +134,21 @@ class BenchmarkSelection:
     tasks: tuple[str, ...] | None
     n_repeats: int
     is_full_preset: bool
+    task_set: str | None = None
+
+
+@dataclass(frozen=True)
+class IterationOptions:
+    """Resolved runtime caps for one benchmark run."""
+
+    profile: str
+    max_steps: int
+    env_max_steps: int
+    max_worker_tool_calls: int
+    worker_context_steps: int
+    oracle_interval: int
+    stuck_threshold: int
+    unchanged_abort_threshold: int
 
 
 @dataclass(frozen=True)
@@ -117,6 +172,13 @@ class ReportContext:
     agent_logs_dir: str
     command: str
     env_info: dict[str, Any]
+    iteration_profile: str = "full"
+    task_set: str | None = None
+    max_worker_tool_calls: int = DEFAULT_MAX_WORKER_TOOL_CALLS
+    worker_context_steps: int = DEFAULT_WORKER_CONTEXT_STEPS
+    oracle_interval: int = DEFAULT_ORACLE_INTERVAL
+    stuck_threshold: int = DEFAULT_STUCK_THRESHOLD
+    unchanged_abort_threshold: int = DEFAULT_UNCHANGED_ABORT_THRESHOLD
 
 
 @dataclass
@@ -251,10 +313,39 @@ def check_benchmark_environment(
     raise BenchmarkConfigurationError(f"Unsupported benchmark: {selection.benchmark}")
 
 
+def load_task_set(benchmark: str, name: str) -> tuple[str, ...]:
+    """Load a checked-in benchmark task-set manifest."""
+    safe_name = name.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", safe_name):
+        raise BenchmarkConfigurationError(f"Invalid task set name: {name!r}.")
+    path = TASK_SET_DIR / f"{safe_name}.json"
+    if not path.exists():
+        available = ", ".join(sorted(p.stem for p in TASK_SET_DIR.glob("*.json")))
+        raise BenchmarkConfigurationError(
+            f"Unknown task set {name!r}. Available: {available or 'none'}."
+        )
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise BenchmarkConfigurationError(f"Task set {name!r} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise BenchmarkConfigurationError(f"Task set {name!r} must contain a JSON object.")
+    manifest_benchmark = str(payload.get("benchmark") or "").lower()
+    if manifest_benchmark and manifest_benchmark != benchmark.lower():
+        raise BenchmarkConfigurationError(
+            f"Task set {name!r} is for {manifest_benchmark}, not {benchmark}."
+        )
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list) or not all(isinstance(item, str) and item for item in tasks):
+        raise BenchmarkConfigurationError(f"Task set {name!r} must define a non-empty string tasks list.")
+    return tuple(dict.fromkeys(tasks))
+
+
 def expand_preset(
     benchmark: str,
     preset: str | None = None,
     tasks: Sequence[str] | None = None,
+    task_set: str | None = None,
     n_repeats: int | None = None,
 ) -> BenchmarkSelection:
     """Resolve CLI benchmark/preset/task options into a BrowserGym benchmark selection."""
@@ -264,8 +355,10 @@ def expand_preset(
             f"Unsupported benchmark {benchmark!r}. Supported: {', '.join(SUPPORTED_BENCHMARKS)}."
         )
 
-    task_tuple = tuple(tasks or ())
-    preset_key = (preset or ("custom" if task_tuple else None) or "").lower()
+    if task_set and tasks:
+        raise BenchmarkConfigurationError("--task-set cannot be combined with --task.")
+    task_tuple = load_task_set(benchmark_key, task_set) if task_set else tuple(tasks or ())
+    preset_key = (preset or (None if task_set else ("custom" if task_tuple else None)) or "").lower()
     if not preset_key:
         preset_key = "verify-five" if benchmark_key == "miniwob" else "full"
 
@@ -280,6 +373,21 @@ def expand_preset(
             tasks=task_tuple,
             n_repeats=repeats,
             is_full_preset=False,
+            task_set=task_set,
+        )
+
+    if task_set:
+        if preset is not None:
+            raise BenchmarkConfigurationError("--task-set can only be used with --preset custom or without --preset.")
+        repeats = int(n_repeats if n_repeats is not None else 1)
+        return BenchmarkSelection(
+            benchmark=benchmark_key,
+            preset=task_set,
+            browsergym_key=benchmark_key,
+            tasks=task_tuple,
+            n_repeats=repeats,
+            is_full_preset=False,
+            task_set=task_set,
         )
 
     if task_tuple:
@@ -335,6 +443,56 @@ def build_browsergym_benchmark(selection: BenchmarkSelection, *, env_max_steps: 
     for env_args in benchmark.env_args_list:
         env_args.max_steps = int(env_max_steps)
     return benchmark
+
+
+def resolve_iteration_options(
+    *,
+    profile: str,
+    task_set: str | None = None,
+    max_steps: int | None = None,
+    env_max_steps: int | None = None,
+    max_worker_tool_calls: int | None = None,
+    worker_context_steps: int | None = None,
+    oracle_interval: int | None = None,
+    stuck_threshold: int | None = None,
+    unchanged_abort_threshold: int | None = None,
+) -> IterationOptions:
+    """Resolve iteration-profile defaults, task-set caps, and explicit overrides."""
+    if profile not in ITERATION_PROFILE_DEFAULTS:
+        raise BenchmarkConfigurationError(
+            f"Unsupported iteration profile {profile!r}. Use full, balanced, or cheap."
+        )
+    defaults = dict(ITERATION_PROFILE_DEFAULTS[profile])
+    if task_set:
+        for key, value in TASK_SET_CAPS.items():
+            defaults[key] = min(defaults.get(key, value), value)
+
+    return IterationOptions(
+        profile=profile,
+        max_steps=int(max_steps if max_steps is not None else DEFAULT_MAX_STEPS),
+        env_max_steps=int(env_max_steps if env_max_steps is not None else defaults["env_max_steps"]),
+        max_worker_tool_calls=int(
+            max_worker_tool_calls
+            if max_worker_tool_calls is not None
+            else defaults["max_worker_tool_calls"]
+        ),
+        worker_context_steps=int(
+            worker_context_steps
+            if worker_context_steps is not None
+            else defaults["worker_context_steps"]
+        ),
+        oracle_interval=int(
+            oracle_interval if oracle_interval is not None else defaults["oracle_interval"]
+        ),
+        stuck_threshold=int(
+            stuck_threshold if stuck_threshold is not None else defaults["stuck_threshold"]
+        ),
+        unchanged_abort_threshold=int(
+            unchanged_abort_threshold
+            if unchanged_abort_threshold is not None
+            else defaults["unchanged_abort_threshold"]
+        ),
+    )
 
 
 def _clean_cell(value: Any) -> str | None:
@@ -678,6 +836,13 @@ def build_report(
             "max_steps": context.max_steps,
             "env_max_steps": context.env_max_steps,
             "max_elements": context.max_elements,
+            "iteration_profile": context.iteration_profile,
+            "task_set": context.task_set,
+            "max_worker_tool_calls": context.max_worker_tool_calls,
+            "worker_context_steps": context.worker_context_steps,
+            "oracle_interval": context.oracle_interval,
+            "stuck_threshold": context.stuck_threshold,
+            "unchanged_abort_threshold": context.unchanged_abort_threshold,
             "repeats": context.n_repeats,
             "task_count": context.task_count,
             "jobs": context.n_jobs,
@@ -813,6 +978,13 @@ def _report_markdown(report: dict[str, Any]) -> str:
             f"max_steps={config['max_steps']}",
             f"env_max_steps={config['env_max_steps']}",
             f"max_elements={config['max_elements']}",
+            f"iteration_profile={config['iteration_profile']}",
+            f"task_set={config['task_set']}",
+            f"max_worker_tool_calls={config['max_worker_tool_calls']}",
+            f"worker_context_steps={config['worker_context_steps']}",
+            f"oracle_interval={config['oracle_interval']}",
+            f"stuck_threshold={config['stuck_threshold']}",
+            f"unchanged_abort_threshold={config['unchanged_abort_threshold']}",
             f"repeats={config['repeats']}",
             f"jobs={config['jobs']}",
             f"env={json.dumps(report['reproducibility']['env'], sort_keys=True)}",
@@ -927,14 +1099,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="BrowserGym task name to include. Use with --preset custom; repeatable.",
     )
     parser.add_argument(
+        "--task-set",
+        default=None,
+        help="Checked-in task-set manifest name under benchmarks/agentlab/task_sets/.",
+    )
+    parser.add_argument(
+        "--iteration-profile",
+        choices=("full", "balanced", "cheap"),
+        default="full",
+        help="Runtime cap profile for iteration cost control.",
+    )
+    parser.add_argument(
         "--n-repeats",
         type=int,
         default=None,
         help="Override preset repeat count.",
     )
-    parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
-    parser.add_argument("--env-max-steps", type=int, default=DEFAULT_ENV_MAX_STEPS)
+    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--env-max-steps", type=int, default=None)
     parser.add_argument("--max-elements", type=int, default=DEFAULT_MAX_ELEMENTS)
+    parser.add_argument("--max-worker-tool-calls", type=int, default=None)
+    parser.add_argument("--worker-context-steps", type=int, default=None)
+    parser.add_argument("--oracle-interval", type=int, default=None)
+    parser.add_argument("--stuck-threshold", type=int, default=None)
+    parser.add_argument("--unchanged-abort-threshold", type=int, default=None)
     parser.add_argument("--provider", default=DEFAULT_PROVIDER)
     parser.add_argument("--model", default=BENCHMARK_DEFAULT_MODEL)
     parser.add_argument("--worker-model", default=None)
@@ -964,7 +1152,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-force-exit",
         action="store_true",
-        help="Return normally after report generation instead of forcing process exit.",
+        help=(
+            "Testing/debug only: return normally after report generation instead of "
+            "forcing process exit. Real AgentLab runs may leave cleanup resources "
+            "that keep Python alive."
+        ),
     )
     return parser
 
@@ -1006,7 +1198,19 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.benchmark,
             args.preset,
             tasks=args.tasks,
+            task_set=args.task_set,
             n_repeats=args.n_repeats,
+        )
+        iteration = resolve_iteration_options(
+            profile=args.iteration_profile,
+            task_set=selection.task_set,
+            max_steps=args.max_steps,
+            env_max_steps=args.env_max_steps,
+            max_worker_tool_calls=args.max_worker_tool_calls,
+            worker_context_steps=args.worker_context_steps,
+            oracle_interval=args.oracle_interval,
+            stuck_threshold=args.stuck_threshold,
+            unchanged_abort_threshold=args.unchanged_abort_threshold,
         )
         if args.export_leaderboard_json is not None and not selection.is_full_preset:
             raise BenchmarkConfigurationError(
@@ -1023,15 +1227,20 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     from benchmarks.agentlab import ComputerUseAgentArgs
 
-    benchmark = build_browsergym_benchmark(selection, env_max_steps=args.env_max_steps)
+    benchmark = build_browsergym_benchmark(selection, env_max_steps=iteration.env_max_steps)
     agent_args = ComputerUseAgentArgs(
         provider=args.provider,
         model=args.model,
         worker_model=args.worker_model,
         filter_model=args.filter_model,
         oracle_model=args.oracle_model,
-        max_steps=int(args.max_steps),
+        max_steps=int(iteration.max_steps),
         max_elements=int(args.max_elements),
+        max_worker_tool_calls=int(iteration.max_worker_tool_calls),
+        worker_context_steps=int(iteration.worker_context_steps),
+        oracle_interval=int(iteration.oracle_interval),
+        stuck_threshold=int(iteration.stuck_threshold),
+        unchanged_abort_threshold=int(iteration.unchanged_abort_threshold),
         log_dir=args.log_dir,
         unified=not args.split_pipeline,
     )
@@ -1059,9 +1268,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         filter_model=args.filter_model,
         oracle_model=args.oracle_model,
         unified=not args.split_pipeline,
-        max_steps=int(args.max_steps),
-        env_max_steps=int(args.env_max_steps),
+        max_steps=int(iteration.max_steps),
+        env_max_steps=int(iteration.env_max_steps),
         max_elements=int(args.max_elements),
+        iteration_profile=iteration.profile,
+        task_set=selection.task_set,
+        max_worker_tool_calls=int(iteration.max_worker_tool_calls),
+        worker_context_steps=int(iteration.worker_context_steps),
+        oracle_interval=int(iteration.oracle_interval),
+        stuck_threshold=int(iteration.stuck_threshold),
+        unchanged_abort_threshold=int(iteration.unchanged_abort_threshold),
         n_repeats=selection.n_repeats,
         task_count=len({env_args.task_name for env_args in benchmark.env_args_list}),
         n_jobs=int(args.n_jobs),

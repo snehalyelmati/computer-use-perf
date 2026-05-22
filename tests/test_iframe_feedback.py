@@ -358,7 +358,7 @@ async def test_type_text_sets_value_when_keyboard_insert_does_not_stick(monkeypa
         frame_sessions={},
         active_frame_id=None,
     )
-    values = iter(["", "Booker"])
+    values = iter(["", "", "Booker"])
     fallback_calls: list[str] = []
 
     async def fake_true(*_args: Any, **_kwargs: Any) -> bool:
@@ -387,6 +387,47 @@ async def test_type_text_sets_value_when_keyboard_insert_does_not_stick(monkeypa
     assert fallback_calls == ["Booker"]
     assert "set value via form events" in result.message
     assert 'Current value: "Booker"' in result.message
+
+
+@pytest.mark.asyncio
+async def test_type_text_reports_live_previous_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el(
+        "el_input",
+        node_name="INPUT",
+        backend_node_id=321,
+        role="textbox",
+    )
+    element.attributes = {"value": ""}
+    element_index = ElementIndex(elements={"el_input": element})
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+    values = iter(["Booker", "Booker"])
+
+    async def fake_true(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    async def fake_read_input_value(_backend_node_id: int, _session: Any) -> str:
+        return next(values)
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_true)
+    monkeypatch.setattr(semantic, "_dom_focus", fake_true)
+    monkeypatch.setattr(semantic, "_insert_text", fake_true)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+    monkeypatch.setattr(semantic, "_read_input_value", fake_read_input_value)
+
+    result = await semantic.type_text("el_input", "Booker", context)
+
+    assert result.ok is True
+    assert 'Current value: "Booker"' in result.message
+    assert 'Previous value: "Booker"' in result.message
 
 
 @pytest.mark.asyncio

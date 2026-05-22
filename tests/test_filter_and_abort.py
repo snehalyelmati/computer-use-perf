@@ -6,6 +6,7 @@ import sys
 from typing import Any, Callable
 
 import contextlib
+from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,8 @@ if str(ROOT) not in sys.path:
 from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.snapshot import ElementSnapshot, PageSnapshot
 from src.agent.core import agent as agent_mod
+from src.agent.core import step_runtime as step_runtime_mod
+from src.agent.core.completion import ValidationSignal
 from src.agent.metrics import UsageStats
 from src.agent.models.actions import OracleAdvice, OrchestratorDecision, SnapshotFilterOutput, StepOutput
 
@@ -86,6 +89,42 @@ def _snapshot_elements(*, url: str, title: str, elements: list[ElementSnapshot])
         elements=elements,
         raw_text=[f"{title} {url}"],
     )
+
+
+def test_text_only_diff_counts_as_observable_change() -> None:
+    diff = (
+        "new_elements=0 changed_labels=0 removed_elements=0\n"
+        "text_changes=+1 -0 (showing up to 8 each)\n"
+        "+text Done"
+    )
+
+    assert agent_mod._diff_has_observable_change(diff) is True
+    assert step_runtime_mod._diff_has_observable_change(diff) is True
+
+
+@pytest.mark.asyncio
+async def test_step_runtime_clears_internal_stop_latch_on_nonterminal_validation(
+    tmp_path: Path,
+) -> None:
+    runtime = step_runtime_mod.BrowserAgentStepRuntime(
+        AgentConfig(goal="Test goal", max_steps=0, log_dir=str(tmp_path), metrics_enabled=False),
+        LLMConfig(),
+    )
+    runtime._agents = object()  # type: ignore[assignment]
+    runtime._terminal_stop_reason = "done"
+
+    result = await runtime.run_one_step(
+        SimpleNamespace(page=SimpleNamespace(url="https://example.com")),
+        validation=ValidationSignal(
+            source="browsergym",
+            status="neutral",
+            terminal=False,
+            reward=0.0,
+        ),
+    )
+
+    assert result.stop_reason == "max_steps"
+    assert result.summary == "Internal max_steps reached."
 
 
 @pytest.mark.asyncio
