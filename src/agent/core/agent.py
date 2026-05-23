@@ -2119,7 +2119,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
         end_y: float,
         steps: int = 12,
     ) -> ToolExecutionResult:
-        """Drag the pointer across one element using element-local coordinates. Use for sliders, resize handles, canvas/SVG drag targets, or widgets that need real pointer movement. Use element_id from the page snapshot."""
+        """Drag the pointer from an element-local start point to an element-local or outside endpoint. Use for sliders, resize handles, canvas/SVG drag targets, or widgets that need real pointer movement. Use element_id from the page snapshot."""
         clamped_steps = max(1, min(int(steps), 50))
         signature = _tool_signature("pointer_drag", element_id, start_x, start_y, end_x, end_y, clamped_steps)
         if blocked := _repeat_guard_result(
@@ -2299,7 +2299,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
 
     @agent.tool(name="draw")
     async def draw(ctx: RunContext[WorkerDeps], element_id: str, path: list[list[float]]) -> ToolExecutionResult:
-        """Draw a freeform path on a canvas or drawing surface by moving the mouse through a series of coordinate points with the button held. Automatically scrolls the element into view — no need to scroll first. Points are [x, y] pairs relative to the element's top-left corner. Use element_id from the page snapshot."""
+        """Draw a complete freeform path on a canvas or drawing surface with one continuous mouse drag. Use multiple points for curves/circles because repeated drags may replace the prior path; points are [x, y] pairs relative to the element's top-left corner. Use element_id from the page snapshot."""
         path_signature = (
             len(path),
             tuple(round(float(v), 2) for point in path[:2] + path[-2:] for v in point[:2]),

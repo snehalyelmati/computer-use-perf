@@ -12,6 +12,7 @@ from src.agent.context.snapshot import (
     ElementSnapshot,
     PageSnapshot,
     _iter_svg_text_fallback_candidates,
+    _looks_like_semantic_icon_control,
     format_snapshot_for_llm,
     rank_elements,
     sanitize_class_value,
@@ -190,3 +191,45 @@ def test_sanitize_class_value_aggressive_drops_utility_like_tokens() -> None:
         fallback_tokens=2,
     )
     assert out == "cursor-pointer fooBar"
+
+
+def test_semantic_icon_control_uses_class_hint_and_bbox() -> None:
+    assert _looks_like_semantic_icon_control(
+        "SPAN",
+        {"class": "reply"},
+        (10, 20, 14, 14),
+        name=None,
+        text=None,
+    )
+    assert not _looks_like_semantic_icon_control(
+        "SPAN",
+        {"class": "spacer"},
+        (10, 20, 14, 14),
+        name=None,
+        text=None,
+    )
+
+
+def test_class_labeled_icon_control_participates_in_query_ranking() -> None:
+    icon = _el(
+        "el_reply",
+        role=None,
+        name=None,
+        text=None,
+        node_name="SPAN",
+        bbox=(10, 20, 14, 14),
+        attrs={"class": "reply"},
+    )
+    icon.interactive_reason = "semantic_icon"
+    icon.interactive_confidence = 0.55
+    icon.context = 'nearby="Ada @target Example post"'
+    other = _el("el_other", role=None, name=None, text=None, node_name="DIV")
+    other.descendant_text = "Ada @target Example post"
+    snapshot = PageSnapshot(url="https://example.com/", title="Test", elements=[other, icon], raw_text=[])
+
+    rendered = format_snapshot_for_llm(snapshot, max_elements=1, query="reply @target")
+
+    assert "el_reply" in rendered
+    assert 'class="reply"' in rendered
+    assert 'nearby="Ada @target Example post"' in rendered
+    assert "el_other" not in rendered

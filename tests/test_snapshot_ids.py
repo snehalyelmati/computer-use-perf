@@ -73,6 +73,18 @@ def test_is_interactive_scroll_container_via_attribute() -> None:
     assert confidence == 0.6
 
 
+def test_is_interactive_drag_affordance_via_class() -> None:
+    is_interactive, reason, confidence = snapshot._interactive_reason(
+        "DIV",
+        None,
+        {"class": "ui-draggable ui-draggable-handle"},
+        None,
+    )
+    assert is_interactive is True
+    assert reason == "class_drag"
+    assert confidence == 0.6
+
+
 def test_not_interactive_without_scroll_attribute() -> None:
     """A plain DIV with no signals should not be interactive."""
     is_interactive, reason, _confidence = snapshot._interactive_reason(

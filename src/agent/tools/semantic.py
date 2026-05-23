@@ -90,7 +90,7 @@ _OBSERVER_INJECT_JS = """
   const TRACKED_ATTRS = new Set([
     'aria-expanded','aria-checked','aria-selected','aria-hidden',
     'aria-disabled','disabled','checked','selected','open','hidden',
-    'value','href','src'
+    'value','href','src','class'
   ]);
   const INTERACTIVE_TAGS_SET = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','OPTION','IFRAME']);
   const INTERACTIVE_ROLES_SET = new Set([
@@ -513,6 +513,20 @@ async def _insert_text(session: CDPSession, text: str) -> bool:
     return True
 
 
+async def _type_text_with_keyboard(page: Any, text: str) -> tuple[bool, str | None]:
+    keyboard = getattr(page, "keyboard", None)
+    type_method = getattr(keyboard, "type", None)
+    if not callable(type_method):
+        return False, "keyboard typing unavailable"
+    try:
+        result = type_method(text)
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as exc:
+        return False, str(exc)
+    return True, None
+
+
 async def _set_text_value(backend_node_id: int, session: CDPSession, text: str) -> bool:
     """Set input-like values through native setters and dispatch form events."""
     result = await _call_on_node(
@@ -631,6 +645,72 @@ async def _dispatch_pointer_drag_local(
         "width": width,
         "height": height,
     }, None
+
+
+async def _dispatch_pointer_drag_between_nodes(
+    source_backend_node_id: int,
+    target_backend_node_id: int,
+    session: CDPSession,
+    *,
+    steps: int,
+) -> tuple[bool, dict[str, float] | None, str | None]:
+    target_object_id = await _resolve_object_id(target_backend_node_id, session)
+    if not target_object_id:
+        return False, None, "cannot resolve target"
+    pair_info = await _call_on_node(
+        source_backend_node_id,
+        session,
+        """
+        function (targetEl) {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const sourceRect = this.getBoundingClientRect();
+            const targetRect = targetEl.getBoundingClientRect();
+            return {
+                source: {
+                    left: sourceRect.left,
+                    top: sourceRect.top,
+                    width: sourceRect.width,
+                    height: sourceRect.height,
+                },
+                target: {
+                    left: targetRect.left,
+                    top: targetRect.top,
+                    width: targetRect.width,
+                    height: targetRect.height,
+                },
+            };
+        }
+        """,
+        [{"objectId": target_object_id}],
+    )
+    value = (pair_info or {}).get("result", {}).get("value") or {}
+    source = value.get("source")
+    target = value.get("target")
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        return False, None, "cannot locate source or target"
+    source_width = float(source.get("width") or 0)
+    source_height = float(source.get("height") or 0)
+    target_width = float(target.get("width") or 0)
+    target_height = float(target.get("height") or 0)
+    if source_width <= 0 or source_height <= 0 or target_width <= 0 or target_height <= 0:
+        return False, None, "source or target has no visible area"
+    source_left = float(source.get("left") or 0)
+    source_top = float(source.get("top") or 0)
+    target_left = float(target.get("left") or 0)
+    target_top = float(target.get("top") or 0)
+    target_center_x = target_left + target_width / 2
+    target_center_y = target_top + target_height / 2
+    return await _dispatch_pointer_drag_local(
+        source_backend_node_id,
+        session,
+        start_x=source_width / 2,
+        start_y=source_height / 2,
+        end_x=target_center_x - source_left,
+        end_y=target_center_y - source_top,
+        steps=steps,
+        allow_outside=True,
+    )
+
 
 def _frame_tree_paths(frame_tree: dict[str, Any]) -> dict[str, list[int]]:
     paths: dict[str, list[int]] = {}
@@ -1617,9 +1697,11 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
     if not await _dom_focus(element.backend_node_id, session):
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message="Type failed: element not focusable")
-    if not await _insert_text(session, text):
+    typed_with_keyboard, keyboard_error = await _type_text_with_keyboard(context.page, text)
+    if not typed_with_keyboard and not await _insert_text(session, text):
         await _collect_mutations(session, settle_ms=50)
-        return ToolResult(ok=False, message="Type failed")
+        reason = f": {keyboard_error}" if keyboard_error else ""
+        return ToolResult(ok=False, message=f"Type failed{reason}")
     typing_settle_ms = max(context.timing.settle_ms, 600)
     mutations = await _collect_mutations_with_ids(
         session, context, typing_settle_ms,
@@ -1646,6 +1728,8 @@ async def type_text(element_id: str, text: str, context: ToolContext) -> ToolRes
             base_msg += f'. Previous value: "{prev_display}"'
         if used_value_fallback:
             base_msg += " (set value via form events after keyboard input did not stick)"
+    elif typed_with_keyboard:
+        base_msg += " using keyboard events"
     message = _format_verification(mutations, base_msg)
     return ToolResult(ok=True, message=message)
 
@@ -1721,6 +1805,32 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
         session, context, context.timing.settle_ms,
         frame_id=source.frame_id, frame_url=source.frame_url,
     )
+    if not _build_change_lines(mutations or {}):
+        await _inject_observer(session)
+        ok, coords, error = await _dispatch_pointer_drag_between_nodes(
+            source.backend_node_id,
+            target.backend_node_id,
+            session,
+            steps=18,
+        )
+        if not ok or coords is None:
+            return ToolResult(
+                ok=False,
+                message=(
+                    f"{base_msg}\nNo observable change followed DOM drag/drop; "
+                    f"pointer fallback failed: {error or 'unknown error'}"
+                ),
+            )
+        fallback_mutations = await _collect_mutations_with_ids(
+            session, context, context.timing.settle_ms,
+            frame_id=source.frame_id, frame_url=source.frame_url,
+        )
+        fallback_msg = (
+            f"{base_msg} using pointer fallback from viewport "
+            f"({coords['start_viewport_x']:.1f}, {coords['start_viewport_y']:.1f}) -> "
+            f"({coords['end_viewport_x']:.1f}, {coords['end_viewport_y']:.1f})"
+        )
+        return ToolResult(ok=True, message=_format_verification(fallback_mutations, fallback_msg))
     return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
 
@@ -1752,6 +1862,7 @@ async def pointer_drag(
         end_x=end_x,
         end_y=end_y,
         steps=steps,
+        allow_outside=True,
     )
     if not ok or coords is None:
         await _collect_mutations(session, settle_ms=50)
@@ -2061,7 +2172,9 @@ async def draw(
             session, context, context.timing.draw_settle_ms,
             frame_id=element.frame_id, frame_url=element.frame_url,
         )
-        if not _build_change_lines(mutations or {}) and _is_click_driven_visual_surface(element):
+        if _build_change_lines(mutations or {}):
+            return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+        if _is_click_driven_visual_surface(element):
             return ToolResult(
                 ok=False,
                 message=(
@@ -2070,7 +2183,7 @@ async def draw(
                     "for a single target point instead of draw."
                 ),
             )
-        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+        base_msg = f"{base_msg} using pointer fallback after synthetic events made no observable change"
 
     # CDP coordinate fallback — for apps that ignore synthetic DOM events
     # but respond to real input events (e.g. some canvas libraries).

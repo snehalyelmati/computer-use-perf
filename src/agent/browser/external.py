@@ -57,6 +57,9 @@ class AsyncPlaywrightImplKeyboard:
     async def press(self, key: str) -> None:
         await self._inner.press(key)
 
+    async def type(self, text: str) -> None:
+        await self._inner.type(text)
+
 
 class AsyncPlaywrightImplFrame:
     """Async-compatible facade for an underlying Playwright Frame."""
@@ -159,6 +162,9 @@ class AsyncSyncKeyboard:
 
     async def press(self, key: str) -> None:
         self._inner.press(key)
+
+    async def type(self, text: str) -> None:
+        self._inner.type(text)
 
 
 class AsyncSyncFrame:

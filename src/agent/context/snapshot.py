@@ -86,6 +86,42 @@ _SVG_SUMMARY_ATTRS = (
     "height",
     "data-index",
 )
+_SEMANTIC_ICON_TAGS = {"DIV", "I", "IMG", "SPAN", "SVG", "USE"}
+_SEMANTIC_ICON_HINT_ATTRS = (
+    "aria-label",
+    "title",
+    "alt",
+    "class",
+    "id",
+    "data-action",
+    "data-icon",
+    "data-testid",
+    "data-test",
+    "data-control",
+)
+_GENERIC_ICON_HINT_TOKENS = {
+    "action",
+    "actions",
+    "body",
+    "btn",
+    "button",
+    "cell",
+    "col",
+    "container",
+    "content",
+    "control",
+    "controls",
+    "details",
+    "icon",
+    "image",
+    "img",
+    "item",
+    "media",
+    "row",
+    "spacer",
+    "wrapper",
+}
+_DRAG_CLASS_HINT_TOKENS = {"drag", "draggable", "drop", "droppable", "resizable", "resize", "sortable"}
 
 
 def sanitize_class_value(
@@ -131,6 +167,54 @@ def sanitize_class_value(
     if max_chars and len(out) > max_chars:
         out = out[:max_chars].rstrip()
     return out or None
+
+
+def _semantic_hint_tokens(attributes: dict[str, str]) -> set[str]:
+    values: list[str] = []
+    for key in _SEMANTIC_ICON_HINT_ATTRS:
+        value = attributes.get(key)
+        if not value:
+            continue
+        if key == "class":
+            value = sanitize_class_value(value, fallback_tokens=0) or ""
+        if value:
+            values.append(value)
+    return {
+        token
+        for value in values
+        for token in _tokenize(value)
+        if token not in _GENERIC_ICON_HINT_TOKENS
+    }
+
+
+def _sanitized_class_tokens(attributes: dict[str, str]) -> set[str]:
+    class_hint = sanitize_class_value(attributes.get("class"), fallback_tokens=0)
+    return _tokenize(class_hint or "")
+
+
+def _has_drag_class_hint(attributes: dict[str, str]) -> bool:
+    return bool(_sanitized_class_tokens(attributes) & _DRAG_CLASS_HINT_TOKENS)
+
+
+def _looks_like_semantic_icon_control(
+    node_name: str | None,
+    attributes: dict[str, str],
+    bbox: tuple[float, float, float, float] | None,
+    *,
+    name: str | None,
+    text: str | None,
+) -> bool:
+    tag = (node_name or "").upper()
+    if tag not in _SEMANTIC_ICON_TAGS:
+        return False
+    if _normalize_text(name) or _normalize_text(text):
+        return False
+    if not bbox:
+        return False
+    _, _, width, height = bbox
+    if width < 4 or height < 4 or width > 96 or height > 96:
+        return False
+    return bool(_semantic_hint_tokens(attributes))
 
 
 def truncate_attr_value(value: str, *, max_len: int) -> str:
@@ -258,6 +342,8 @@ def _interactive_reason(
         return True, "draggable", 0.85
     if "onclick" in attributes:
         return True, "onclick", 0.65
+    if _has_drag_class_hint(attributes):
+        return True, "class_drag", 0.6
     if "href" in attributes and (node_name or "").upper() == "A":
         return True, "href", 0.98
     if attributes.get("data-agent-scroll"):
@@ -413,6 +499,8 @@ def element_text_blob(element: ElementSnapshot) -> str:
     ]:
         if value := attrs.get(key):
             parts.append(str(value))
+    if class_hint := sanitize_class_value(attrs.get("class"), fallback_tokens=0):
+        parts.append(class_hint)
     return " ".join(parts)
 
 
@@ -514,6 +602,7 @@ def _is_actionable_snapshot_element(element: ElementSnapshot) -> bool:
         or element.widget
         or reason in {
             "contenteditable",
+            "class_drag",
             "cursor_pointer",
             "detected_handler",
             "draggable",
@@ -522,6 +611,7 @@ def _is_actionable_snapshot_element(element: ElementSnapshot) -> bool:
             "onclick",
             "role",
             "scroll_container",
+            "semantic_icon",
             "tabindex",
         }
         or attrs.get("draggable") == "true"
@@ -918,6 +1008,7 @@ async def capture_snapshot(
                 role_l in {"slider", "spinbutton", "scrollbar"}
                 or type_l in {"range", "number"}
                 or attrs.get("draggable") == "true"
+                or _has_drag_class_hint(attrs)
                 or bool(handler_keys & {"mousedown", "mousemove", "mouseup", "pointerdown", "pointermove", "pointerup", "dragstart", "dragover", "drop"})
             )
             value_keys = (
@@ -939,6 +1030,8 @@ async def capture_snapshot(
                     parts.append(f"{key}={truncate_attr_value(value, max_len=48)}")
             if attrs.get("draggable") == "true":
                 parts.append("draggable=true")
+            if _has_drag_class_hint(attrs) and (class_hint := sanitize_class_value(attrs.get("class"), fallback_tokens=0)):
+                parts.append(f"class={truncate_attr_value(class_hint, max_len=48)}")
             if handler_keys:
                 for key in sorted(handler_keys & {"mousedown", "mousemove", "mouseup", "pointerdown", "pointermove", "pointerup", "dragstart", "dragover", "drop"}):
                     parts.append(f"handler={key}")
@@ -996,6 +1089,7 @@ async def capture_snapshot(
             ax_info = ax_lookup.get(backend_node_id or -1, {})
             role = ax_info.get("role") or None
             name = _normalize_text(ax_info.get("name") or None)
+            bbox = bounds_map.get(index)
 
             is_interactive, interactive_reason, interactive_confidence = _interactive_reason(
                 node_name,
@@ -1003,6 +1097,16 @@ async def capture_snapshot(
                 node_attributes,
                 cursor,
             )
+            if _looks_like_semantic_icon_control(
+                node_name,
+                node_attributes,
+                bbox,
+                name=name,
+                text=text,
+            ) and (not is_interactive or interactive_confidence < 0.55):
+                is_interactive = True
+                interactive_reason = "semantic_icon"
+                interactive_confidence = 0.55
             if not is_interactive and not _should_include_non_interactive(
                 node_name, node_attributes,
             ):
@@ -1091,7 +1195,6 @@ async def capture_snapshot(
             ):
                 descendant_text = descendant_text or _short_descendant_text(index)
 
-            bbox = bounds_map.get(index)
             in_viewport = _in_viewport(bbox, viewport_width=viewport_width, viewport_height=viewport_height)
             area = None
             if bbox:

@@ -20,6 +20,7 @@ def test_observer_collect_js_defines_attrs_helper_before_use() -> None:
     script = semantic._OBSERVER_COLLECT_JS
     assert script.index("function attrsOf") < script.index("attrs: attrsOf(el)")
     assert "const SVG_ATTRS" in script
+    assert "'value','href','src','class'" in semantic._OBSERVER_INJECT_JS
 
 
 def _el(
@@ -322,6 +323,178 @@ async def test_pointer_drag_dispatches_mouse_path(monkeypatch: pytest.MonkeyPatc
     ]
     assert mouse_events[0]["x"] == 10
     assert mouse_events[-1]["x"] == 110
+
+
+@pytest.mark.asyncio
+async def test_pointer_drag_allows_endpoint_outside_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el("el_drag", node_name="DIV", backend_node_id=123)
+    element_index = ElementIndex(elements={"el_drag": element})
+    events: list[tuple[str, dict[str, Any] | None]] = []
+
+    class _Session:
+        async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            events.append((method, params))
+            return {}
+
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, _Session()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_element_rect_info(_backend_node_id: int, _session: Any) -> dict[str, Any]:
+        return {"result": {"value": {"left": 10, "top": 20, "width": 100, "height": 40}}}
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_element_rect_info", fake_element_rect_info)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.pointer_drag("el_drag", 50, 20, 180, 60, context, steps=1)
+
+    assert result.ok is True
+    mouse_events = [params for method, params in events if method == "Input.dispatchMouseEvent"]
+    assert mouse_events[-1]["x"] == 190
+    assert mouse_events[-1]["y"] == 80
+    assert "to (180.0, 60.0)" in result.message
+
+
+@pytest.mark.asyncio
+async def test_drag_and_drop_uses_pointer_fallback_when_dom_drag_noops(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _el("el_source", node_name="DIV", backend_node_id=123)
+    target = _el("el_target", node_name="DIV", backend_node_id=456)
+    element_index = ElementIndex(elements={"el_source": source, "el_target": target})
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+    fallback_calls: list[tuple[int, int]] = []
+    observer_injections = 0
+    mutation_calls = 0
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        nonlocal observer_injections
+        observer_injections += 1
+        return True
+
+    async def fake_resolve_object_id(_backend_node_id: int, _session: Any) -> str:
+        return "object-id"
+
+    async def fake_call_on_node(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"result": {"value": True}}
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal mutation_calls
+        mutation_calls += 1
+        if mutation_calls == 1:
+            return {}
+        return {"attrChanges": [{"tag": "div", "attr": "style", "old": "left:0", "new": "left:10px"}]}
+
+    async def fake_pointer_between(
+        source_backend_node_id: int,
+        target_backend_node_id: int,
+        _session: Any,
+        *,
+        steps: int,
+    ) -> tuple[bool, dict[str, float], None]:
+        assert steps == 18
+        fallback_calls.append((source_backend_node_id, target_backend_node_id))
+        return True, {
+            "start_local_x": 10.0,
+            "start_local_y": 10.0,
+            "end_local_x": 80.0,
+            "end_local_y": 30.0,
+            "start_viewport_x": 20.0,
+            "start_viewport_y": 20.0,
+            "end_viewport_x": 90.0,
+            "end_viewport_y": 40.0,
+            "width": 20.0,
+            "height": 20.0,
+        }, None
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_resolve_object_id", fake_resolve_object_id)
+    monkeypatch.setattr(semantic, "_call_on_node", fake_call_on_node)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+    monkeypatch.setattr(semantic, "_dispatch_pointer_drag_between_nodes", fake_pointer_between)
+
+    result = await semantic.drag_and_drop("el_source", "el_target", context)
+
+    assert result.ok is True
+    assert observer_injections == 2
+    assert fallback_calls == [(123, 456)]
+    assert "pointer fallback" in result.message
+
+
+@pytest.mark.asyncio
+async def test_pointer_drag_between_nodes_uses_single_scroll_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    dispatch_args: dict[str, Any] = {}
+
+    async def fake_resolve_object_id(backend_node_id: int, _session: Any) -> str:
+        assert backend_node_id == 456
+        return "target-object"
+
+    async def fake_call_on_node(
+        backend_node_id: int,
+        _session: Any,
+        function_body: str,
+        args: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        assert backend_node_id == 123
+        assert args == [{"objectId": "target-object"}]
+        assert "targetEl.getBoundingClientRect()" in function_body
+        return {
+            "result": {
+                "value": {
+                    "source": {"left": 10, "top": 20, "width": 40, "height": 20},
+                    "target": {"left": 210, "top": 80, "width": 30, "height": 20},
+                }
+            }
+        }
+
+    async def fail_element_rect_info(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("pair rect helper should not scroll source and target separately")
+
+    async def fake_dispatch_pointer_drag_local(*_args: Any, **kwargs: Any) -> tuple[bool, dict[str, float], None]:
+        dispatch_args.update(kwargs)
+        return True, {
+            "start_local_x": kwargs["start_x"],
+            "start_local_y": kwargs["start_y"],
+            "end_local_x": kwargs["end_x"],
+            "end_local_y": kwargs["end_y"],
+            "start_viewport_x": 30.0,
+            "start_viewport_y": 30.0,
+            "end_viewport_x": 235.0,
+            "end_viewport_y": 90.0,
+            "width": 40.0,
+            "height": 20.0,
+        }, None
+
+    monkeypatch.setattr(semantic, "_resolve_object_id", fake_resolve_object_id)
+    monkeypatch.setattr(semantic, "_call_on_node", fake_call_on_node)
+    monkeypatch.setattr(semantic, "_element_rect_info", fail_element_rect_info)
+    monkeypatch.setattr(semantic, "_dispatch_pointer_drag_local", fake_dispatch_pointer_drag_local)
+
+    ok, _coords, error = await semantic._dispatch_pointer_drag_between_nodes(123, 456, cast(Any, object()), steps=7)
+
+    assert ok is True
+    assert error is None
+    assert dispatch_args["start_x"] == 20
+    assert dispatch_args["start_y"] == 10
+    assert dispatch_args["end_x"] == 215
+    assert dispatch_args["end_y"] == 70
+    assert dispatch_args["allow_outside"] is True
+    assert dispatch_args["steps"] == 7
 
 
 @pytest.mark.asyncio
@@ -724,6 +897,53 @@ async def test_type_text_sets_value_when_keyboard_insert_does_not_stick(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_type_text_uses_keyboard_events_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el("el_input", node_name="INPUT", backend_node_id=321, role="textbox")
+    element_index = ElementIndex(elements={"el_input": element})
+    typed: list[str] = []
+    insert_calls: list[str] = []
+
+    class _Keyboard:
+        async def type(self, text: str) -> None:
+            typed.append(text)
+
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com", keyboard=_Keyboard())),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+    values = iter(["", "hello"])
+
+    async def fake_true(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def fake_insert_text(_session: Any, text: str) -> bool:
+        insert_calls.append(text)
+        return True
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"attrChanges": [{"tag": "input", "attr": "value", "old": "", "new": "hello"}]}
+
+    async def fake_read_input_value(_backend_node_id: int, _session: Any) -> str:
+        return next(values)
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_true)
+    monkeypatch.setattr(semantic, "_dom_focus", fake_true)
+    monkeypatch.setattr(semantic, "_insert_text", fake_insert_text)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+    monkeypatch.setattr(semantic, "_read_input_value", fake_read_input_value)
+
+    result = await semantic.type_text("el_input", "hello", context)
+
+    assert result.ok is True
+    assert typed == ["hello"]
+    assert insert_calls == []
+    assert 'Current value: "hello"' in result.message
+
+
+@pytest.mark.asyncio
 async def test_type_text_reports_live_previous_value(monkeypatch: pytest.MonkeyPatch) -> None:
     element = _el(
         "el_input",
@@ -825,6 +1045,60 @@ async def test_draw_on_click_driven_svg_directs_click_at(monkeypatch: pytest.Mon
 
     assert result.ok is False
     assert "use click_at" in result.message
+
+
+@pytest.mark.asyncio
+async def test_draw_falls_back_to_pointer_events_when_synthetic_noops(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el("el_svg", node_name="SVG", backend_node_id=123, role="image")
+    element_index = ElementIndex(elements={"el_svg": element})
+    events: list[tuple[str, dict[str, Any] | None]] = []
+
+    class _Session:
+        async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            events.append((method, params))
+            return {}
+
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, _Session()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_call_on_node(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"result": {"value": True}}
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    async def fake_viewport_info(_backend_node_id: int, _session: Any) -> dict[str, Any]:
+        return {"result": {"value": {"x": 60, "y": 70, "width": 100, "height": 80}}}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_call_on_node", fake_call_on_node)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+    monkeypatch.setattr(semantic, "_viewport_info", fake_viewport_info)
+
+    result = await semantic.draw("el_svg", [[10, 10], [40, 40], [70, 20]], context)
+
+    assert result.ok is True
+    assert "pointer fallback" in result.message
+    mouse_events = [params for method, params in events if method == "Input.dispatchMouseEvent"]
+    assert [event["type"] for event in mouse_events] == [
+        "mouseMoved",
+        "mousePressed",
+        "mouseMoved",
+        "mouseMoved",
+        "mouseReleased",
+    ]
+    assert mouse_events[0]["x"] == 20
+    assert mouse_events[0]["y"] == 40
+    assert mouse_events[-1]["x"] == 80
+    assert mouse_events[-1]["y"] == 50
 
 
 def test_build_change_lines_reports_form_and_visual_changes() -> None:
