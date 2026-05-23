@@ -560,6 +560,78 @@ async def _dom_focus(backend_node_id: int, session: CDPSession) -> bool:
         return False
     return bool(result.get("result", {}).get("value"))
 
+
+async def _dispatch_pointer_drag_local(
+    backend_node_id: int,
+    session: CDPSession,
+    *,
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    steps: int,
+    allow_outside: bool = False,
+) -> tuple[bool, dict[str, float] | None, str | None]:
+    info = await _element_rect_info(backend_node_id, session)
+    value = (info or {}).get("result", {}).get("value")
+    if not value:
+        return False, None, "cannot locate element"
+    width = float(value.get("width") or 0)
+    height = float(value.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return False, None, "element has no visible area"
+    left = float(value.get("left") or 0)
+    top = float(value.get("top") or 0)
+    sx = max(0.0, min(float(start_x), width))
+    sy = max(0.0, min(float(start_y), height))
+    if allow_outside:
+        ex = float(end_x)
+        ey = float(end_y)
+    else:
+        ex = max(0.0, min(float(end_x), width))
+        ey = max(0.0, min(float(end_y), height))
+    px0 = left + sx
+    py0 = top + sy
+    px1 = left + ex
+    py1 = top + ey
+    try:
+        await session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": px0, "y": py0, "button": "none"})
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": px0, "y": py0, "button": "left", "clickCount": 1},
+        )
+        count = max(1, min(int(steps), 50))
+        for idx in range(1, count + 1):
+            t = idx / count
+            await session.send(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseMoved",
+                    "x": px0 + (px1 - px0) * t,
+                    "y": py0 + (py1 - py0) * t,
+                    "button": "left",
+                    "buttons": 1,
+                },
+            )
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": px1, "y": py1, "button": "left", "clickCount": 1},
+        )
+    except Exception as exc:
+        return False, None, str(exc)
+    return True, {
+        "start_local_x": sx,
+        "start_local_y": sy,
+        "end_local_x": ex,
+        "end_local_y": ey,
+        "start_viewport_x": px0,
+        "start_viewport_y": py0,
+        "end_viewport_x": px1,
+        "end_viewport_y": py1,
+        "width": width,
+        "height": height,
+    }, None
+
 def _frame_tree_paths(frame_tree: dict[str, Any]) -> dict[str, list[int]]:
     paths: dict[str, list[int]] = {}
 
@@ -1198,7 +1270,30 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
             this.scrollIntoView({block: 'center', inline: 'center'});
             const tag = (this.tagName || '').toUpperCase();
             const isSvg = !!this.ownerSVGElement || tag === 'SVG';
+            const href = tag === 'A' ? (this.getAttribute('href') || '') : '';
             if (!isSvg && typeof this.click === 'function') {
+                if (tag === 'A' && (href === '#' || href.startsWith('#'))) {
+                    const rect = this.getBoundingClientRect();
+                    const clientX = rect.left + rect.width / 2;
+                    const clientY = rect.top + rect.height / 2;
+                    const opts = {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        button: 0,
+                        buttons: 1,
+                        clientX,
+                        clientY,
+                        screenX: window.screenX + clientX,
+                        screenY: window.screenY + clientY,
+                    };
+                    this.dispatchEvent(new MouseEvent('mouseover', opts));
+                    this.dispatchEvent(new MouseEvent('mousemove', opts));
+                    this.dispatchEvent(new MouseEvent('mousedown', opts));
+                    this.dispatchEvent(new MouseEvent('mouseup', {...opts, buttons: 0}));
+                    this.dispatchEvent(new MouseEvent('click', {...opts, buttons: 0}));
+                    return true;
+                }
                 this.click();
                 return true;
             }
@@ -1453,6 +1548,56 @@ async def hover_element(element_id: str, context: ToolContext, *, duration_ms: i
     return ToolResult(ok=True, message=message)
 
 
+async def focus_element(element_id: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "focus_element"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    result = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function () {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const before = document.activeElement;
+            if (typeof this.focus === 'function') this.focus();
+            const after = document.activeElement;
+            const label = (after && [
+                after.tagName || '',
+                after.id ? '#' + after.id : '',
+                after.getAttribute && after.getAttribute('name') ? `[name="${after.getAttribute('name')}"]` : ''
+            ].join('')) || '';
+            return {
+                active: after === this,
+                changed: before !== after,
+                activeLabel: label,
+            };
+        }
+        """,
+    )
+    if not result:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Focus failed")
+    value = result.get("result", {}).get("value") or {}
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    active = bool(value.get("active"))
+    changed = bool(value.get("changed"))
+    label = value.get("activeLabel") or "unknown"
+    base_msg = f"Focused {element_id}. Focus changed: {str(changed).lower()}. Active element: {label}"
+    if not active:
+        base_msg = f"Focus failed: active element is {label}, not {element_id}"
+    return ToolResult(ok=active, message=_format_verification(mutations, base_msg))
+
+
 async def type_text(element_id: str, text: str, context: ToolContext) -> ToolResult:
     context.last_tool = "type_text"
     context.last_element_id = element_id
@@ -1576,6 +1721,290 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
         session, context, context.timing.settle_ms,
         frame_id=source.frame_id, frame_url=source.frame_url,
     )
+    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+
+async def pointer_drag(
+    element_id: str,
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    context: ToolContext,
+    *,
+    steps: int = 12,
+) -> ToolResult:
+    context.last_tool = "pointer_drag"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    ok, coords, error = await _dispatch_pointer_drag_local(
+        element.backend_node_id,
+        session,
+        start_x=start_x,
+        start_y=start_y,
+        end_x=end_x,
+        end_y=end_y,
+        steps=steps,
+    )
+    if not ok or coords is None:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message=f"Pointer drag failed: {error or 'unknown error'}")
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    base_msg = (
+        f"Pointer dragged {element_id} from local "
+        f"({coords['start_local_x']:.1f}, {coords['start_local_y']:.1f}) "
+        f"to ({coords['end_local_x']:.1f}, {coords['end_local_y']:.1f}); viewport "
+        f"({coords['start_viewport_x']:.1f}, {coords['start_viewport_y']:.1f}) -> "
+        f"({coords['end_viewport_x']:.1f}, {coords['end_viewport_y']:.1f})"
+    )
+    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+
+async def set_slider_value(element_id: str, value: float, context: ToolContext) -> ToolResult:
+    context.last_tool = "set_slider_value"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    desired = float(value)
+    direct = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function (desired) {
+            const desiredNumber = Number(desired);
+            const desiredString = String(desired);
+            const closeEnough = (value) => {
+                if (value === undefined || value === null || value === '') return false;
+                const numberValue = Number(value);
+                if (Number.isFinite(numberValue) && Number.isFinite(desiredNumber)) {
+                    return Math.abs(numberValue - desiredNumber) < 1e-6;
+                }
+                return String(value) === desiredString;
+            };
+            const jq = window.jQuery || window.$;
+            const sliderRoot = (
+                this.closest && (
+                    this.closest('.ui-slider') ||
+                    this.closest('[role="slider"]')
+                )
+            ) || this;
+            const initializedJQuerySlider = (el) => {
+                if (!jq || !el) return false;
+                try {
+                    return typeof jq(el).slider === 'function' && (
+                        !!jq(el).data('ui-slider') ||
+                        !!jq(el).data('slider') ||
+                        el.classList.contains('ui-slider')
+                    );
+                } catch (_e) {
+                    return false;
+                }
+            };
+            const readState = (target) => {
+                let raw = '';
+                let min = null;
+                let max = null;
+                let method = '';
+                if (initializedJQuerySlider(sliderRoot)) {
+                    try {
+                        raw = jq(sliderRoot).slider('value');
+                        min = jq(sliderRoot).slider('option', 'min');
+                        max = jq(sliderRoot).slider('option', 'max');
+                        method = 'jquery-ui';
+                    } catch (_e) {}
+                }
+                if ((raw === '' || raw === undefined || raw === null) && 'value' in target) {
+                    raw = target.value;
+                    min = target.min || min;
+                    max = target.max || max;
+                    method = method || 'native-value';
+                }
+                if ((raw === '' || raw === undefined || raw === null) && target.getAttribute) {
+                    raw = target.getAttribute('aria-valuenow') || sliderRoot.getAttribute('aria-valuenow') || '';
+                    min = target.getAttribute('aria-valuemin') || sliderRoot.getAttribute('aria-valuemin') || min;
+                    max = target.getAttribute('aria-valuemax') || sliderRoot.getAttribute('aria-valuemax') || max;
+                    method = method || 'aria';
+                }
+                return {
+                    value: raw === undefined || raw === null ? '' : String(raw),
+                    min: min === undefined || min === null || min === '' ? null : Number(min),
+                    max: max === undefined || max === null || max === '' ? null : Number(max),
+                    method,
+                };
+            };
+            sliderRoot.scrollIntoView({block: 'center', inline: 'center'});
+            const before = readState(this);
+            let ok = false;
+            let method = '';
+            if (initializedJQuerySlider(sliderRoot)) {
+                try {
+                    jq(sliderRoot).slider('value', desiredNumber);
+                    jq(sliderRoot).trigger('slidechange');
+                    sliderRoot.dispatchEvent(new Event('input', { bubbles: true }));
+                    sliderRoot.dispatchEvent(new Event('change', { bubbles: true }));
+                    method = 'jquery-ui';
+                } catch (_e) {}
+            }
+            if (!method && 'value' in this) {
+                const tag = (this.tagName || '').toUpperCase();
+                const proto = tag === 'INPUT' ? window.HTMLInputElement.prototype : null;
+                const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+                if (descriptor && descriptor.set) descriptor.set.call(this, String(desired));
+                else this.value = String(desired);
+                this.dispatchEvent(new Event('input', { bubbles: true }));
+                this.dispatchEvent(new Event('change', { bubbles: true }));
+                method = 'native-value';
+            }
+            if (!method && (this.getAttribute('role') === 'slider' || sliderRoot.getAttribute('role') === 'slider')) {
+                const ariaTarget = sliderRoot.getAttribute('role') === 'slider' ? sliderRoot : this;
+                ariaTarget.setAttribute('aria-valuenow', String(desired));
+                ariaTarget.dispatchEvent(new Event('input', { bubbles: true }));
+                ariaTarget.dispatchEvent(new Event('change', { bubbles: true }));
+                method = 'aria';
+            }
+            const after = readState(this);
+            ok = closeEnough(after.value);
+            return {
+                ok,
+                before: before.value,
+                after: after.value,
+                min: after.min ?? before.min,
+                max: after.max ?? before.max,
+                method: method || after.method || before.method,
+                root: sliderRoot === this ? 'self' : 'ancestor',
+            };
+        }
+        """,
+        [{"value": desired}],
+    )
+    direct_value = (direct or {}).get("result", {}).get("value") or {}
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    if direct_value.get("ok") or str(direct_value.get("after")) == str(desired):
+        base_msg = (
+            f"Set slider {element_id} to {desired:g}. "
+            f"Previous value: \"{direct_value.get('before', '')}\". "
+            f"Current value: \"{direct_value.get('after', '')}\""
+        )
+        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+    attrs = element.attributes or {}
+    min_value = float(direct_value.get("min") or attrs.get("aria-valuemin") or attrs.get("min") or 0)
+    max_value = float(direct_value.get("max") or attrs.get("aria-valuemax") or attrs.get("max") or 100)
+    if max_value <= min_value:
+        max_value = min_value + 100
+    ratio = max(0.0, min((desired - min_value) / (max_value - min_value), 1.0))
+    info = await _element_rect_info(element.backend_node_id, session)
+    rect = (info or {}).get("result", {}).get("value") or {}
+    width = float(rect.get("width") or 0)
+    height = float(rect.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return ToolResult(ok=False, message="Set slider failed: element has no visible area")
+    ok, coords, error = await _dispatch_pointer_drag_local(
+        element.backend_node_id,
+        session,
+        start_x=width / 2,
+        start_y=height / 2,
+        end_x=ratio * width,
+        end_y=height / 2,
+        steps=16,
+    )
+    if not ok:
+        return ToolResult(ok=False, message=f"Set slider failed: {error or 'pointer drag failed'}")
+    pointer_mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    if pointer_mutations:
+        mutations = pointer_mutations
+    reread = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function () {
+            return this.value !== undefined ? String(this.value) : (this.getAttribute('aria-valuenow') || '');
+        }
+        """,
+    )
+    current_after = (reread or {}).get("result", {}).get("value")
+    if current_after is None:
+        current_after = direct_value.get("after", "")
+    base_msg = (
+        f"Set slider {element_id} toward {desired:g} using pointer ratio {ratio:.3f}. "
+        f"Previous value: \"{direct_value.get('before', '')}\". "
+        f"Current value: \"{current_after}\""
+    )
+    if coords:
+        base_msg += f". Drag ended at local ({coords['end_local_x']:.1f}, {coords['end_local_y']:.1f})"
+    try:
+        verified = abs(float(current_after) - desired) < 1e-6
+    except (TypeError, ValueError):
+        verified = str(current_after) == str(desired)
+    if not verified:
+        return ToolResult(ok=False, message=_format_verification(mutations, f"Set slider failed verification. {base_msg}"))
+    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+
+async def resize_element(
+    element_id: str,
+    delta_width: float,
+    delta_height: float,
+    context: ToolContext,
+) -> ToolResult:
+    context.last_tool = "resize_element"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    info = await _element_rect_info(element.backend_node_id, session)
+    rect = (info or {}).get("result", {}).get("value") or {}
+    width = float(rect.get("width") or 0)
+    height = float(rect.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return ToolResult(ok=False, message="Resize failed: element has no visible area")
+    ok, coords, error = await _dispatch_pointer_drag_local(
+        element.backend_node_id,
+        session,
+        start_x=width - 2,
+        start_y=height - 2,
+        end_x=width + float(delta_width),
+        end_y=height + float(delta_height),
+        steps=12,
+        allow_outside=True,
+    )
+    if not ok:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message=f"Resize failed: {error or 'pointer drag failed'}")
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    base_msg = f"Resized {element_id} by ({delta_width:g}, {delta_height:g}) from {width:.1f}x{height:.1f}"
+    if coords:
+        base_msg += f" using handle drag to local ({coords['end_local_x']:.1f}, {coords['end_local_y']:.1f})"
     return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
 
@@ -1863,6 +2292,247 @@ async def inspect_element(element_id: str, context: ToolContext) -> ToolResult:
     return ToolResult(ok=True, message="\n".join(parts))
 
 
+async def select_text(
+    element_id: str,
+    context: ToolContext,
+    *,
+    text: str | None = None,
+    occurrence: int = 1,
+) -> ToolResult:
+    context.last_tool = "select_text"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    result = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function (targetText, occurrence) {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const selection = window.getSelection();
+            if (!selection) return {ok: false, selected: '', reason: 'selection unavailable'};
+            selection.removeAllRanges();
+            const wanted = (targetText || '').trim();
+            if (!wanted) {
+                const range = document.createRange();
+                range.selectNodeContents(this);
+                selection.addRange(range);
+                return {ok: true, selected: selection.toString()};
+            }
+            const targetOccurrence = Math.max(1, Number(occurrence) || 1);
+            const walker = document.createTreeWalker(this, NodeFilter.SHOW_TEXT);
+            let node;
+            let seen = 0;
+            while ((node = walker.nextNode())) {
+                const value = node.nodeValue || '';
+                const idx = value.indexOf(wanted);
+                if (idx < 0) continue;
+                seen += 1;
+                if (seen !== targetOccurrence) continue;
+                const range = document.createRange();
+                const start = idx;
+                const end = idx + wanted.length;
+                range.setStart(node, start);
+                range.setEnd(node, end);
+                selection.addRange(range);
+                return {ok: true, selected: selection.toString()};
+            }
+            return {ok: false, selected: '', reason: 'text not found'};
+        }
+        """,
+        [{"value": text or ""}, {"value": int(occurrence)}],
+    )
+    value = (result or {}).get("result", {}).get("value") or {}
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    selected = str(value.get("selected") or "")
+    if not value.get("ok"):
+        return ToolResult(ok=False, message=f"Select text failed: {value.get('reason') or 'unknown error'}")
+    display = selected[:250] + "..." if len(selected) > 250 else selected
+    return ToolResult(ok=True, message=_format_verification(mutations, f'Selected text: "{display}"'))
+
+
+async def apply_format(command: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "apply_format"
+    context.last_element_id = None
+    normalized = command.strip().lower()
+    allowed = {
+        "bold": "bold",
+        "italic": "italic",
+        "underline": "underline",
+        "strike": "strikeThrough",
+        "strikethrough": "strikeThrough",
+        "ordered_list": "insertOrderedList",
+        "unordered_list": "insertUnorderedList",
+    }
+    browser_command = allowed.get(normalized)
+    if not browser_command:
+        return ToolResult(ok=False, message=f"Unsupported format command: {command}")
+    session = await _session_for_active_frame(context)
+    await _inject_observer(session)
+    try:
+        evaluated = await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "(() => { const before = String(window.getSelection?.() || ''); "
+                    f"const ok = document.execCommand({json.dumps(browser_command)}, false, null); "
+                    "const after = String(window.getSelection?.() || ''); "
+                    "return {ok, before, after}; })()"
+                ),
+                "returnByValue": True,
+            },
+        )
+    except Exception as exc:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message=f"Apply format failed: {exc}")
+    value = evaluated.get("result", {}).get("value") or {}
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=context.active_frame_id,
+    )
+    ok = bool(value.get("ok"))
+    selected = str(value.get("after") or value.get("before") or "")
+    return ToolResult(
+        ok=ok,
+        message=_format_verification(mutations, f"Applied format {browser_command}. Selection: \"{selected[:120]}\""),
+    )
+
+
+async def transfer_text(source_id: str, target_id: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "transfer_text"
+    context.last_element_id = target_id
+    source = _resolve_element(source_id, context)
+    target = _resolve_element(target_id, context)
+    if not source or not source.backend_node_id:
+        return ToolResult(ok=False, message=f"Unknown source id: {source_id}")
+    if not target or not target.backend_node_id:
+        return ToolResult(ok=False, message=f"Unknown target id: {target_id}")
+    if source.frame_id != target.frame_id:
+        return ToolResult(ok=False, message="Transfer failed: source and target are in different frames")
+    if context.active_frame_id and source.frame_id != context.active_frame_id:
+        return ToolResult(ok=False, message="Transfer failed: source is not in the active frame")
+    session = await _session_for_element(source, context)
+    await _inject_observer(session)
+    source_result = await _call_on_node(
+        source.backend_node_id,
+        session,
+        """
+        function () {
+            const type = (this.getAttribute && this.getAttribute('type') || '').toLowerCase();
+            if (type === 'password') return {ok: false, text: '', reason: 'password source omitted'};
+            if ('value' in this) return {ok: true, text: String(this.value || '')};
+            return {ok: true, text: String(this.innerText || this.textContent || '')};
+        }
+        """,
+    )
+    source_value = (source_result or {}).get("result", {}).get("value") or {}
+    if not source_value.get("ok"):
+        return ToolResult(ok=False, message=f"Transfer failed: {source_value.get('reason') or 'source text unavailable'}")
+    text_value = str(source_value.get("text") or "")
+    if not await _set_text_value(target.backend_node_id, session, text_value):
+        if not await _dom_focus(target.backend_node_id, session) or not await _insert_text(session, text_value):
+            await _collect_mutations(session, settle_ms=50)
+            return ToolResult(ok=False, message="Transfer failed: target did not accept text")
+    mutations = await _collect_mutations_with_ids(
+        session, context, max(context.timing.settle_ms, 300),
+        frame_id=target.frame_id, frame_url=target.frame_url,
+    )
+    current_value = await _read_input_value(target.backend_node_id, session)
+    target_type = (target.attributes or {}).get("type", "").lower()
+    display = "[password value omitted]" if target_type == "password" else (current_value if current_value is not None else text_value)[:250]
+    return ToolResult(
+        ok=True,
+        message=_format_verification(
+            mutations,
+            f'Transferred text from {source_id} to {target_id}. Current value: "{display}"',
+        ),
+    )
+
+
+async def read_live_text(context: ToolContext, element_id: str | None = None) -> ToolResult:
+    context.last_tool = "read_live_text"
+    context.last_element_id = element_id
+    session = await _session_for_active_frame(context)
+    if element_id:
+        element = _resolve_element(element_id, context)
+        if not element or not element.backend_node_id:
+            return ToolResult(ok=False, message=_unknown_element_message(element_id))
+        frame_error = _active_frame_error(element, context)
+        if frame_error:
+            return frame_error
+        session = await _session_for_element(element, context)
+        result = await _call_on_node(
+            element.backend_node_id,
+            session,
+            """
+            function () {
+                const type = (this.getAttribute && this.getAttribute('type') || '').toLowerCase();
+                if (type === 'password') return [{label: 'target', tag: this.tagName || '', text: '[password value omitted]'}];
+                const text = 'value' in this ? String(this.value || '') : String(this.innerText || this.textContent || '');
+                return [{label: 'target', tag: this.tagName || '', text}];
+            }
+            """,
+        )
+        value = (result or {}).get("result", {}).get("value") or []
+    else:
+        evaluated = await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": """
+                (() => {
+                  const selectors = [
+                    'textarea', 'input', '[contenteditable]', '[role="textbox"]',
+                    '[role="log"]', '[aria-live]', 'pre', 'code', 'output', 'section', 'main'
+                  ];
+                  const seen = new Set();
+                  const out = [];
+                  function add(label, el) {
+                    if (!el || seen.has(el)) return;
+                    seen.add(el);
+                    const tag = el.tagName || '';
+                    const type = (el.getAttribute && el.getAttribute('type') || '').toLowerCase();
+                    if (type === 'password') return;
+                    const text = ('value' in el ? String(el.value || '') : String(el.innerText || el.textContent || '')).trim();
+                    if (!text) return;
+                    out.push({label, tag, text: text.slice(0, 2000)});
+                  }
+                  add('active', document.activeElement);
+                  for (const selector of selectors) {
+                    for (const el of document.querySelectorAll(selector)) {
+                      if (out.length >= 8) break;
+                      add(selector, el);
+                    }
+                    if (out.length >= 8) break;
+                  }
+                  if (out.length === 0) add('body', document.body);
+                  return out;
+                })()
+                """,
+                "returnByValue": True,
+            },
+        )
+        value = evaluated.get("result", {}).get("value") or []
+    lines = []
+    for item in value[:8]:
+        text_value = " ".join(str(item.get("text") or "").split())
+        if not text_value:
+            continue
+        if len(text_value) > 500:
+            text_value = text_value[:500].rstrip() + "..."
+        lines.append(f"{item.get('label') or 'text'} <{str(item.get('tag') or '').lower()}>: {text_value}")
+    message = "\n".join(lines) if lines else "No live text found."
+    return ToolResult(ok=True, message=message)
+
+
 async def search_page_attributes(query: str, context: ToolContext) -> ToolResult:
     """Search every element on the page for attributes whose name or value contains the query string."""
     context.last_tool = "search_page_attributes"
@@ -1987,6 +2657,10 @@ async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
         return ToolResult(ok=False, message="Iframe has no frame id (frame not ready)")
 
     prev_active = context.active_frame_id
+    if prev_active == element.frame_id:
+        frame_label = element.frame_name or element.frame_url or ""
+        suffix = f" ({frame_label})" if frame_label else ""
+        return ToolResult(ok=True, message=f"Already in iframe {iframe_id}{suffix}")
     try:
         session = await _session_for_element(element, context)
     except Exception:
@@ -2028,6 +2702,8 @@ async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
 async def switch_to_main_frame(context: ToolContext) -> ToolResult:
     context.last_tool = "switch_to_main_frame"
     context.last_element_id = None
+    if context.active_frame_id is None:
+        return ToolResult(ok=True, message="Already in main frame")
     context.active_frame_id = None
     return ToolResult(ok=True, message="Switched to main frame")
 
@@ -2090,6 +2766,26 @@ async def press_key_combination(keys: list[str], context: ToolContext) -> ToolRe
     context.last_element_id = None
     session = await _session_for_active_frame(context)
     await _inject_observer(session)
+    async def _active_value() -> dict[str, Any]:
+        try:
+            evaluated = await session.send(
+                "Runtime.evaluate",
+                {
+                    "expression": (
+                        "(() => { const el = document.activeElement; if (!el) return {}; "
+                        "const type = (el.getAttribute && el.getAttribute('type') || '').toLowerCase(); "
+                        "const value = type === 'password' ? '[password value omitted]' : "
+                        "('value' in el ? String(el.value || '') : String(el.innerText || el.textContent || '')); "
+                        "return {tag: el.tagName || '', id: el.id || '', value}; })()"
+                    ),
+                    "returnByValue": True,
+                },
+            )
+            value = evaluated.get("result", {}).get("value")
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+    before_active = await _active_value()
     try:
         await context.page.keyboard.press("+".join(keys))
     except Exception as exc:  # pragma: no cover - runtime safety
@@ -2099,6 +2795,16 @@ async def press_key_combination(keys: list[str], context: ToolContext) -> ToolRe
         session, context, context.timing.settle_ms,
         frame_id=context.active_frame_id,
     )
+    after_active = await _active_value()
     base_msg = f"Pressed {'+'.join(keys)}"
+    if before_active or after_active:
+        base_msg += (
+            f". Active before: {before_active.get('tag', '')}#{before_active.get('id', '')}; "
+            f"after: {after_active.get('tag', '')}#{after_active.get('id', '')}"
+        )
+        before_value = str(before_active.get("value") or "")
+        after_value = str(after_active.get("value") or "")
+        if before_value or after_value:
+            base_msg += f'. Previous value: "{before_value[:120]}". Current value: "{after_value[:120]}"'
     message = _format_verification(mutations, base_msg)
     return ToolResult(ok=True, message=message)

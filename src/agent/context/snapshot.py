@@ -163,6 +163,8 @@ class ElementSnapshot:
     handlers: dict[str, str] | None = None  # {event_name: truncated_source}
     descendant_text: str | None = None  # short preview for unlabeled containers
     graphics: str | None = None  # compact SVG/canvas descendant summary
+    context: str | None = None  # nearby labels, row/card text, and structure hints
+    widget: str | None = None  # compact value/geometry hints for widgets
 
 
 @dataclass(frozen=True)
@@ -268,6 +270,23 @@ def _should_include_non_interactive(
     node_name: str | None,
     attributes: dict[str, str],
 ) -> bool:
+    tag = (node_name or "").upper()
+    if tag in {
+        "CANVAS",
+        "CODE",
+        "LABEL",
+        "LI",
+        "P",
+        "PRE",
+        "SVG",
+        "TABLE",
+        "TBODY",
+        "TD",
+        "TH",
+        "THEAD",
+        "TR",
+    }:
+        return True
     if (node_name or "").upper() == "META":
         return True
     for key, value in attributes.items():
@@ -376,6 +395,10 @@ def element_text_blob(element: ElementSnapshot) -> str:
         parts.append(str(element.descendant_text))
     if element.graphics:
         parts.append(str(element.graphics))
+    if element.context:
+        parts.append(str(element.context))
+    if element.widget:
+        parts.append(str(element.widget))
     attrs = element.attributes or {}
     for key in [
         "id",
@@ -477,6 +500,76 @@ def rank_elements(
         return list(elements)
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [item[2] for item in scored]
+
+
+def _is_actionable_snapshot_element(element: ElementSnapshot) -> bool:
+    tag = (element.node_name or "").upper()
+    role = (element.role or (element.attributes or {}).get("role") or "").lower()
+    reason = (element.interactive_reason or "").lower()
+    attrs = element.attributes or {}
+    return bool(
+        tag in INTERACTIVE_TAGS
+        or role in INTERACTIVE_ROLES
+        or element.handlers
+        or element.widget
+        or reason in {
+            "contenteditable",
+            "cursor_pointer",
+            "detected_handler",
+            "draggable",
+            "href",
+            "native_tag",
+            "onclick",
+            "role",
+            "scroll_container",
+            "tabindex",
+        }
+        or attrs.get("draggable") == "true"
+        or "onclick" in attrs
+        or "tabindex" in attrs
+        or "contenteditable" in attrs
+    )
+
+
+def _cap_elements_with_actionable_reserve(
+    elements: Sequence[ElementSnapshot],
+    *,
+    max_elements: int,
+    priority_ids: Sequence[str] | None,
+) -> list[ElementSnapshot]:
+    if max_elements <= 0:
+        return []
+    ordered = list(elements)
+    if len(ordered) <= max_elements:
+        return ordered
+
+    capped = ordered[:max_elements]
+    capped_ids = {element.stable_id for element in capped}
+    priority_set = set(priority_ids or ())
+    overflow_actionable = [
+        element
+        for element in ordered[max_elements:]
+        if element.stable_id not in capped_ids and _is_actionable_snapshot_element(element)
+    ]
+    if not overflow_actionable:
+        return capped
+
+    replace_positions = [
+        idx
+        for idx in range(len(capped) - 1, -1, -1)
+        if capped[idx].stable_id not in priority_set
+        and not _is_actionable_snapshot_element(capped[idx])
+    ]
+    if not replace_positions:
+        return capped
+
+    selected_positions = sorted(replace_positions[: len(overflow_actionable)])
+    for pos, element in zip(selected_positions, overflow_actionable):
+        capped_ids.discard(capped[pos].stable_id)
+        capped[pos] = element
+        capped_ids.add(element.stable_id)
+    return capped
+
 
 def search_elements(
     elements: Sequence[ElementSnapshot],
@@ -697,6 +790,164 @@ async def capture_snapshot(
                 return None
             suffix = "" if len(items) < 14 else "; ..."
             return "; ".join(items) + suffix
+
+        def _attrs_for(idx: int) -> dict[str, str]:
+            return attribute_map(attributes[idx], strings) if 0 <= idx < len(attributes) else {}
+
+        id_text: dict[str, str] = {}
+        label_for_text: dict[str, str] = {}
+        for idx in range(node_count):
+            attrs = _attrs_for(idx)
+            tag = (_decode_string(node_names[idx], strings) or "").upper()
+            text_hint = None
+            target_id = attrs.get("for")
+            if attrs.get("id") or (tag == "LABEL" and target_id):
+                text_hint = _short_descendant_text(idx, max_chars=100)
+            if attrs.get("id") and text_hint:
+                id_text[attrs["id"]] = text_hint
+            if tag == "LABEL" and target_id and text_hint:
+                label_for_text[target_id] = text_hint
+
+        def _ancestor_indices(start_index: int, *, max_depth: int = 8) -> list[int]:
+            out: list[int] = []
+            if not isinstance(parent_indices, list):
+                return out
+            pi = parent_indices[start_index] if start_index < len(parent_indices) else -1
+            depth = 0
+            while isinstance(pi, int) and 0 <= pi < node_count and depth < max_depth:
+                out.append(pi)
+                next_pi = parent_indices[pi] if pi < len(parent_indices) else -1
+                if next_pi == pi:
+                    break
+                pi = next_pi
+                depth += 1
+            return out
+
+        def _nearest_ancestor_text(
+            start_index: int,
+            tags: set[str],
+            *,
+            max_chars: int = 160,
+        ) -> str | None:
+            for ancestor in _ancestor_indices(start_index, max_depth=10):
+                tag = (_decode_string(node_names[ancestor], strings) or "").upper()
+                if tag not in tags:
+                    continue
+                text_hint = _short_descendant_text(ancestor, max_chars=max_chars)
+                if text_hint:
+                    return text_hint
+            return None
+
+        def _structure_summary(start_index: int, tag: str, attrs: dict[str, str]) -> str | None:
+            if tag == "TABLE":
+                rows: list[str] = []
+                stack = list(reversed(children_by_parent[start_index]))
+                visited = 0
+                while stack and visited < 200 and len(rows) < 4:
+                    idx = stack.pop()
+                    visited += 1
+                    child_tag = (_decode_string(node_names[idx], strings) or "").upper()
+                    if child_tag == "TR":
+                        row_text = _short_descendant_text(idx, max_chars=160)
+                        if row_text:
+                            rows.append(row_text)
+                        continue
+                    for child in reversed(children_by_parent[idx]):
+                        stack.append(child)
+                if rows:
+                    return "table rows: " + " | ".join(rows)
+            if tag in {"TR", "TD", "TH"}:
+                row_text = (
+                    _short_descendant_text(start_index, max_chars=180)
+                    if tag == "TR"
+                    else _nearest_ancestor_text(start_index, {"TR"}, max_chars=180)
+                )
+                if row_text:
+                    return f"row: {row_text}"
+            if tag in {"LABEL", "P", "PRE", "CODE", "LI"}:
+                text_hint = _short_descendant_text(start_index, max_chars=180)
+                if text_hint:
+                    return f"{tag.lower()} text: {text_hint}"
+            if tag == "CANVAS":
+                parts = ["canvas"]
+                for key in ("id", "class", "width", "height", "aria-label", "role"):
+                    value = attrs.get(key)
+                    if value:
+                        parts.append(f"{key}={truncate_attr_value(value, max_len=48)}")
+                return " ".join(parts) if len(parts) > 1 else "canvas drawing surface"
+            return None
+
+        def _nearby_context(start_index: int, attrs: dict[str, str]) -> str | None:
+            parts: list[str] = []
+            element_id_attr = attrs.get("id")
+            if element_id_attr and label_for_text.get(element_id_attr):
+                parts.append(f'label="{label_for_text[element_id_attr]}"')
+            labelledby = attrs.get("aria-labelledby")
+            if labelledby:
+                labels = [id_text.get(part) for part in labelledby.split()]
+                label_text = " ".join(label for label in labels if label)
+                if label_text:
+                    parts.append(f'aria-labels="{truncate_attr_value(label_text, max_len=120)}"')
+            label_ancestor = _nearest_ancestor_text(start_index, {"LABEL"}, max_chars=120)
+            if label_ancestor:
+                parts.append(f'ancestor-label="{label_ancestor}"')
+            row_text = _nearest_ancestor_text(start_index, {"TR"}, max_chars=160)
+            if row_text:
+                parts.append(f'row="{row_text}"')
+            card_text = _nearest_ancestor_text(
+                start_index,
+                {"ARTICLE", "SECTION", "LI", "TR", "TD", "DIV"},
+                max_chars=180,
+            )
+            if card_text and card_text not in {label_ancestor, row_text}:
+                parts.append(f'nearby="{card_text}"')
+            out = "; ".join(parts)
+            return out or None
+
+        def _widget_summary(
+            tag: str,
+            role: str | None,
+            attrs: dict[str, str],
+            bbox: tuple[float, float, float, float] | None,
+            element_handlers: dict[str, str] | None,
+        ) -> str | None:
+            role_l = (role or attrs.get("role") or "").lower()
+            type_l = (attrs.get("type") or "").lower()
+            handler_keys = {name.lower() for name in (element_handlers or {})}
+            interesting = (
+                role_l in {"slider", "spinbutton", "scrollbar"}
+                or type_l in {"range", "number"}
+                or attrs.get("draggable") == "true"
+                or bool(handler_keys & {"mousedown", "mousemove", "mouseup", "pointerdown", "pointermove", "pointerup", "dragstart", "dragover", "drop"})
+            )
+            value_keys = (
+                "aria-valuenow",
+                "aria-valuetext",
+                "aria-valuemin",
+                "aria-valuemax",
+                "min",
+                "max",
+                "step",
+                "value",
+                "orient",
+                "aria-orientation",
+            )
+            parts: list[str] = []
+            for key in value_keys:
+                value = attrs.get(key)
+                if value:
+                    parts.append(f"{key}={truncate_attr_value(value, max_len=48)}")
+            if attrs.get("draggable") == "true":
+                parts.append("draggable=true")
+            if handler_keys:
+                for key in sorted(handler_keys & {"mousedown", "mousemove", "mouseup", "pointerdown", "pointermove", "pointerup", "dragstart", "dragover", "drop"}):
+                    parts.append(f"handler={key}")
+            if bbox and (interesting or parts):
+                x, y, w, h = bbox
+                parts.append(f"bbox={int(round(x))},{int(round(y))},{int(round(w))},{int(round(h))}")
+            if not interesting and not parts:
+                return None
+            return " ".join(parts) if parts else None
         last_text_parent_index: int | None = None
         for index in range(node_count):
             node_name = _decode_string(node_names[index], strings)
@@ -847,7 +1098,15 @@ async def capture_snapshot(
                 _, _, w, h = bbox
                 if w and h and w > 0 and h > 0:
                     area = float(w * h)
-            graphics = _svg_graphics_summary(index) if is_interactive else None
+            tag_upper = (node_name or "").upper()
+            graphics = _svg_graphics_summary(index) if (is_interactive or tag_upper in {"SVG", "G"}) else None
+            structure = _structure_summary(index, tag_upper, node_attributes)
+            nearby_context = _nearby_context(index, node_attributes)
+            context_parts = [part for part in (structure, nearby_context) if part]
+            context_hint = "; ".join(context_parts) or None
+            widget_hint = _widget_summary(tag_upper, role, node_attributes, bbox, element_handlers)
+            if not is_interactive and not (text or descendant_text or graphics or context_hint or widget_hint):
+                continue
             elements.append(
                 ElementSnapshot(
                     stable_id=stable_id,
@@ -869,6 +1128,8 @@ async def capture_snapshot(
                     handlers=element_handlers,
                     descendant_text=descendant_text,
                     graphics=graphics,
+                    context=context_hint,
+                    widget=widget_hint,
                 )
             )
 
@@ -1015,7 +1276,14 @@ def format_snapshot_for_llm(
             elements = rank_elements(elements, query=query, page_url=snapshot.url)
         lines.append("Elements are sorted by predicted relevance to the goal.")
 
-    elements = elements[:max_elements]
+    if query:
+        elements = elements[:max_elements]
+    else:
+        elements = _cap_elements_with_actionable_reserve(
+            elements,
+            max_elements=max_elements,
+            priority_ids=priority_ids,
+        )
 
     # --- Build element label ---
     _IMPORTANT_ATTR_KEYS = [
@@ -1140,7 +1408,13 @@ def format_snapshot_for_llm(
         graphics_str = ""
         if element.graphics:
             graphics_str = f" [graphics: {truncate_attr_value(element.graphics, max_len=500)}]"
-        return f"- {element.stable_id}: {label}{hints}{handler_str}{graphics_str}"
+        context_str = ""
+        if element.context:
+            context_str = f" [context: {truncate_attr_value(element.context, max_len=500)}]"
+        widget_str = ""
+        if element.widget:
+            widget_str = f" [widget: {truncate_attr_value(element.widget, max_len=240)}]"
+        return f"- {element.stable_id}: {label}{hints}{handler_str}{graphics_str}{context_str}{widget_str}"
 
     def _format_elements_for_frame(
         frame_elements: list[ElementSnapshot], *, include_frame_hint: bool

@@ -28,6 +28,7 @@ Verified facts:
 - Stable IDs are generated with SHA-256-derived `el_...` IDs.
 - Handler extraction supports inline handlers and framework internals for React, Vue, and Angular.
 - Elements with detected handlers can be upgraded to interactive snapshot entries.
+- Snapshot entries can include context hints for nearby labels/tables/text and widget hints for values, drag handlers, and geometry.
 
 ## Agents And Structured Outputs
 
@@ -51,10 +52,19 @@ Verified facts:
 Verified default worker tools:
 
 - `click_element`
+- `click_at`
+- `focus_element`
 - `hover_element`
 - `type_text`
+- `transfer_text`
 - `drag_and_drop`
+- `pointer_drag`
+- `set_slider_value`
+- `resize_element`
 - `draw`
+- `select_text`
+- `apply_format`
+- `read_live_text`
 - `scroll`
 - `wait`
 - `watch_for_text`
@@ -62,7 +72,7 @@ Verified default worker tools:
 - `switch_to_main_frame`
 - `press_key_combination`
 
-Tools implemented but not in the default worker tool set include `inspect_element`, `search_page_attributes`, `navigate_to`, `take_screenshot`, and `execute_js`.
+Tools implemented but not in the default worker tool set include `find_elements`, `inspect_element`, `search_page_attributes`, `navigate_to`, `take_screenshot`, and `execute_js`.
 
 ## Observability
 

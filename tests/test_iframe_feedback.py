@@ -67,6 +67,33 @@ async def test_switch_to_iframe_rejects_non_iframe() -> None:
 
 
 @pytest.mark.asyncio
+async def test_frame_switch_noops_report_already() -> None:
+    iframe = _el(
+        "el_iframe",
+        node_name="IFRAME",
+        frame_id="frame_1",
+        frame_url="https://frame.example",
+    )
+    element_index = ElementIndex(elements={"el_iframe": iframe})
+    context = ToolContext(
+        page=cast(Any, object()),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id="frame_1",
+    )
+
+    iframe_result = await semantic.switch_to_iframe("el_iframe", context)
+    assert iframe_result.ok is True
+    assert "Already in iframe el_iframe" in iframe_result.message
+
+    context.active_frame_id = None
+    main_result = await semantic.switch_to_main_frame(context)
+    assert main_result.ok is True
+    assert main_result.message == "Already in main frame"
+
+
+@pytest.mark.asyncio
 async def test_active_frame_error_explains_main_vs_iframe() -> None:
     page = SimpleNamespace(url="https://example.com")
     iframe_el = _el(
@@ -210,6 +237,313 @@ async def test_click_at_dispatches_relative_coordinates(monkeypatch: pytest.Monk
     assert [event["type"] for event in mouse_events] == ["mouseMoved", "mousePressed", "mouseReleased"]
     assert mouse_events[0]["x"] == 75
     assert mouse_events[0]["y"] == 90
+
+
+@pytest.mark.asyncio
+async def test_focus_element_reports_focus_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el("el_input", node_name="INPUT", backend_node_id=123, role="textbox")
+    element_index = ElementIndex(elements={"el_input": element})
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_call_on_node(
+        backend_node_id: int,
+        _session: Any,
+        function_body: str,
+        args: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        del function_body, args
+        assert backend_node_id == 123
+        return {"result": {"value": {"active": True, "changed": True, "activeLabel": "INPUT#name"}}}
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_call_on_node", fake_call_on_node)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.focus_element("el_input", context)
+
+    assert result.ok is True
+    assert "Focus changed: true" in result.message
+
+
+@pytest.mark.asyncio
+async def test_pointer_drag_dispatches_mouse_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el("el_slider", node_name="DIV", backend_node_id=123, role="slider")
+    element_index = ElementIndex(elements={"el_slider": element})
+    events: list[tuple[str, dict[str, Any] | None]] = []
+
+    class _Session:
+        async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            events.append((method, params))
+            return {}
+
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, _Session()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_element_rect_info(_backend_node_id: int, _session: Any) -> dict[str, Any]:
+        return {"result": {"value": {"left": 10, "top": 20, "width": 100, "height": 40}}}
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_element_rect_info", fake_element_rect_info)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.pointer_drag("el_slider", 0, 20, 100, 20, context, steps=2)
+
+    assert result.ok is True
+    mouse_events = [params for method, params in events if method == "Input.dispatchMouseEvent"]
+    assert [event["type"] for event in mouse_events] == [
+        "mouseMoved",
+        "mousePressed",
+        "mouseMoved",
+        "mouseMoved",
+        "mouseReleased",
+    ]
+    assert mouse_events[0]["x"] == 10
+    assert mouse_events[-1]["x"] == 110
+
+
+@pytest.mark.asyncio
+async def test_set_slider_value_reports_refreshed_pointer_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el("el_slider", node_name="DIV", backend_node_id=123, role="slider")
+    element_index = ElementIndex(elements={"el_slider": element})
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+    call_bodies: list[str] = []
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_call_on_node(
+        backend_node_id: int,
+        _session: Any,
+        function_body: str,
+        args: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        del args
+        assert backend_node_id == 123
+        call_bodies.append(function_body)
+        if "function (desired)" in function_body:
+            return {"result": {"value": {"ok": False, "before": "0", "after": "0"}}}
+        return {"result": {"value": "75"}}
+
+    async def fake_element_rect_info(_backend_node_id: int, _session: Any) -> dict[str, Any]:
+        return {"result": {"value": {"left": 10, "top": 20, "width": 100, "height": 40}}}
+
+    async def fake_dispatch_pointer_drag_local(*_args: Any, **_kwargs: Any) -> tuple[bool, dict[str, float], None]:
+        return True, {
+            "start_local_x": 50.0,
+            "start_local_y": 20.0,
+            "end_local_x": 75.0,
+            "end_local_y": 20.0,
+            "start_viewport_x": 60.0,
+            "start_viewport_y": 40.0,
+            "end_viewport_x": 85.0,
+            "end_viewport_y": 40.0,
+            "width": 100.0,
+            "height": 40.0,
+        }, None
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_call_on_node", fake_call_on_node)
+    monkeypatch.setattr(semantic, "_element_rect_info", fake_element_rect_info)
+    monkeypatch.setattr(semantic, "_dispatch_pointer_drag_local", fake_dispatch_pointer_drag_local)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.set_slider_value("el_slider", 75, context)
+
+    assert result.ok is True
+    assert 'Previous value: "0"' in result.message
+    assert 'Current value: "75"' in result.message
+    assert len(call_bodies) == 2
+
+
+@pytest.mark.asyncio
+async def test_set_slider_value_uses_jquery_ui_slider_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el("el_handle", node_name="SPAN", backend_node_id=123, role=None)
+    element_index = ElementIndex(elements={"el_handle": element})
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+    bodies: list[str] = []
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_call_on_node(
+        backend_node_id: int,
+        _session: Any,
+        function_body: str,
+        args: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        del args
+        assert backend_node_id == 123
+        bodies.append(function_body)
+        assert "closest('.ui-slider')" in function_body
+        assert "slider('value', desiredNumber)" in function_body
+        return {
+            "result": {
+                "value": {
+                    "ok": True,
+                    "before": "8",
+                    "after": "4",
+                    "min": 0,
+                    "max": 10,
+                    "method": "jquery-ui",
+                    "root": "ancestor",
+                }
+            }
+        }
+
+    async def fail_dispatch(*_args: Any, **_kwargs: Any) -> tuple[bool, None, str]:
+        raise AssertionError("pointer fallback should not run after verified jQuery UI setting")
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"attrChanges": [{"tag": "div", "attr": "value", "old": "8", "new": "4"}]}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_call_on_node", fake_call_on_node)
+    monkeypatch.setattr(semantic, "_dispatch_pointer_drag_local", fail_dispatch)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.set_slider_value("el_handle", 4, context)
+
+    assert result.ok is True
+    assert 'Previous value: "8"' in result.message
+    assert 'Current value: "4"' in result.message
+    assert len(bodies) == 1
+
+
+@pytest.mark.asyncio
+async def test_set_slider_value_fails_when_pointer_does_not_change_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el("el_slider", node_name="DIV", backend_node_id=123, role="slider")
+    element_index = ElementIndex(elements={"el_slider": element})
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_call_on_node(
+        backend_node_id: int,
+        _session: Any,
+        function_body: str,
+        args: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        del args
+        assert backend_node_id == 123
+        if "function (desired)" in function_body:
+            return {"result": {"value": {"ok": False, "before": "8", "after": "8", "min": 0, "max": 10}}}
+        return {"result": {"value": "8"}}
+
+    async def fake_element_rect_info(_backend_node_id: int, _session: Any) -> dict[str, Any]:
+        return {"result": {"value": {"left": 10, "top": 20, "width": 100, "height": 40}}}
+
+    async def fake_dispatch_pointer_drag_local(*_args: Any, **_kwargs: Any) -> tuple[bool, dict[str, float], None]:
+        return True, {
+            "start_local_x": 50.0,
+            "start_local_y": 20.0,
+            "end_local_x": 40.0,
+            "end_local_y": 20.0,
+            "start_viewport_x": 60.0,
+            "start_viewport_y": 40.0,
+            "end_viewport_x": 50.0,
+            "end_viewport_y": 40.0,
+            "width": 100.0,
+            "height": 40.0,
+        }, None
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_call_on_node", fake_call_on_node)
+    monkeypatch.setattr(semantic, "_element_rect_info", fake_element_rect_info)
+    monkeypatch.setattr(semantic, "_dispatch_pointer_drag_local", fake_dispatch_pointer_drag_local)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.set_slider_value("el_slider", 4, context)
+
+    assert result.ok is False
+    assert "Set slider failed verification" in result.message
+    assert 'Current value: "8"' in result.message
+
+
+@pytest.mark.asyncio
+async def test_select_text_without_target_selects_full_contents(monkeypatch: pytest.MonkeyPatch) -> None:
+    element = _el("el_editor", node_name="DIV", backend_node_id=123, role="textbox")
+    element_index = ElementIndex(elements={"el_editor": element})
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, object()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_call_on_node(
+        backend_node_id: int,
+        _session: Any,
+        function_body: str,
+        args: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        del args
+        assert backend_node_id == 123
+        assert function_body.index("if (!wanted)") < function_body.index("const walker")
+        return {"result": {"value": {"ok": True, "selected": "Hello world"}}}
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_call_on_node", fake_call_on_node)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.select_text("el_editor", context)
+
+    assert result.ok is True
+    assert 'Selected text: "Hello world"' in result.message
 
 
 @pytest.mark.asyncio

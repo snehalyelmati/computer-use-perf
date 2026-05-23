@@ -54,7 +54,7 @@ Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlin
 ## Browser Interaction Principles
 
 - **DOM-first**: Use DOM methods (`.click()`, `.focus()`, `.innerText`) for element interactions — they work through any visual layer (overlays, modals, z-index stacking)
-- **CDP coordinates only when required**: Only use `Input.dispatchMouseEvent` (coordinate-based) for actions that genuinely need screen positions (e.g., drag-and-drop, draw). Never gate click/type/read on visibility checks.
+- **CDP coordinates only when required**: Only use `Input.dispatchMouseEvent` (coordinate-based) for actions that genuinely need screen positions (e.g., drag-and-drop, pointer drag, resize, draw). Never gate click/type/read on visibility checks.
 - **Minimize CDP round-trips**: Combine operations into single `_call_on_node` calls instead of chaining multiple CDP commands
 - **No `onTop` gates for DOM operations**: Don't check `document.elementFromPoint()` or `onTop` before DOM interactions — they bypass visual layering by design
 
@@ -66,7 +66,7 @@ Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlin
 
 ## Snapshot Scope
 
-- `capture_snapshot` only includes **interactive** elements — non-interactive elements need live DOM search via `page.evaluate()`
+- `capture_snapshot` includes interactive elements plus selected structural/text context such as labels, table rows/cells, paragraphs, code/pre, canvas, and SVG hints.
 - All HTML attributes are stored in `ElementSnapshot.attributes`, but only 9 are shown to the LLM in `format_snapshot_for_llm()`
 - **Handler introspection** (`src/agent/context/handlers.py`): a pre-snapshot `page.evaluate()` extracts JS event handler source from inline handlers and framework internals (React/Vue/Angular), stamps elements with `data-agent-hid`, and the snapshot correlates them. Handler hints appear as `[click:fn(); change:fn()]` in the LLM snapshot. Disable with `--no-handlers`.
 

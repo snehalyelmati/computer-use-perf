@@ -39,7 +39,7 @@ sequenceDiagram
     Env->>Env: BrowserGym validation
 ```
 
-This path deliberately keeps BrowserGym as the source of truth for success. Positive terminal BrowserGym validation stops as success; terminal zero/negative validation stops as failure. Internal `done=True` is only a proposal unless the completion policy accepts it.
+This path deliberately keeps BrowserGym as the source of truth for success. Positive terminal BrowserGym validation stops as success; terminal zero/negative validation stops as failure. Internal `done=True` is only a proposal; while BrowserGym validation is still non-terminal, model completion is converted into a recovery attempt instead of latching the runtime as done.
 
 ## Main Loop
 
@@ -110,7 +110,7 @@ sequenceDiagram
 - `Accessibility.getFullAXTree`
 - `Page.getFrameTree`
 
-The snapshot includes interactive elements, selected non-interactive structural/text signals, raw text lines, frame metadata, accessibility data, bounding boxes, attributes, handler hints, and descendant-text previews for unlabeled containers.
+The snapshot includes interactive elements, selected non-interactive structural/text signals, raw text lines, frame metadata, accessibility data, bounding boxes, attributes, handler hints, descendant-text previews for unlabeled containers, context hints for labels/tables/nearby text, and widget hints for values, drag handles, and geometry.
 
 Stable element IDs use an `el_` prefix and are derived from hashed snapshot/backend information. The LLM sees these IDs; internal CDP node IDs stay inside the tool layer.
 
@@ -179,7 +179,7 @@ The Worker can only use the default worker tool set and returns `StepOutput`. A 
 
 ## Unified Mode
 
-`--unified` keeps snapshot capture, Oracle, Filter, pruning, tools, metrics, and memory, but replaces the Orchestrator -> Worker handoff with a single tool-equipped agent. The unified agent returns `UnifiedStepOutput`, where `done=true` means the overall run goal is complete. It must provide `completion_evidence`; naked `done=true` without external success or observable evidence becomes one recovery attempt and then a blocked stop.
+`--unified` keeps snapshot capture, Oracle, Filter, pruning, tools, metrics, and memory, but replaces the Orchestrator -> Worker handoff with a single tool-equipped agent. The unified agent returns `UnifiedStepOutput`, where `done=true` means the overall run goal is complete. It must provide `completion_evidence`; naked `done=true` without external success or observable evidence becomes one recovery attempt and then a blocked stop. In BrowserGym runs, non-terminal validation also prevents internal `done=true` from latching before the environment reports success.
 
 This mode exists to test the tradeoff between separation of concerns and handoff overhead.
 
@@ -190,10 +190,19 @@ The default worker tool set is defined by `DEFAULT_WORKER_TOOLS` in `src/agent/c
 Default tools:
 
 - `click_element`
+- `click_at`
+- `focus_element`
 - `hover_element`
 - `type_text`
+- `transfer_text`
 - `drag_and_drop`
+- `pointer_drag`
+- `set_slider_value`
+- `resize_element`
 - `draw`
+- `select_text`
+- `apply_format`
+- `read_live_text`
 - `scroll`
 - `wait`
 - `watch_for_text`
@@ -201,7 +210,7 @@ Default tools:
 - `switch_to_main_frame`
 - `press_key_combination`
 
-The tool implementation lives in `src/agent/tools/semantic.py`. Many tools inject a MutationObserver before action execution and return feedback after a settle period. Tool wrappers persist compact structured facts such as DOM/value/URL/focus changes and block repeated identical no-change calls inside a step after two attempts.
+The tool implementation lives in `src/agent/tools/semantic.py`. Many tools inject a MutationObserver before action execution and return feedback after a settle period. Tool wrappers persist compact structured facts such as DOM/value/URL/focus changes and block repeated identical no-change calls in the current page state after two attempts.
 
 ## Observability
 

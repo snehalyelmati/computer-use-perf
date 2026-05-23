@@ -27,9 +27,9 @@ The important inversion is browser ownership:
 - The adapter requests `use_raw_page_output=True`, stores `obs["page"]`, and removes it before observations are pickled.
 - `BrowserAgentStepRuntime` runs one internal step against the live page.
 - The adapter returns `noop()` after the internal tool calls have already changed the page.
-- The benchmark snapshot includes compact SVG graphics summaries and bounding boxes when labels are not enough; the worker can use `click_at` for coordinate targets and `draw` for path targets.
+- The benchmark snapshot includes compact SVG graphics, non-interactive text/structure, context hints, widget values, and bounding boxes when labels are not enough; the worker can use coordinate, pointer-drag, slider, selection, formatting, and live-text tools for MiniWoB-style widgets.
 - BrowserGym remains the source of truth for task success. BrowserGym reward/termination is passed into the runtime as external validation; terminal positive validation stops success, and terminal zero/negative validation stops failure.
-- Internal `done=True` is treated as a proposal. It is accepted only with external success or concrete observable completion evidence.
+- Internal `done=True` is treated as a proposal. While BrowserGym validation is non-terminal, it triggers recovery instead of latching the runtime as done; terminal BrowserGym success is the authoritative success signal.
 
 ## Installation
 
@@ -146,7 +146,7 @@ AgentLab saves its normal experiment artifacts under its experiment root. This a
 - `run_summary.json`
 - optional `pages/` captures when enabled
 
-Each `AgentInfo` includes a compact markdown summary, numeric stats for AgentLab aggregation, and `extra_info` with the internal trace, tool call summary, log directory, validation signal, step token/cost usage, cumulative token/cost usage, and internal stop reason. AgentLab `stats` token/cost fields are per-step deltas; cumulative totals live under `extra_info.cumulative_usage`.
+Each `AgentInfo` includes a compact markdown summary, numeric stats for AgentLab aggregation, and `extra_info` with the internal trace, tool call summary, log directory, validation signal, step token/cost usage, cumulative token/cost usage, and internal stop reason. AgentLab `stats` token/cost fields are per-step deltas only; cumulative totals live under `extra_info.cumulative_usage` so AgentLab aggregation does not double-count them.
 
 The generic runner writes these additional files inside each AgentLab study directory:
 

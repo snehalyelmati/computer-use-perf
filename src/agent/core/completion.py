@@ -131,6 +131,14 @@ def decide_completion(inputs: CompletionInputs) -> CompletionDecision:
     evidence_text = (inputs.completion_evidence or "").strip()
     has_model_evidence = bool(evidence_text)
     if inputs.model_done:
+        if validation and validation.source == "browsergym" and not validation.terminal:
+            return _recover_or_block(
+                inputs,
+                blocked_reason="blocked_done_without_validation",
+                recovery_reason=(
+                    "model proposed done=true before BrowserGym reported terminal success"
+                ),
+            )
         if has_model_evidence and (
             inputs.successful_tools > 0 or inputs.observable_evidence
         ):

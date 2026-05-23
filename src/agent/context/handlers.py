@@ -154,10 +154,13 @@ _EXTRACT_HANDLERS_JS = """
 
       const style = window.getComputedStyle(el);
       if (!style || style.cursor !== 'pointer') return;
-      const label = (el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.textContent || '').trim();
-      if (!label) return;
       const rects = el.getClientRects();
       if (!rects || rects.length === 0) return;
+      const rect = rects[0];
+      if (!rect || rect.width <= 0 || rect.height <= 0) return;
+      const label = (el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.textContent || '').trim();
+      const structuralHint = (el.id || el.className || el.getAttribute('role') || el.getAttribute('data-action') || '').toString().trim();
+      if (!label && !structuralHint) return;
       handlers.click = bestHandler(handlers.click, 'cursor:pointer');
     } catch(e) {}
   }

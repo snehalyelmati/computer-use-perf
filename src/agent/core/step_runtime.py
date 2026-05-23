@@ -368,7 +368,11 @@ class BrowserAgentStepRuntime:
             )
 
         if self._terminal_stop_reason is not None:
-            if validation is not None and not validation.terminal:
+            if (
+                validation is not None
+                and not validation.terminal
+                and self._terminal_stop_reason == "done"
+            ):
                 self._terminal_stop_reason = None
             else:
                 return RuntimeStepResult(
@@ -1085,6 +1089,8 @@ class BrowserAgentStepRuntime:
             step_output=step_output,
             observable_change=completion_inputs.observable_evidence,
         )
+        if completion_decision.terminal:
+            self._terminal_stop_reason = completion_decision.stop_reason
         self._finish_tool_step(
             step_output=step_output,
             worker_goal=step_output.step_goal,
@@ -1156,7 +1162,7 @@ class BrowserAgentStepRuntime:
             completion_inputs = CompletionInputs(
                 validation=self.state.last_validation_signal,
                 model_done=True,
-                completion_evidence=decision.completion_evidence or decision.rationale,
+                completion_evidence=decision.completion_evidence,
                 successful_tools=0,
                 same_worker_goal=bool(
                     decision.worker_goal and decision.worker_goal == previous_worker_goal
@@ -1191,6 +1197,8 @@ class BrowserAgentStepRuntime:
                     tool_calls="",
                 )
             stop_reason = completion_decision.stop_reason if completion_decision.terminal else "done"
+            if completion_decision.terminal:
+                self._terminal_stop_reason = stop_reason
             self._emit(
                 "step_end",
                 step=self.state.step,
@@ -1219,6 +1227,7 @@ class BrowserAgentStepRuntime:
         )
         completion_decision = self.state.last_completion_decision
         if completion_decision and completion_decision.terminal:
+            self._terminal_stop_reason = completion_decision.stop_reason
             self._emit(
                 "step_end",
                 step=self.state.step,

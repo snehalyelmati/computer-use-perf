@@ -65,6 +65,54 @@ def test_container_expansion_includes_parent_siblings() -> None:
     assert "el_complete" in kept_ids
 
 
+def test_snapshot_format_includes_context_and_widget_hints() -> None:
+    snapshot = PageSnapshot(
+        url="https://example.test",
+        title="Test",
+        elements=[
+            ElementSnapshot(
+                stable_id="el_slider",
+                backend_node_id=1,
+                node_name="INPUT",
+                role="slider",
+                name="Volume",
+                text=None,
+                bounding_box=(10, 20, 100, 20),
+                attributes={"type": "range", "min": "0", "max": "100", "value": "50"},
+                frame_id=None,
+                frame_url=None,
+                frame_name=None,
+                context='label="Volume control"; row="Audio Volume 50"',
+                widget="min=0 max=100 value=50 bbox=10,20,100,20",
+            )
+        ],
+        raw_text=[],
+    )
+
+    rendered = format_snapshot_for_llm(snapshot)
+
+    assert "[context: label=\"Volume control\"; row=\"Audio Volume 50\"]" in rendered
+    assert "[widget: min=0 max=100 value=50 bbox=10,20,100,20]" in rendered
+
+
+def test_snapshot_format_reserves_capacity_for_actionable_controls() -> None:
+    structural = [
+        _el(f"el_text_{idx}", node_name="P", text=f"Instruction paragraph {idx}")
+        for idx in range(6)
+    ]
+    target = _el("el_target", node_name="BUTTON", role="button", name="Submit")
+    snapshot = PageSnapshot(
+        url="https://example.test",
+        title="Test",
+        elements=[*structural, target],
+        raw_text=[],
+    )
+
+    rendered = format_snapshot_for_llm(snapshot, max_elements=3)
+
+    assert "- el_target:" in rendered
+
+
 def test_instruction_anchored_keep_matches_quoted_phrase() -> None:
     useful_lines = ['Play the audio, then click "Complete" to reveal the real code.']
     phrases = extract_instruction_phrases(useful_lines, oracle_hint=None)

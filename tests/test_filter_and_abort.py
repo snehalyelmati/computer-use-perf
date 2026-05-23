@@ -17,7 +17,7 @@ from src.agent.config import AgentConfig, BrowserConfig, LLMConfig
 from src.agent.context.snapshot import ElementSnapshot, PageSnapshot
 from src.agent.core import agent as agent_mod
 from src.agent.core import step_runtime as step_runtime_mod
-from src.agent.core.completion import ValidationSignal
+from src.agent.core.completion import CompletionDecision, ValidationSignal
 from src.agent.metrics import UsageStats
 from src.agent.models.actions import OracleAdvice, OrchestratorDecision, SnapshotFilterOutput, StepOutput
 
@@ -125,6 +125,75 @@ async def test_step_runtime_clears_internal_stop_latch_on_nonterminal_validation
 
     assert result.stop_reason == "max_steps"
     assert result.summary == "Internal max_steps reached."
+
+
+@pytest.mark.asyncio
+async def test_step_runtime_keeps_blocked_latch_on_nonterminal_validation(
+    tmp_path: Path,
+) -> None:
+    runtime = step_runtime_mod.BrowserAgentStepRuntime(
+        AgentConfig(goal="Test goal", max_steps=3, log_dir=str(tmp_path), metrics_enabled=False),
+        LLMConfig(),
+    )
+    runtime._agents = object()  # type: ignore[assignment]
+    runtime._terminal_stop_reason = "blocked_completion"
+
+    result = await runtime.run_one_step(
+        SimpleNamespace(page=SimpleNamespace(url="https://example.com")),
+        validation=ValidationSignal(
+            source="browsergym",
+            status="neutral",
+            terminal=False,
+            reward=0.0,
+        ),
+    )
+
+    assert result.done is True
+    assert result.stop_reason == "blocked_completion"
+    assert result.summary == "Internal runtime already stopped: blocked_completion."
+
+
+@pytest.mark.asyncio
+async def test_split_done_gate_does_not_use_rationale_as_completion_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = step_runtime_mod.BrowserAgentStepRuntime(
+        AgentConfig(goal="Test goal", max_steps=3, log_dir=str(tmp_path), metrics_enabled=False),
+        LLMConfig(),
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_orchestrator(**_kwargs: Any) -> OrchestratorDecision:
+        return OrchestratorDecision(
+            done=True,
+            worker_goal="Conclude",
+            rationale="The task appears complete.",
+            completion_evidence=None,
+        )
+
+    def fake_decide_completion(inputs: Any) -> CompletionDecision:
+        captured["completion_evidence"] = inputs.completion_evidence
+        return CompletionDecision(action="blocked", stop_reason="blocked_done_without_evidence", reason="no evidence")
+
+    monkeypatch.setattr(runtime, "_run_orchestrator", fake_orchestrator)
+    monkeypatch.setattr(step_runtime_mod, "decide_completion", fake_decide_completion)
+
+    result = await runtime._run_orchestrator_worker_step(
+        session=SimpleNamespace(page=SimpleNamespace(url="https://example.com")),
+        snapshot=_snapshot(url="https://example.com", title="Test", element_name="Done"),
+        tool_context=SimpleNamespace(),
+        useful_lines=[],
+        useful_block="",
+        diff_text="+text Complete",
+        oracle_hint="",
+        priority_ids=[],
+        step_deadline=10_000.0,
+        step_started=0.0,
+    )
+
+    assert captured["completion_evidence"] is None
+    assert result.stop_reason == "blocked_done_without_evidence"
 
 
 @pytest.mark.asyncio

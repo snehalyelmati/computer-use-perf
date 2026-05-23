@@ -159,6 +159,17 @@ def _validation_from_obs(obs: dict[str, Any]) -> ValidationSignal | None:
     )
 
 
+def _neutral_browsergym_validation() -> ValidationSignal:
+    return ValidationSignal(
+        source="browsergym",
+        status="neutral",
+        terminal=False,
+        reward=0.0,
+        evidence=("validation=pending",),
+        reason="BrowserGym validation pending",
+    )
+
+
 BENCHMARK_DEFAULT_MODEL = "z-ai/glm-4.7:nitro"
 
 T = TypeVar("T")
@@ -302,6 +313,8 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
             self._last_validation = _validation_from_obs(validation_payload)
         else:
             self._last_validation = _validation_from_obs(processed)
+        if self._last_validation is None:
+            self._last_validation = _neutral_browsergym_validation()
         return processed
 
     def get_action(self, obs: dict[str, Any]) -> tuple[str, Any]:
@@ -354,10 +367,6 @@ class ComputerUseAgentLabAgent(_FallbackAgent):
             "computer_use_output_tokens": step_output_tokens,
             "computer_use_total_tokens": step_total_tokens,
             "computer_use_cost_usd": step_cost,
-            "computer_use_cumulative_input_tokens": result.input_tokens,
-            "computer_use_cumulative_output_tokens": result.output_tokens,
-            "computer_use_cumulative_total_tokens": result.total_tokens,
-            "computer_use_cumulative_cost_usd": result.cost_usd or 0.0,
             "computer_use_internal_done": int(result.done),
         }
         lines = [

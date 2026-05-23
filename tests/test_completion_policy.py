@@ -93,6 +93,26 @@ def test_done_with_evidence_and_successful_tool_stops() -> None:
     assert decision.stop_reason == "done"
 
 
+def test_browsergym_nonterminal_done_with_evidence_recovers() -> None:
+    decision = decide_completion(
+        CompletionInputs(
+            validation=ValidationSignal(
+                source="browsergym",
+                status="neutral",
+                terminal=False,
+                reward=0.0,
+            ),
+            model_done=True,
+            completion_evidence="The form appears submitted.",
+            successful_tools=1,
+            value_changed=True,
+        )
+    )
+
+    assert decision.action == "recover_once"
+    assert decision.accepted_done is False
+
+
 def test_consecutive_tool_limit_steps_block() -> None:
     decision = decide_completion(CompletionInputs(consecutive_tool_limit_steps=2))
 

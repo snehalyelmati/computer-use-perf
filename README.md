@@ -88,10 +88,19 @@ Key components:
 The default worker tool set is intentionally constrained:
 
 - `click_element(element_id)`
+- `click_at(element_id, x, y)`
+- `focus_element(element_id)`
 - `hover_element(element_id, duration_ms=2000)`
 - `type_text(element_id, text)`
+- `transfer_text(source_id, target_id)`
 - `drag_and_drop(source_id, target_id)`
+- `pointer_drag(element_id, start_x, start_y, end_x, end_y, steps=12)`
+- `set_slider_value(element_id, value)`
+- `resize_element(element_id, delta_width, delta_height)`
 - `draw(element_id, path)`
+- `select_text(element_id, text=None, occurrence=1)`
+- `apply_format(command)`
+- `read_live_text(element_id=None)`
 - `scroll(delta_x, delta_y, element_id=None)`
 - `wait(milliseconds)`
 - `watch_for_text(text, timeout_ms=10000)`
@@ -99,7 +108,7 @@ The default worker tool set is intentionally constrained:
 - `switch_to_main_frame()`
 - `press_key_combination(keys)`
 
-Additional tools such as `inspect_element`, `search_page_attributes`, `execute_js`, `take_screenshot`, and `navigate_to` exist in the tool layer but are not part of the default worker tool set.
+Additional tools such as `find_elements`, `inspect_element`, `search_page_attributes`, `execute_js`, `take_screenshot`, and `navigate_to` exist in the tool layer but are not part of the default worker tool set.
 
 ## Quick Start
 

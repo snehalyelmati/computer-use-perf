@@ -139,6 +139,9 @@ def test_obs_preprocessor_strips_raw_page_before_pickle() -> None:
     processed = agent.obs_preprocessor({"page": page, "goal": "Click the button", "url": page.url})
 
     assert "page" not in processed
+    assert agent._last_validation is not None
+    assert agent._last_validation.status == "neutral"
+    assert agent._last_validation.terminal is False
     pickle.dumps(processed)
 
 
@@ -160,7 +163,8 @@ def test_get_action_runs_internal_step_and_returns_noop() -> None:
     assert info["stats"]["computer_use_steps"] == 1
     assert info["stats"]["computer_use_input_tokens"] == 5
     assert info["stats"]["computer_use_output_tokens"] == 3
-    assert info["stats"]["computer_use_cumulative_input_tokens"] == 11
+    assert "computer_use_cumulative_input_tokens" not in info["stats"]
+    assert "computer_use_cumulative_total_tokens" not in info["stats"]
     assert info["extra_info"]["cumulative_usage"]["total_tokens"] == 18
     assert info["extra_info"]["tool_calls"] == "click_element(el_123)"
 

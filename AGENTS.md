@@ -72,12 +72,12 @@ Tool Docstrings:
 - Describe behavior, not internals — don't mention CDP, snapshot dicts, or interactivity filters.
 
 Snapshot Scope:
-- `capture_snapshot` only includes interactive elements — non-interactive elements need live DOM search via `page.evaluate()`.
+- `capture_snapshot` includes interactive elements plus selected structural/text context such as labels, table rows/cells, paragraphs, code/pre, canvas, and SVG hints.
 - All HTML attributes are stored in `ElementSnapshot.attributes`, but only 9 are shown to the LLM in `format_snapshot_for_llm()`.
 - Handler introspection (`src/agent/context/handlers.py`): extracts JS event handler source from inline handlers and framework internals (React/Vue/Angular). Handler hints appear as `[click:fn(); change:fn()]` in the LLM snapshot.
 
 Browser Interaction Principles:
 - DOM-first: use DOM methods (`.click()`, `.focus()`, `.innerText`) — they work through any visual layer (overlays, modals, z-index stacking).
-- CDP coordinates only when required: only use `Input.dispatchMouseEvent` for actions needing screen positions (e.g., drag-and-drop, draw). Never gate click/type/read on visibility checks.
+- CDP coordinates only when required: only use `Input.dispatchMouseEvent` for actions needing screen positions (e.g., drag-and-drop, pointer drag, resize, draw). Never gate click/type/read on visibility checks.
 - Minimize CDP round-trips: combine operations into single `_call_on_node` calls.
 - No `onTop` gates for DOM operations: don't check `elementFromPoint()` before DOM interactions.
