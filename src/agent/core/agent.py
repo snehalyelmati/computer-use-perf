@@ -974,7 +974,7 @@ def _completion_inputs_from_step(
     previous_trace_goal = (
         str(state.step_trace[-1].get("goal") or "")
         if state.step_trace
-        else (state.last_worker_goal or "")
+        else ""
     )
     return CompletionInputs(
         validation=validation,
@@ -4188,7 +4188,7 @@ class BrowserAgent:
                     completion_inputs = CompletionInputs(
                         validation=self.state.last_validation_signal,
                         model_done=True,
-                        completion_evidence=decision.completion_evidence or decision.rationale,
+                        completion_evidence=decision.completion_evidence,
                         successful_tools=0,
                         same_worker_goal=bool(
                             decision.worker_goal and decision.worker_goal == previous_worker_goal

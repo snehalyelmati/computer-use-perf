@@ -1507,7 +1507,13 @@ async def click_at(
     before_height = float(value.get("beforeHeight", height) or 0)
     raw_x = float(x)
     raw_y = float(y)
-    if (
+    if 0 <= raw_x <= width and 0 <= raw_y <= height:
+        local_x = raw_x
+        local_y = raw_y
+        page_x = left + local_x
+        page_y = top + local_y
+        coord_mode = "relative"
+    elif (
         before_width > 0
         and before_height > 0
         and before_left <= raw_x <= before_left + before_width
@@ -2434,6 +2440,7 @@ _WATCH_FOR_TEXT_JS = """
     function norm(value) {
         return (value || '').replace(/\\s+/g, ' ').trim();
     }
+    const wanted = norm(text);
     function clickableTarget(el) {
         let cur = el;
         while (cur && cur !== document.body) {
@@ -2447,7 +2454,7 @@ _WATCH_FOR_TEXT_JS = """
         for (const el of all) {
             if (SKIP.has(el.tagName)) continue;
             const t = norm(el.textContent);
-            if (t !== text) continue;
+            if (!t.includes(wanted)) continue;
             const target = clickableTarget(el);
             if (target) return target;
         }
@@ -2517,13 +2524,13 @@ async def watch_for_text(
         )
         clicked_tag = str(result.get("tag") or "element").lower()
         clicked_text = str(result.get("text") or text)
-        base_msg = f"Watched and clicked exact text '{text}' on {clicked_tag}"
+        base_msg = f"Watched and clicked text containing '{text}' on {clicked_tag}"
         message = _format_verification(mutations, base_msg)
         if not _build_change_lines(mutations or {}):
             return ToolResult(
                 ok=True,
                 message=(
-                    f"Found exact text '{clicked_text}' and clicked it, but no observable "
+                    f"Found matching text '{clicked_text}' and clicked it, but no observable "
                     "page change followed. Do not repeat this watch; if the relevant field already has the "
                     "desired value, proceed, otherwise stop this step and wait for a fresh snapshot or use a stable element ID."
                 ),

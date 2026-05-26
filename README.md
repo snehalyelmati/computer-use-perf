@@ -137,6 +137,14 @@ uv sync --extra agentlab
 uv run playwright install chromium
 ```
 
+Before running MiniWoB, point BrowserGym at MiniWoB++ assets:
+
+```bash
+mkdir -p .benchmarks
+git clone https://github.com/Farama-Foundation/miniwob-plusplus .benchmarks/miniwob-plusplus
+# Or export MINIWOB_URL=file:///path/to/miniwob-plusplus/miniwob/html/miniwob/
+```
+
 Run the current MiniWoB verification benchmark path:
 
 ```bash

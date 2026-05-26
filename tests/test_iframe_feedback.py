@@ -241,6 +241,49 @@ async def test_click_at_dispatches_relative_coordinates(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_click_at_treats_overlapping_small_coordinates_as_relative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    element = _el("el_svg", node_name="SVG", backend_node_id=123, role="image")
+    element_index = ElementIndex(elements={"el_svg": element})
+    events: list[tuple[str, dict[str, Any] | None]] = []
+
+    class _Session:
+        async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            events.append((method, params))
+            return {}
+
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, _Session()),
+        element_index=element_index,
+        frame_sessions={},
+        active_frame_id=None,
+    )
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_element_rect_info(_backend_node_id: int, _session: Any) -> dict[str, Any]:
+        return {"result": {"value": {"left": 10, "top": 20, "width": 100, "height": 80}}}
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_element_rect_info", fake_element_rect_info)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.click_at("el_svg", 25, 30, context)
+
+    assert result.ok is True
+    mouse_events = [params for method, params in events if method == "Input.dispatchMouseEvent"]
+    assert mouse_events[0]["x"] == 35
+    assert mouse_events[0]["y"] == 50
+    assert "relative" in result.message
+
+
+@pytest.mark.asyncio
 async def test_focus_element_reports_focus_change(monkeypatch: pytest.MonkeyPatch) -> None:
     element = _el("el_input", node_name="INPUT", backend_node_id=123, role="textbox")
     element_index = ElementIndex(elements={"el_input": element})
@@ -1013,6 +1056,41 @@ async def test_watch_for_text_requires_observable_change(monkeypatch: pytest.Mon
     assert result.ok is True
     assert "no observable page change" in result.message
     assert "Do not repeat this watch" in result.message
+
+
+@pytest.mark.asyncio
+async def test_watch_for_text_matches_normalized_substrings(monkeypatch: pytest.MonkeyPatch) -> None:
+    expressions: list[str] = []
+
+    class _Session:
+        async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            assert method == "Runtime.evaluate"
+            assert params is not None
+            expressions.append(str(params["expression"]))
+            return {"result": {"value": {"status": "found", "tag": "BUTTON", "text": "Item 16"}}}
+
+    context = ToolContext(
+        page=cast(Any, SimpleNamespace(url="https://example.com")),
+        cdp_session=cast(Any, _Session()),
+        element_index=ElementIndex(elements={}),
+        frame_sessions={},
+        active_frame_id=None,
+    )
+
+    async def fake_inject_observer(_session: Any) -> bool:
+        return True
+
+    async def fake_collect_mutations_with_ids(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"addedElements": ["div"]}
+
+    monkeypatch.setattr(semantic, "_inject_observer", fake_inject_observer)
+    monkeypatch.setattr(semantic, "_collect_mutations_with_ids", fake_collect_mutations_with_ids)
+
+    result = await semantic.watch_for_text("16", context, timeout_ms=100)
+
+    assert result.ok is True
+    assert ".includes(wanted)" in expressions[0]
+    assert "Watched and clicked text containing '16'" in result.message
 
 
 @pytest.mark.asyncio
