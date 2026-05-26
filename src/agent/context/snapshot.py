@@ -122,6 +122,21 @@ _GENERIC_ICON_HINT_TOKENS = {
     "wrapper",
 }
 _DRAG_CLASS_HINT_TOKENS = {"drag", "draggable", "drop", "droppable", "resizable", "resize", "sortable"}
+_SELECTABLE_TEXT_CONTAINER_TAGS = {
+    "ARTICLE",
+    "ASIDE",
+    "BLOCKQUOTE",
+    "DD",
+    "DIV",
+    "DT",
+    "FIGCAPTION",
+    "FOOTER",
+    "HEADER",
+    "MAIN",
+    "SECTION",
+    "SPAN",
+}
+_SELECTABLE_TEXT_MAX_AREA = 600_000.0
 
 
 def sanitize_class_value(
@@ -215,6 +230,37 @@ def _looks_like_semantic_icon_control(
     if width < 4 or height < 4 or width > 96 or height > 96:
         return False
     return bool(_semantic_hint_tokens(attributes))
+
+
+def _looks_like_selectable_text_container(
+    node_name: str | None,
+    attributes: dict[str, str],
+    bbox: tuple[float, float, float, float] | None,
+    text: str | None,
+    *,
+    has_direct_text: bool,
+    child_element_count: int,
+) -> bool:
+    """Identify visible text containers worth exposing for read/select/copy tools."""
+    tag = (node_name or "").upper()
+    if tag not in _SELECTABLE_TEXT_CONTAINER_TAGS:
+        return False
+    if attributes.get("hidden") is not None or attributes.get("aria-hidden", "").lower() == "true":
+        return False
+    if (attributes.get("role") or "").lower() in INTERACTIVE_ROLES:
+        return False
+    normalized = _normalize_text(text) or ""
+    if len(normalized) < 2 or not any(ch.isalnum() for ch in normalized):
+        return False
+    if not has_direct_text and child_element_count > 2:
+        return False
+    if bbox is not None:
+        _, _, width, height = bbox
+        if width <= 0 or height <= 0:
+            return False
+        if width * height > _SELECTABLE_TEXT_MAX_AREA and child_element_count > 0:
+            return False
+    return True
 
 
 def truncate_attr_value(value: str, *, max_len: int) -> str:
@@ -845,6 +891,33 @@ async def capture_snapshot(
                 out = out[: max_chars - 3].rstrip() + "..."
             return out or None
 
+        def _has_direct_text_child(start_index: int) -> bool:
+            if not (0 <= start_index < node_count):
+                return False
+            for child in children_by_parent[start_index]:
+                node_name_local = _decode_string(node_names[child], strings)
+                if node_name_local != "#text":
+                    continue
+                node_value_local = _decode_string(node_values[child], strings) if child < len(node_values) else ""
+                if isinstance(text_values, dict):
+                    text_value_raw_local = text_values.get(child, "")
+                else:
+                    text_value_raw_local = text_values[child] if child < len(text_values) else ""
+                text_value_local = _decode_string(text_value_raw_local, strings)
+                if _normalize_text(text_value_local or node_value_local):
+                    return True
+            return False
+
+        def _child_element_count(start_index: int) -> int:
+            if not (0 <= start_index < node_count):
+                return 0
+            count = 0
+            for child in children_by_parent[start_index]:
+                child_name = _decode_string(node_names[child], strings)
+                if child_name and child_name != "#text":
+                    count += 1
+            return count
+
         def _svg_graphics_summary(start_index: int) -> str | None:
             """Summarize visible SVG descendants with local geometry attributes."""
             if not (0 <= start_index < node_count):
@@ -1107,10 +1180,25 @@ async def capture_snapshot(
                 is_interactive = True
                 interactive_reason = "semantic_icon"
                 interactive_confidence = 0.55
-            if not is_interactive and not _should_include_non_interactive(
+            selectable_text_hint = None
+            non_interactive_reason = "non_interactive_hint"
+            should_include_non_interactive = _should_include_non_interactive(
                 node_name, node_attributes,
-            ):
-                continue
+            )
+            if not is_interactive and not should_include_non_interactive:
+                selectable_text_hint = _short_descendant_text(index, max_chars=240)
+                if _looks_like_selectable_text_container(
+                    node_name,
+                    node_attributes,
+                    bbox,
+                    selectable_text_hint,
+                    has_direct_text=_has_direct_text_child(index),
+                    child_element_count=_child_element_count(index),
+                ):
+                    should_include_non_interactive = True
+                    non_interactive_reason = "selectable_text"
+                else:
+                    continue
 
             stable_id_base: str
             if backend_node_id is not None:
@@ -1194,6 +1282,8 @@ async def capture_snapshot(
                 and (node_name or "").upper() in _SVG_GRAPHIC_TAGS
             ):
                 descendant_text = descendant_text or _short_descendant_text(index)
+            if not is_interactive and selectable_text_hint and not text:
+                descendant_text = selectable_text_hint
 
             in_viewport = _in_viewport(bbox, viewport_width=viewport_width, viewport_height=viewport_height)
             area = None
@@ -1223,7 +1313,7 @@ async def capture_snapshot(
                     frame_id=element_frame_id,
                     frame_url=frame_url,
                     frame_name=frame_name,
-                    interactive_reason=interactive_reason if is_interactive else "non_interactive_hint",
+                    interactive_reason=interactive_reason if is_interactive else non_interactive_reason,
                     interactive_confidence=float(interactive_confidence) if is_interactive else 0.25,
                     in_viewport=in_viewport,
                     area=area,

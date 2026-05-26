@@ -13,6 +13,7 @@ from src.agent.context.snapshot import (
     PageSnapshot,
     _iter_svg_text_fallback_candidates,
     _looks_like_semantic_icon_control,
+    _looks_like_selectable_text_container,
     format_snapshot_for_llm,
     rank_elements,
     sanitize_class_value,
@@ -207,6 +208,39 @@ def test_semantic_icon_control_uses_class_hint_and_bbox() -> None:
         (10, 20, 14, 14),
         name=None,
         text=None,
+    )
+
+
+def test_selectable_text_container_accepts_leaf_text_div() -> None:
+    assert _looks_like_selectable_text_container(
+        "DIV",
+        {"id": "content"},
+        (10, 20, 240, 24),
+        "Highlight this paragraph",
+        has_direct_text=True,
+        child_element_count=0,
+    )
+
+
+def test_selectable_text_container_rejects_large_wrapper() -> None:
+    assert not _looks_like_selectable_text_container(
+        "DIV",
+        {"id": "page"},
+        (0, 0, 1200, 900),
+        "Header Form body Submit Footer",
+        has_direct_text=False,
+        child_element_count=8,
+    )
+
+
+def test_selectable_text_container_rejects_missing_text() -> None:
+    assert not _looks_like_selectable_text_container(
+        "DIV",
+        {"id": "empty"},
+        (10, 20, 240, 24),
+        None,
+        has_direct_text=True,
+        child_element_count=0,
     )
 
 

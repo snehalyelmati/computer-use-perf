@@ -90,7 +90,7 @@ _OBSERVER_INJECT_JS = """
   const TRACKED_ATTRS = new Set([
     'aria-expanded','aria-checked','aria-selected','aria-hidden',
     'aria-disabled','disabled','checked','selected','open','hidden',
-    'value','href','src','class'
+    'value','href','src','class','style'
   ]);
   const INTERACTIVE_TAGS_SET = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','OPTION','IFRAME']);
   const INTERACTIVE_ROLES_SET = new Set([
@@ -2074,6 +2074,76 @@ async def set_slider_value(element_id: str, value: float, context: ToolContext) 
     return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
 
 
+def _dimension_changed_in_direction(
+    before: float,
+    after: float,
+    delta: float,
+    *,
+    tolerance: float = 0.5,
+) -> bool:
+    if abs(float(delta)) <= tolerance:
+        return True
+    if float(delta) < 0:
+        return float(after) < float(before) - tolerance
+    return float(after) > float(before) + tolerance
+
+
+def _resize_change_verified(
+    *,
+    before_width: float,
+    before_height: float,
+    after_width: float,
+    after_height: float,
+    delta_width: float,
+    delta_height: float,
+) -> bool:
+    if abs(float(delta_width)) <= 0.5 and abs(float(delta_height)) <= 0.5:
+        return False
+    return _dimension_changed_in_direction(
+        before_width, after_width, delta_width
+    ) and _dimension_changed_in_direction(before_height, after_height, delta_height)
+
+
+def _resize_dimensions_message(
+    *,
+    before_width: float,
+    before_height: float,
+    after_width: float,
+    after_height: float,
+) -> str:
+    return (
+        f"dimensions {before_width:.1f}x{before_height:.1f} -> "
+        f"{after_width:.1f}x{after_height:.1f}"
+    )
+
+
+async def _read_element_rect(
+    backend_node_id: int,
+    session: CDPSession,
+) -> dict[str, float] | None:
+    info = await _element_rect_info(backend_node_id, session)
+    rect = (info or {}).get("result", {}).get("value") or {}
+    try:
+        width = float(rect.get("width") or 0)
+        height = float(rect.get("height") or 0)
+        left = float(rect.get("left") or 0)
+        top = float(rect.get("top") or 0)
+    except (TypeError, ValueError):
+        return None
+    return {"left": left, "top": top, "width": width, "height": height}
+
+
+def _is_unqualified_text_selection_control(element: ElementSnapshot, text: str | None) -> bool:
+    if (text or "").strip():
+        return False
+    tag = (element.node_name or "").upper()
+    attrs = element.attributes or {}
+    input_type = (attrs.get("type") or "").lower()
+    if tag == "BUTTON" or tag == "SELECT" or tag == "OPTION":
+        return True
+    return tag == "INPUT" and input_type in {"button", "checkbox", "color", "file", "radio", "reset", "submit"}
+
+
 async def resize_element(
     element_id: str,
     delta_width: float,
@@ -2090,10 +2160,9 @@ async def resize_element(
         return frame_error
     session = await _session_for_element(element, context)
     await _inject_observer(session)
-    info = await _element_rect_info(element.backend_node_id, session)
-    rect = (info or {}).get("result", {}).get("value") or {}
-    width = float(rect.get("width") or 0)
-    height = float(rect.get("height") or 0)
+    rect = await _read_element_rect(element.backend_node_id, session)
+    width = float((rect or {}).get("width") or 0)
+    height = float((rect or {}).get("height") or 0)
     if width <= 0 or height <= 0:
         return ToolResult(ok=False, message="Resize failed: element has no visible area")
     ok, coords, error = await _dispatch_pointer_drag_local(
@@ -2113,10 +2182,118 @@ async def resize_element(
         session, context, context.timing.settle_ms,
         frame_id=element.frame_id, frame_url=element.frame_url,
     )
-    base_msg = f"Resized {element_id} by ({delta_width:g}, {delta_height:g}) from {width:.1f}x{height:.1f}"
+    after_rect = await _read_element_rect(element.backend_node_id, session)
+    after_width = float((after_rect or {}).get("width") or 0)
+    after_height = float((after_rect or {}).get("height") or 0)
+    dimensions_msg = _resize_dimensions_message(
+        before_width=width,
+        before_height=height,
+        after_width=after_width,
+        after_height=after_height,
+    )
+    base_msg = f"Resized {element_id} by ({delta_width:g}, {delta_height:g}); {dimensions_msg}"
     if coords:
         base_msg += f" using handle drag to local ({coords['end_local_x']:.1f}, {coords['end_local_y']:.1f})"
-    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+    if _resize_change_verified(
+        before_width=width,
+        before_height=height,
+        after_width=after_width,
+        after_height=after_height,
+        delta_width=delta_width,
+        delta_height=delta_height,
+    ):
+        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+    await _inject_observer(session)
+    fallback = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function (deltaWidth, deltaHeight) {
+            const dw = Number(deltaWidth) || 0;
+            const dh = Number(deltaHeight) || 0;
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const wrapper = this.closest && this.closest('.ui-wrapper, .ui-resizable');
+            const base = wrapper && wrapper !== this ? wrapper : this;
+            const before = base.getBoundingClientRect();
+            const targetWidth = Math.max(1, before.width + dw);
+            const targetHeight = Math.max(1, before.height + dh);
+            const px = (value) => `${Math.max(1, Math.round(value))}px`;
+            const targets = wrapper && wrapper !== this ? [wrapper, this] : [this];
+            for (const target of targets) {
+                if (dw !== 0) target.style.width = px(targetWidth);
+                if (dh !== 0) target.style.height = px(targetHeight);
+            }
+            const jq = window.jQuery || window.$;
+            if (jq) {
+                try {
+                    if (dw !== 0) jq(this).width(targetWidth);
+                    if (dh !== 0) jq(this).height(targetHeight);
+                    jq(this).trigger('resize').trigger('resizestop');
+                    if (wrapper && wrapper !== this) {
+                        if (dw !== 0) jq(wrapper).width(targetWidth);
+                        if (dh !== 0) jq(wrapper).height(targetHeight);
+                        jq(wrapper).trigger('resize').trigger('resizestop');
+                    }
+                } catch (_e) {}
+            }
+            this.dispatchEvent(new Event('input', {bubbles: true}));
+            this.dispatchEvent(new Event('change', {bubbles: true}));
+            this.dispatchEvent(new Event('resize', {bubbles: true}));
+            window.dispatchEvent(new Event('resize'));
+            const after = base.getBoundingClientRect();
+            return {
+                beforeWidth: before.width,
+                beforeHeight: before.height,
+                afterWidth: after.width,
+                afterHeight: after.height,
+                targetWidth,
+                targetHeight,
+                wrapperTag: wrapper && wrapper !== this ? (wrapper.tagName || '').toLowerCase() : '',
+            };
+        }
+        """,
+        [{"value": float(delta_width)}, {"value": float(delta_height)}],
+    )
+    fallback_value = (fallback or {}).get("result", {}).get("value") or {}
+    fallback_mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    fallback_after_width = float(fallback_value.get("afterWidth") or after_width)
+    fallback_after_height = float(fallback_value.get("afterHeight") or after_height)
+    fallback_msg = (
+        f"Resize fallback set inline dimensions for {element_id}; "
+        + _resize_dimensions_message(
+            before_width=width,
+            before_height=height,
+            after_width=fallback_after_width,
+            after_height=fallback_after_height,
+        )
+    )
+    if fallback_value.get("wrapperTag"):
+        fallback_msg += f" via {fallback_value['wrapperTag']} wrapper"
+    if _resize_change_verified(
+        before_width=width,
+        before_height=height,
+        after_width=fallback_after_width,
+        after_height=fallback_after_height,
+        delta_width=delta_width,
+        delta_height=delta_height,
+    ):
+        return ToolResult(ok=True, message=_format_verification(fallback_mutations, fallback_msg))
+
+    failed_msg = (
+        "Resize failed verification: requested dimensions did not change in the requested direction. "
+        f"Pointer attempt: {dimensions_msg}. "
+        + _resize_dimensions_message(
+            before_width=width,
+            before_height=height,
+            after_width=fallback_after_width,
+            after_height=fallback_after_height,
+        )
+    )
+    return ToolResult(ok=False, message=_format_verification(fallback_mutations or mutations, failed_msg))
 
 
 async def draw(
@@ -2420,6 +2597,14 @@ async def select_text(
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
+    if _is_unqualified_text_selection_control(element, text):
+        return ToolResult(
+            ok=False,
+            message=(
+                "Select text refused: target is a control, not a text container. "
+                "Use a visible text/paragraph element, or provide exact text that exists inside this element."
+            ),
+        )
     session = await _session_for_element(element, context)
     await _inject_observer(session)
     result = await _call_on_node(

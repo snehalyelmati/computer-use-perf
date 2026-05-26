@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
+import sys
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.agent.context.snapshot import ElementSnapshot, PageSnapshot, format_snapshot_for_llm
 from src.agent.core.agent import _container_prefixes
 from src.agent.core.pruning import extract_instruction_phrases, match_phrases_to_elements
+from src.agent.core.step_runtime import _selectable_text_priority_ids
 from src.agent.core.text_compress import compress_text_lines
 
 
@@ -167,6 +174,32 @@ def test_instruction_anchored_keep_can_prefer_large_clickable_container_over_dec
     )
     matched = match_phrases_to_elements(phrases, [decoy_button, clickable_container], max_matches=2)
     assert matched and matched[0] == "el_container"
+
+
+def test_text_selection_intent_keeps_selectable_text_targets() -> None:
+    selectable = _el("el_text", node_name="DIV", text="Important paragraph")
+    selectable.interactive_reason = "selectable_text"
+    selectable.interactive_confidence = 0.25
+    paragraph = _el("el_paragraph", node_name="P", text="Semantic paragraph")
+    paragraph.interactive_reason = "non_interactive_hint"
+    paragraph.interactive_confidence = 0.25
+    submit = _el("el_submit", role="button", name="Submit")
+    snapshot = PageSnapshot(
+        url="https://example.com",
+        title="Test",
+        elements=[selectable, paragraph, submit],
+        raw_text=[],
+    )
+
+    kept = _selectable_text_priority_ids(
+        snapshot,
+        goal="Highlight the text in the paragraph below and submit",
+        useful_lines=[],
+        valid_ids={"el_text", "el_paragraph", "el_submit"},
+        avoid_ids=set(),
+    )
+
+    assert kept == ["el_text", "el_paragraph"]
 
 
 def test_format_snapshot_for_llm_prioritizes_priority_ids_under_max_elements() -> None:

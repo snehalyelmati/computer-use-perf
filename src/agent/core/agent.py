@@ -2245,7 +2245,7 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
     async def resize_element(
         ctx: RunContext[WorkerDeps], element_id: str, delta_width: float, delta_height: float
     ) -> ToolExecutionResult:
-        """Resize an element by dragging from its lower-right corner by the given pixel delta. Use element_id from the page snapshot."""
+        """Resize an element by the given pixel delta and verify the requested dimension changed before final actions. Use element_id from the page snapshot."""
         signature = _tool_signature("resize_element", element_id, delta_width, delta_height)
         if blocked := _repeat_guard_result(
             ctx.deps.tool_tracker, "resize_element", signature, element_id=element_id
@@ -2542,7 +2542,7 @@ NOT for finding text already visible in the snapshot — use click_element for t
         text: str | None = None,
         occurrence: int = 1,
     ) -> ToolExecutionResult:
-        """Select text inside an element. Use before apply_format for highlight/rich-editor tasks. Use element_id from the page snapshot."""
+        """Select text inside a visible text container. Use before apply_format for highlight/rich-editor tasks. Use element_id from the page snapshot."""
         signature = _tool_signature("select_text", element_id, text or "", occurrence)
         if blocked := _repeat_guard_result(
             ctx.deps.tool_tracker, "select_text", signature, element_id=element_id

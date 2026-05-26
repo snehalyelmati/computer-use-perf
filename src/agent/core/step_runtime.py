@@ -91,6 +91,47 @@ def _authoritative_terminal_validation(validation: ValidationSignal | None) -> b
     return bool(validation and validation.terminal)
 
 
+_TEXT_SELECTION_INTENT_RE = re.compile(
+    r"\b(highlight|select|copy|mark)\b(?:\W+\w+){0,6}\W+\b(text|paragraph|sentence|word|line|content)\b"
+    r"|\b(text|paragraph|sentence|word|line|content)\b(?:\W+\w+){0,6}\W+\b(highlight|selection|selected|copy)\b",
+    re.IGNORECASE,
+)
+_SELECTABLE_TEXT_KEEP_LIMIT = 12
+_TEXT_TARGET_TAGS = {"BLOCKQUOTE", "CODE", "DD", "DT", "LABEL", "LI", "P", "PRE", "TD", "TH"}
+
+
+def _has_text_selection_intent(goal: str | None, useful_lines: list[str] | tuple[str, ...]) -> bool:
+    haystack = " ".join([goal or "", *[line or "" for line in useful_lines]])
+    return bool(_TEXT_SELECTION_INTENT_RE.search(haystack))
+
+
+def _selectable_text_priority_ids(
+    snapshot: PageSnapshot,
+    *,
+    goal: str | None,
+    useful_lines: list[str] | tuple[str, ...],
+    valid_ids: set[str],
+    avoid_ids: set[str],
+    limit: int = _SELECTABLE_TEXT_KEEP_LIMIT,
+) -> list[str]:
+    if not _has_text_selection_intent(goal, useful_lines):
+        return []
+    candidates: list[str] = []
+    for element in snapshot.elements:
+        if element.stable_id not in valid_ids or element.stable_id in avoid_ids:
+            continue
+        tag = (element.node_name or "").upper()
+        reason = element.interactive_reason or ""
+        if reason != "selectable_text" and tag not in _TEXT_TARGET_TAGS:
+            continue
+        if not (element.text or element.descendant_text):
+            continue
+        candidates.append(element.stable_id)
+        if len(candidates) >= max(0, int(limit)):
+            break
+    return candidates
+
+
 @dataclass(frozen=True)
 class RuntimeStepResult:
     """Structured result from one internal agent step."""
@@ -870,6 +911,15 @@ class BrowserAgentStepRuntime:
         for sid in anchored_ids:
             if sid in valid_ids and sid not in avoid_ids and sid not in priority_ids:
                 priority_ids.append(sid)
+        for sid in _selectable_text_priority_ids(
+            snapshot,
+            goal=self.agent_config.goal,
+            useful_lines=compressed_useful_lines,
+            valid_ids=valid_ids,
+            avoid_ids=avoid_ids,
+        ):
+            if sid not in priority_ids:
+                priority_ids.append(sid)
         filter_output = SnapshotFilterOutput(
             useful_text_lines=compressed_useful_lines,
             priority_element_ids=priority_ids,
@@ -912,6 +962,15 @@ class BrowserAgentStepRuntime:
         anchored_ids = match_phrases_to_elements(phrases, snapshot.elements, max_matches=15)
         for sid in anchored_ids:
             if sid in valid_ids and sid not in avoid_ids and sid not in priority_ids:
+                priority_ids.append(sid)
+        for sid in _selectable_text_priority_ids(
+            snapshot,
+            goal=self.agent_config.goal,
+            useful_lines=useful_lines,
+            valid_ids=valid_ids,
+            avoid_ids=avoid_ids,
+        ):
+            if sid not in priority_ids:
                 priority_ids.append(sid)
 
         kept_ids = set(priority_ids) - avoid_ids

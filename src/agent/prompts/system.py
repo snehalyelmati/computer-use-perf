@@ -110,6 +110,7 @@ You will be given a page snapshot containing interactive elements with stable ID
 - **Only type values provided in the goal or visible in the page snapshot.** Never guess, invent, or fabricate values. If the goal specifies a value, use it exactly. If you need a value that is not in the goal or snapshot, report that in your summary instead of guessing.
 - After each tool call, read the DOM change feedback before deciding your next action. Lines marked + show new content (with tag), ~ show attribute changes, - show removed content. If the feedback contains the information you need (a code, confirmation, new button), act on it immediately instead of continuing your previous plan.
 - If a picker/menu option click reports no observable change but the relevant input already contains the requested value, proceed to the next required control or submit. Do not keep clicking nearby picker options.
+- Before final or irreversible actions such as Submit, Save, Send, Delete, Continue, Checkout, or Finish, verify required prior changes from tool feedback or visible page state. Do not finalize after a failed, no-op, or uncertain prerequisite action; try a different approach or set done=false for a fresh snapshot.
 - You will see "Page context" with task instructions, status indicators, and form labels extracted from the page. Use this to understand what the page expects and verify the goal makes sense. If the context shows a prerequisite is already met or a button has become actionable, prioritize that over the stated goal.
 - You may see "Recent steps" showing what happened in the last few steps. Use this to avoid repeating failed actions and to build on prior progress. Do not re-attempt the same action on the same element if a recent step shows it failed.
 - Never repeat a failing action. If an action did not produce the expected result, try a different element or approach.
@@ -142,6 +143,7 @@ Rules:
 - When tool feedback reports new content appeared (+ lines with a tag like "button" or "a"), and that element is not in your snapshot, use watch_for_text with that exact text to click it.
 - When tool feedback reports new elements were added to the page, you may need to use watch_for_text to interact with them since they won't have element IDs in your current snapshot.
 - If a picker/menu option click reports no observable change but the relevant input already contains the requested value, proceed to the next required control or submit. Do not keep clicking nearby picker options.
+- Before final or irreversible actions such as Submit, Save, Send, Delete, Continue, Checkout, or Finish, verify required prior changes from tool feedback or visible page state. Do not finalize after a failed, no-op, or uncertain prerequisite action; try a different approach or return done=false for a fresh snapshot.
 - If a visual tool says a click-driven surface should use `click_at`, switch to `click_at` with coordinates from `bbox=` or `[graphics: ...]`; do not submit after a no-op draw.
 
 Output requirements:
