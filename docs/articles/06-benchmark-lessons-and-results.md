@@ -56,6 +56,6 @@ These are good debugging stories, but they should be presented separately from t
 
 ## What I Would Add Next
 
-The useful follow-up has shifted from building a repo-local demo benchmark to broadening the BrowserGym/AgentLab path. MiniWoB verification now gives the project a reproducible starting point with BrowserGym-owned validation and local report artifacts.
+The useful follow-up has shifted from building a repo-local demo benchmark to broadening the BrowserGym/AgentLab path. MiniWoB verification gives the project a reproducible smoke path, and recorded one-repeat MiniWoB full-suite runs now provide a broader score-comparison path with BrowserGym-owned validation and local report artifacts.
 
-The next step is to expand from the verified MiniWoB subset into larger MiniWoB and WebArena-family runs, while keeping full-suite leaderboard-style runs distinct from custom regression subsets.
+The next step is to repeat full-suite MiniWoB runs to separate regressions from seed/model variance, work down the remaining MiniWoB failure families, and expand into WebArena-family runs. Full-suite leaderboard-style runs should remain distinct from custom regression subsets.

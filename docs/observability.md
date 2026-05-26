@@ -19,6 +19,8 @@ AgentLab benchmark studies also write report artifacts under `logs/agentlab/stud
 - `per_task_results.csv`
 - `failed_tasks.md`
 
+Treat `logs/agentlab/studies/<study>/` as the durable benchmark artifact location. Native per-episode log directories under `logs/agentlab/<run_id>/` follow the runtime log-retention policy and may be pruned independently, so `benchmark_report.md` can contain missing native-log warnings even when the AgentLab study result remains valid.
+
 Each AgentLab step also carries an `AgentInfo` payload. The numeric `stats` token/cost fields are per-step deltas so AgentLab aggregation does not double-count cumulative totals. The cumulative native run totals are preserved under `extra_info.cumulative_usage`, and `extra_info.validation` records the latest external BrowserGym validation signal when available.
 
 ### Metrics events (`logs/latest/metrics.jsonl`)

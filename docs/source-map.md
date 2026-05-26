@@ -107,6 +107,7 @@ Verified facts:
 - Benchmark reports count missing `cum_reward` rows as zero reward and include those gaps in `warnings.parse_gaps`.
 - Report artifacts are `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`.
 - AgentLab `AgentInfo.stats` token/cost values are per-step deltas; cumulative totals live in `extra_info.cumulative_usage`.
+- Version-controlled BrowserGym result notes live under `docs/benchmark-results/`; the latest recorded one-repeat MiniWoB full-suite note is `docs/benchmark-results/miniwob-full-run-2026-05-26.md`.
 
 ## Historical Commit Sources
 
@@ -144,6 +145,9 @@ AgentLab and BrowserGym commits:
 - MiniWoB smoke benchmark runner and BrowserGym sync bridge: `75159be`.
 - MiniWoB benchmark defaults, option selection, and unified no-action done gating: `55d29be`.
 - MiniWoB visual handling, `click_at`, benchmark shutdown/logging hardening, and resource tracker suppression: `343a670`.
+- MiniWoB benchmark reliability improvements: `9efe402`.
+- MiniWoB interaction handling improvements: `11f2268`.
+- Text selection and resize validation improvements: `368ce18`.
 
 Benchmark-specific commits:
 

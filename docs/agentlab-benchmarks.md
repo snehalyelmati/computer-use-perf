@@ -64,6 +64,19 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --max-elements 80
 ```
 
+For a one-repeat MiniWoB full-suite comparison run, use:
+
+```bash
+uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
+  --benchmark miniwob \
+  --preset full \
+  --n-repeats 1 \
+  --max-steps 20 \
+  --env-max-steps 10 \
+  --max-elements 80 \
+  --n-jobs 1
+```
+
 Supported benchmarks are `miniwob`, `webarena`, `webarena_lite`, `webarena_verified`, and `webarena_tiny`.
 
 Presets:

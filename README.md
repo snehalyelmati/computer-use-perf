@@ -165,6 +165,19 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --max-elements 80
 ```
 
+Run the one-repeat MiniWoB full-suite path used for recorded benchmark comparisons:
+
+```bash
+uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
+  --benchmark miniwob \
+  --preset full \
+  --n-repeats 1 \
+  --max-steps 20 \
+  --env-max-steps 10 \
+  --max-elements 80 \
+  --n-jobs 1
+```
+
 Run a cheap targeted iteration subset:
 
 ```bash
@@ -175,7 +188,7 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --n-repeats 1
 ```
 
-The generic benchmark runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny. It writes AgentLab studies under `logs/agentlab/studies/` and emits local report artifacts for score comparison. Use `--iteration-profile {full,balanced,cheap}` for cost caps and `--task-set <name>` for checked-in regression subsets under `benchmarks/agentlab/task_sets/`.
+The generic benchmark runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny. It writes AgentLab studies under `logs/agentlab/studies/` and emits local report artifacts for score comparison. Use `--iteration-profile {full,balanced,cheap}` for cost caps and `--task-set <name>` for checked-in regression subsets under `benchmarks/agentlab/task_sets/`. The latest recorded one-repeat MiniWoB full-suite run scored `86.4%`; see `docs/benchmark-results/miniwob-full-run-2026-05-26.md`.
 
 ## Outputs
 
@@ -239,7 +252,8 @@ uv run python scripts/generate_results.py
 
 ## Roadmap
 
-- Broaden BrowserGym benchmark coverage beyond MiniWoB verification runs.
+- Repeat MiniWoB full-suite runs to distinguish regressions from seed/model variance.
+- Broaden BrowserGym benchmark coverage into WebArena-family runs.
 - Isolate benchmark-specific fixes from the general runtime.
 - Build a simple run viewer for logs, metrics, page captures, and step traces.
 - Improve failure classification and result summaries.
