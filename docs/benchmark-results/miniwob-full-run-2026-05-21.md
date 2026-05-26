@@ -1,10 +1,10 @@
-# MiniWoB Full Suite Run - 2026-05-21
+# MiniWoB++ Full Suite Run - 2026-05-21
 
-This records the one-repeat full MiniWoB run started at study timestamp `2026-05-21_22-05-01`.
+This records the one-repeat full MiniWoB++ run for Zip started at study timestamp `2026-05-21_22-05-01`. BrowserGym refers to this benchmark with the key `miniwob`.
 
 ## Storage Status
 
-The run artifacts are stored locally under:
+The run artifacts are stored locally under the original study path:
 
 `logs/agentlab/studies/2026-05-21_22-05-01_computer-use-agent-on-miniwob-full/`
 
@@ -21,6 +21,8 @@ That directory contains the expected AgentLab and runner outputs:
 
 Important caveat: `logs/` is gitignored, so the raw artifacts are not version-controlled. This file is the version-controlled index entry for the run. Keep the raw study directory intact when comparing or auditing the result.
 
+The retained path includes the earlier `computer-use-agent` working name because it was created before the Zip rename.
+
 ## Command
 
 ```bash
@@ -30,7 +32,7 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --n-repeats 1
 ```
 
-The report records the resolved Python invocation as:
+The report also captured this local absolute Python invocation from the original checkout:
 
 ```bash
 /Users/snehalyelmati/Documents/computer-use-perf/.venv/bin/python3 benchmarks/agentlab/run_browsergym_benchmark.py --benchmark miniwob --preset full --n-repeats 1
@@ -72,7 +74,7 @@ Cost and token totals were aggregated from `result_df.csv`.
 - Input tokens: `14,830,263`
 - Output tokens: `3,473,443`
 - BrowserGym episode steps: `347`
-- Internal computer-use steps: `1,333`
+- Internal Zip steps: `1,333`
 - Agent elapsed time: `6,080.66s` (`101.3 min`)
 - Approximate wall-clock runtime: `1h52m`
 

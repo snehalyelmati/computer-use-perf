@@ -1,9 +1,26 @@
 [project]
-name = "computer-use-perf"
+name = "zip"
 version = "0.1.0"
-description = "Add your description here"
+description = "A lightweight, modular browser-use agent for LLM-driven web automation."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+keywords = [
+    "agentlab",
+    "browser-agent",
+    "browser-automation",
+    "browsergym",
+    "llm-agents",
+    "miniwob",
+    "playwright",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "playwright>=1.44.0",
     "pydantic>=2.12.0",

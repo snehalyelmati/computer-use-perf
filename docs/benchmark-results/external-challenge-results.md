@@ -1,4 +1,6 @@
-# Agent Run Results
+# Archived External Challenge Run Results
+
+These runs came from the external browser-agent challenge site used during early Zip development. That site may no longer be reliably available, so this table is retained as development history rather than a current public benchmark claim. Use the BrowserGym/MiniWoB++ reports in this directory for standard benchmark comparisons.
 
 *Generated: 2026-03-11 19:08 UTC*
 

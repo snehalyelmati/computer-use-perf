@@ -137,7 +137,7 @@ def main() -> None:
         agent_args=agent_args,
         benchmark=benchmark,
         suffix="smoke",
-        comment="MiniWoB smoke benchmark for the computer-use agent.",
+        comment="MiniWoB smoke benchmark for Zip.",
     )
     study.run(
         n_jobs=int(args.n_jobs),

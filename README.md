@@ -1,73 +1,79 @@
-# computer-use-perf
+# Zip
 
-`computer-use-perf` is an experimental browser agent focused on making LLM-driven web automation reliable, inspectable, and measurable.
+Zip is a lightweight, modular browser-use agent for LLM-driven web automation. It runs against arbitrary target URLs, extracts structured browser context, exposes stable element IDs to the model, executes DOM-first browser actions, and records inspectable logs, metrics, and benchmark artifacts for every run.
 
-The project started as a custom Playwright plus LLM harness and evolved into a modular browser-agent runtime with CDP snapshots, stable element IDs, DOM-first tools, multi-agent control, and per-run observability.
+The project is built as a real browser-agent runtime rather than a one-off benchmark script. The original external challenge site was useful for finding failure modes; the current reproducible benchmark path uses BrowserGym and AgentLab, with MiniWoB++ as the primary recorded result.
 
-## What This Is
+## Current Benchmark Result
 
-- A general-purpose browser agent runner for arbitrary web targets.
-- A research/engineering artifact for browser-agent reliability patterns.
-- A benchmark history from development against an external browser-agent challenge site.
-- A collection of debugging scripts, logs, metrics, and architecture notes from iterative development.
+The latest recorded standard benchmark run is a one-repeat BrowserGym/AgentLab MiniWoB++ full-suite run:
 
-## Status
+| Benchmark | Episodes | Score | Errors | Model | Cost |
+| --- | ---: | ---: | ---: | --- | ---: |
+| MiniWoB++ full suite | 125 | 86.4% | 0 | `openrouter` / `z-ai/glm-4.7:nitro` | $7.15 |
 
-The original external benchmark site used during development may no longer be reliably available. The benchmark results in this repository should be treated as archived historical runs, not as a currently reproducible public benchmark.
+Run configuration: unified pipeline, `max_steps=20`, `env_max_steps=10`, `max_elements=80`, `max_worker_tool_calls=10`, `worker_context_steps=3`, `oracle_interval=5`, and sequential execution. The run is documented in [`docs/benchmark-results/miniwob-full-run-2026-05-26.md`](docs/benchmark-results/miniwob-full-run-2026-05-26.md), with failure analysis in [`docs/benchmark-results/miniwob-full-run-2026-05-26-failure-analysis.md`](docs/benchmark-results/miniwob-full-run-2026-05-26-failure-analysis.md).
 
-The agent itself is not tied to that site. It runs against a target URL and a task file:
+This is the benchmark track intended for clean comparison and future BrowserGym leaderboard submission. Historical results from the older external challenge site are archived separately as development history.
 
-```bash
-uv run main.py --url <target-url> --task TASK.md
-```
+## What Zip Does
 
-The benchmark path now runs through AgentLab and BrowserGym. In that mode, BrowserGym owns the browser and validation, while this agent runs its normal snapshot, Oracle, Filter, Orchestrator, Worker, metrics, and DOM-first tools inside the live BrowserGym page.
+Zip combines browser instrumentation, agent orchestration, semantic tools, and observability:
 
-## Why Browser Agents Are Hard
+- Runs against a target URL and task file with `uv run main.py --url <target-url> --task TASK.md`.
+- Captures browser context with CDP DOM snapshots, accessibility trees, frame data, handler hints, scroll-container state, text context, widget values, and diffs.
+- Gives the LLM stable `el_...` element IDs instead of raw CSS or XPath selectors.
+- Uses DOM-first tools for ordinary click, focus, type, read, and form interactions; coordinate tools are reserved for spatial actions such as draw, drag, resize, and SVG/canvas targeting.
+- Supports split Oracle -> Filter -> Orchestrator -> Worker mode and a unified single-agent execution mode.
+- Records per-run logs, debug traces, JSONL metrics, cost/tokens, page captures, and benchmark reports.
+- Adapts the same runtime to BrowserGym pages through AgentLab while leaving BrowserGym in charge of validation and reward.
 
-Browser automation fails in ways that are easy to miss from a raw screenshot or simple DOM dump:
+## Why Browser-Use Agents Are Hard
+
+Browser automation fails in ways that are easy to miss from screenshots or simple DOM dumps:
 
 - Hidden DOM and `data-*` attributes can contain task-critical values.
 - Interactive elements can be unlabeled, dynamically inserted, or hidden inside iframes.
 - Visual visibility checks can fail because overlays, modals, or z-index layers obscure targets.
-- Element labels can be decoys, stale, or unrelated to the actual page task.
-- Buttons can transition from disabled to enabled without obvious text changes.
+- Element labels can be decoys, stale, or unrelated to the current task.
+- Buttons and controls can change state without obvious text changes.
 - LLM agents can repeat failed actions, declare success too early, or exhaust tool calls.
-- Tool feedback can become large enough to create token and cost blowups.
+- Tool feedback can grow large enough to create token and cost blowups.
 
-This project explores those problems as systems problems: context extraction, action semantics, feedback loops, state tracking, and observability.
+Zip treats these as runtime and systems problems: context extraction, action semantics, feedback loops, completion policy, state tracking, benchmark validation, and observability.
 
 ## Architecture
 
-The current default runtime is a modular loop. `main.py` builds runtime configuration and calls `BrowserAgent.run()` in `src/agent/core/agent.py`.
+`main.py` builds runtime configuration and calls `BrowserAgent.run()` in `src/agent/core/agent.py`.
 
 Runtime loop:
 
 1. Launch the browser and open the target URL.
-2. Capture page context from handler hints, scroll containers, snapshots, and diffs.
-3. Ask the Oracle for guidance when the agent is due for review or appears stuck.
-4. Filter the snapshot to keep the next prompt compact and high-signal.
+2. Wait for page settlement, extract handler hints, mark scroll containers, capture a CDP snapshot, and compute diffs.
+3. Ask the Oracle for guidance when review is due or the agent appears stuck.
+4. Filter the snapshot to keep prompt context compact and high-signal.
 5. Plan and execute the next step through split Orchestrator -> Worker mode or unified mode.
-6. Record feedback, memory, and metrics, then repeat until the task is done.
+6. Record tool feedback, memory, metrics, and summaries, then repeat until the task is complete or a stop condition fires.
 
-| Stage | What happens |
+| Stage | Role |
 | --- | --- |
-| Context | Wait for page settlement, extract handler hints, mark scroll containers, capture a CDP snapshot, and compute diffs. |
-| Guidance | The Oracle reviews progress periodically or when stuck, then the Filter keeps the snapshot compact and high-signal. |
-| Action | Split mode uses Orchestrator -> Worker; unified mode uses one tool-equipped agent. |
-| Feedback | Tool results, mutations, memory, metrics, and summaries feed the next step and final run report. |
+| Context | Browser/session setup, handler extraction, scroll marking, CDP snapshot capture, accessibility/frame data, and diffing. |
+| Guidance | Oracle diagnosis and conservative filtering to reduce context without dropping necessary controls. |
+| Action | Split Orchestrator -> Worker execution or unified tool-equipped execution. |
+| Feedback | Mutation/value/focus/URL feedback, compact history, metrics, cost/tokens, and run summaries. |
+| Validation | Native completion policy for direct runs; BrowserGym reward/termination for benchmark runs. |
 
-Key components:
+Key modules:
 
-- **Snapshot capture:** `src/agent/context/snapshot.py` uses CDP `DOMSnapshot.captureSnapshot`, `Accessibility.getFullAXTree`, and `Page.getFrameTree`.
-- **Handler hints:** `src/agent/context/handlers.py` extracts inline, React, Vue, and Angular handler summaries before snapshot capture.
-- **Filter:** A conservative LLM pruner that keeps likely useful elements and high-signal text.
-- **Oracle:** A diagnostic advisor called periodically, when stuck, or after repeated tool-limit loops.
-- **Orchestrator:** A planner that assigns a small outcome-focused goal to the worker.
-- **Worker:** A tool-equipped executor that uses stable element IDs from the snapshot.
-- **Unified mode:** `--unified` replaces the Orchestrator -> Worker handoff with one tool-equipped agent after Filter/Oracle preprocessing.
+- `src/agent/context/snapshot.py`: CDP snapshot capture, accessibility/frame correlation, stable element IDs, and context hints.
+- `src/agent/context/handlers.py`: inline, React, Vue, and Angular handler introspection.
+- `src/agent/tools/semantic.py`: DOM-first and spatial browser tools exposed to the worker.
+- `src/agent/core/agent.py`: full browser runtime loop.
+- `src/agent/core/step_runtime.py`: reusable single-step runtime for externally owned BrowserGym pages.
+- `benchmarks/agentlab/computer_use_agent.py`: AgentLab adapter around the normal Zip runtime.
+- `benchmarks/agentlab/run_browsergym_benchmark.py`: MiniWoB/WebArena runner and report generator.
 
-## Tools
+## Default Tool Set
 
 The default worker tool set is intentionally constrained:
 
@@ -92,7 +98,7 @@ The default worker tool set is intentionally constrained:
 - `switch_to_main_frame()`
 - `press_key_combination(keys)`
 
-Additional tools such as `find_elements`, `inspect_element`, `search_page_attributes`, `execute_js`, `take_screenshot`, and `navigate_to` exist in the tool layer but are not part of the default worker tool set.
+Additional inspection and escape-hatch tools exist in the tool layer, but they are not part of the default worker set.
 
 ## Quick Start
 
@@ -108,7 +114,7 @@ Set an API key for the provider you want to use:
 export OPENROUTER_API_KEY=...
 ```
 
-Run the agent:
+Run Zip against a target URL and task file:
 
 ```bash
 uv run main.py --url <target-url> --task TASK.md
@@ -130,14 +136,16 @@ Run tests:
 uv run pytest -q
 ```
 
-Install optional AgentLab/BrowserGym benchmark dependencies:
+## BrowserGym / AgentLab Benchmarks
+
+Install optional benchmark dependencies:
 
 ```bash
 uv sync --extra agentlab
 uv run playwright install chromium
 ```
 
-Before running MiniWoB, point BrowserGym at MiniWoB++ assets:
+Point BrowserGym at MiniWoB++ assets:
 
 ```bash
 mkdir -p .benchmarks
@@ -145,7 +153,7 @@ git clone https://github.com/Farama-Foundation/miniwob-plusplus .benchmarks/mini
 # Or export MINIWOB_URL=file:///path/to/miniwob-plusplus/miniwob/html/miniwob/
 ```
 
-Run the current MiniWoB verification benchmark path:
+Run the MiniWoB verification subset:
 
 ```bash
 uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
@@ -157,7 +165,7 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --max-elements 80
 ```
 
-Run the one-repeat MiniWoB full-suite path used for recorded benchmark comparisons:
+Run the one-repeat MiniWoB full-suite configuration used for the latest recorded comparison:
 
 ```bash
 uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
@@ -170,7 +178,7 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --n-jobs 1
 ```
 
-Run a cheap targeted iteration subset:
+Run a cheap targeted regression subset:
 
 ```bash
 uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
@@ -180,11 +188,11 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --n-repeats 1
 ```
 
-The generic benchmark runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny. It writes AgentLab studies under `logs/agentlab/studies/` and emits local report artifacts for score comparison. Use `--iteration-profile {full,balanced,cheap}` for cost caps and `--task-set <name>` for checked-in regression subsets under `benchmarks/agentlab/task_sets/`. The latest recorded one-repeat MiniWoB full-suite run scored `86.4%`; see `docs/benchmark-results/miniwob-full-run-2026-05-26.md`.
+The generic runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny. It writes AgentLab studies under `logs/agentlab/studies/` and emits `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md` for comparison.
 
 ## Outputs
 
-Each run writes to `logs/<run_id>/`; `logs/latest` points to the most recent run.
+Each native run writes to `logs/<run_id>/`; `logs/latest` points to the most recent run.
 
 - `logs/latest/agent.log`: human-readable runtime log.
 - `logs/latest/agent_debug.log`: verbose debug log with prompts, structured outputs, diffs, memory, and traces.
@@ -192,14 +200,7 @@ Each run writes to `logs/<run_id>/`; `logs/latest` points to the most recent run
 - `logs/latest/run_summary.json`: final rollup with stop reason, duration, tokens, cost, provider, and models.
 - `logs/latest/pages/`: optional saved HTML snapshots when `--save-pages` is enabled.
 
-AgentLab benchmark runs additionally write these files in each study directory:
-
-- `benchmark_report.json`: machine-readable benchmark report.
-- `benchmark_report.md`: human-readable aggregate and per-task summary.
-- `per_task_results.csv`: normalized per-task/per-seed rows.
-- `failed_tasks.md`: failed, errored, truncated, incomplete, or zero-reward episodes with log paths.
-
-AgentLab `AgentInfo.stats` token/cost fields are per-step deltas. Cumulative token/cost totals are stored in `extra_info.cumulative_usage`.
+AgentLab benchmark runs additionally write report artifacts in each study directory. `AgentInfo.stats` token/cost fields are per-step deltas; cumulative totals are stored under `extra_info.cumulative_usage`.
 
 Analyze timing metrics:
 
@@ -207,46 +208,50 @@ Analyze timing metrics:
 uv run python scripts/analyze_metrics.py logs/latest/metrics.jsonl
 ```
 
-Regenerate archived benchmark results:
+## Repository Layout
+
+- `main.py`: CLI entrypoint for direct browser runs.
+- `src/agent/`: Zip runtime, context extraction, tools, metrics, prompts, and models.
+- `benchmarks/agentlab/`: BrowserGym/AgentLab adapter, benchmark runner, smoke runner, and task-set manifests.
+- `tests/`: unit and integration tests for snapshots, tools, completion policy, metrics, AgentLab adapter behavior, and benchmark reports.
+- `scripts/analyze_metrics.py`: timing and metrics inspection.
+- `scripts/generate_results.py`: archived external-challenge result table generator.
+- `scripts/debug_*.py`: development diagnostics from earlier benchmark and runtime investigations.
+- `docs/`: architecture notes, observability notes, benchmark results, failure-mode writeups, and long-form engineering articles.
+
+## Historical External Benchmark
+
+Before the BrowserGym path existed, Zip was iterated against an external browser-agent challenge site. That site may no longer be reliably available, so its results are not presented as the current public benchmark. They remain useful as development evidence because the site exposed hidden DOM, hover, iframe, shadow DOM, drawing, drag/drop, WebSocket, service worker, delayed-reveal, and completion-policy failures.
+
+The archived table lives at [`docs/benchmark-results/external-challenge-results.md`](docs/benchmark-results/external-challenge-results.md). Interpret it as an engineering timeline, not a standard benchmark claim. If maintaining old challenge logs, regenerate it with:
 
 ```bash
 uv run python scripts/generate_results.py
 ```
 
-## Documentation
-
-- `docs/journey.md`: project history from custom harness to modular agent.
-- `docs/architecture.md`: current runtime architecture verified against code.
-- `docs/agentlab-benchmarks.md`: AgentLab + BrowserGym benchmark adapter setup and execution notes.
-- `docs/failure-modes.md`: browser-agent failure modes and mitigations.
-- `docs/benchmark-results/README.md`: archived benchmark results and interpretation.
-- `docs/observability.md`: logs, metrics, and run artifacts.
-- `docs/architecture-options.md`: comparison of six agent architecture options.
-- `docs/challenge-map.md`: archived challenge-site investigation notes.
-- `docs/source-map.md`: where documentation claims come from.
-- `docs/articles/`: long-form engineering writeups about the project journey and lessons learned.
-
 ## Design Principles
 
-- Prefer DOM-first actions for click/type/read interactions; use coordinates only when the action is inherently spatial, such as drawing or some drag/drop cases.
+- Prefer DOM-first actions for click, type, focus, and read interactions.
+- Use coordinate or pointer tools only when the task is inherently spatial.
 - Pass stable element IDs to the LLM, never raw CSS or XPath selectors.
-- Keep pruning conservative because over-pruning can make a step impossible.
+- Keep pruning conservative because over-pruning can make a task impossible.
 - Treat tool feedback as part of the agent loop, not just logging.
-- Separate general-purpose architecture from benchmark-specific fixes.
+- Keep benchmark-specific recovery separate from general browser-agent architecture.
 - Measure tokens, cost, timing, stop reasons, and tool behavior for every run.
 
 ## Limitations
 
-- The archived benchmark site may not be available, so historical results may not be independently rerunnable.
-- Some benchmark-specific recovery code remains in the runtime loop and should be isolated if the project becomes a reusable package.
-- The agent is experimental and can still repeat bad actions, over-trust page text, or fail on complex application state.
-- The default worker tool set intentionally excludes powerful escape hatches like arbitrary JavaScript execution.
+- Zip is experimental and can still repeat bad actions, over-trust page text, or fail on complex application state.
+- BrowserGym results depend on model/provider behavior, pricing, and benchmark setup.
+- The latest MiniWoB++ result is one repeat, not a multi-seed leaderboard submission.
+- Some recovery code for the older external benchmark remains in the direct runtime and should be isolated if Zip becomes a reusable package.
+- The default worker tool set intentionally excludes powerful escape hatches such as arbitrary JavaScript execution.
 
 ## Roadmap
 
-- Repeat MiniWoB full-suite runs to distinguish regressions from seed/model variance.
-- Broaden BrowserGym benchmark coverage into WebArena-family runs.
-- Isolate benchmark-specific fixes from the general runtime.
+- Prepare clean MiniWoB++ artifacts for official BrowserGym leaderboard submission.
+- Repeat full-suite runs to distinguish regressions from seed/model variance.
+- Broaden BrowserGym coverage into WebArena-family runs.
+- Isolate older benchmark-specific recovery code from the reusable runtime.
 - Build a simple run viewer for logs, metrics, page captures, and step traces.
-- Improve failure classification and result summaries.
-- Add more deterministic validation for overall task completion.
+- Improve failure classification and task-completion validation.

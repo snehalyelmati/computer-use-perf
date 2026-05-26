@@ -1248,7 +1248,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         agent_args=agent_args,
         benchmark=benchmark,
         suffix=_study_suffix(selection),
-        comment=f"{selection.benchmark}:{selection.preset} benchmark for the computer-use agent.",
+        comment=f"{selection.benchmark}:{selection.preset} benchmark for Zip.",
     )
     parallel_backend = select_parallel_backend(selection, int(args.n_jobs))
     study.run(

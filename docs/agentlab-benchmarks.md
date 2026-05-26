@@ -1,13 +1,13 @@
 # AgentLab And BrowserGym Benchmarks
 
-This repository can run under AgentLab with BrowserGym owning the browser and task validation. The adapter lives in `benchmarks/agentlab/` and keeps the normal agent runtime responsible for perception, planning, tool execution, logs, and metrics.
+Zip can run under AgentLab with BrowserGym owning the browser and task validation. The adapter lives in `benchmarks/agentlab/` and keeps the normal agent runtime responsible for perception, planning, tool execution, logs, and metrics.
 
 ## Runtime Shape
 
 ```mermaid
 flowchart LR
     Study[AgentLab Study] --> Env[BrowserGym Env]
-    Env -->|raw obs includes page| Adapter[ComputerUseAgentLabAgent]
+    Env -->|raw obs includes page| Adapter[Zip Adapter]
     Adapter --> Bridge[Sync Playwright Bridge]
     Bridge --> Runtime[Single-Step Agent Runtime]
     Env -->|reward/termination| Adapter
@@ -27,7 +27,7 @@ The important inversion is browser ownership:
 - The adapter requests `use_raw_page_output=True`, stores `obs["page"]`, and removes it before observations are pickled.
 - `BrowserAgentStepRuntime` runs one internal step against the live page.
 - The adapter returns `noop()` after the internal tool calls have already changed the page.
-- The benchmark snapshot includes compact SVG graphics, non-interactive text/structure, context hints, widget values, and bounding boxes when labels are not enough; the worker can use coordinate, pointer-drag, slider, selection, formatting, and live-text tools for MiniWoB-style widgets.
+- The benchmark snapshot includes compact SVG graphics, non-interactive text/structure, context hints, widget values, and bounding boxes when labels are not enough; the worker can use coordinate, pointer-drag, slider, selection, formatting, and live-text tools for MiniWoB++-style widgets.
 - BrowserGym remains the source of truth for task success. BrowserGym reward/termination is passed into the runtime as external validation; terminal positive validation stops success, and terminal zero/negative validation stops failure.
 - Internal `done=True` is treated as a proposal. While BrowserGym validation is non-terminal, it triggers recovery instead of latching the runtime as done; terminal BrowserGym success is the authoritative success signal.
 
@@ -42,9 +42,9 @@ git clone https://github.com/Farama-Foundation/miniwob-plusplus.git .benchmarks/
 git -C .benchmarks/miniwob-plusplus reset --hard 7fd85d71a4b60325c6585396ec4f48377d049838
 ```
 
-MiniWoB also requires the MiniWoB++ static site at BrowserGym's pinned commit and `MINIWOB_URL` pointing to it. WebArena requires the self-hosted services and the standard `WA_*` environment variables.
+MiniWoB++ (BrowserGym benchmark key: `miniwob`) requires the MiniWoB++ static site at BrowserGym's pinned commit and `MINIWOB_URL` pointing to it. WebArena requires the self-hosted services and the standard `WA_*` environment variables.
 
-For the local smoke runner, the default MiniWoB URL is:
+For the local smoke runner, the default MiniWoB++ URL is:
 
 ```bash
 export MINIWOB_URL="file://$PWD/.benchmarks/miniwob-plusplus/miniwob/html/miniwob/"
@@ -64,7 +64,7 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --max-elements 80
 ```
 
-For a one-repeat MiniWoB full-suite comparison run, use:
+For a one-repeat MiniWoB++ full-suite comparison run, use:
 
 ```bash
 uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
@@ -82,7 +82,7 @@ Supported benchmarks are `miniwob`, `webarena`, `webarena_lite`, `webarena_verif
 Presets:
 
 - `miniwob:verify-five`: `miniwob.click-button`, `miniwob.enter-text`, `miniwob.click-checkboxes`, `miniwob.form-sequence`, and `miniwob.scroll-text`.
-- `miniwob:full`: BrowserGym's default MiniWoB suite with `n_repeats=5` unless overridden.
+- `miniwob:full`: BrowserGym's default MiniWoB++ suite with `n_repeats=5` unless overridden.
 - `webarena_tiny:full`: BrowserGym's `webarena_tiny` benchmark.
 - `webarena:full`, `webarena_lite:full`, `webarena_verified:full`: BrowserGym defaults for those suites.
 - `custom`: pass one or more `--task` values.
@@ -103,12 +103,12 @@ The runner defaults to unified mode, OpenRouter, `z-ai/glm-4.7:nitro`, `--iterat
 
 Before creating a study, the runner validates benchmark setup:
 
-- MiniWoB requires `MINIWOB_URL` or the repo-local `.benchmarks/miniwob-plusplus/miniwob/html/miniwob` checkout.
+- MiniWoB++ requires `MINIWOB_URL` or the repo-local `.benchmarks/miniwob-plusplus/miniwob/html/miniwob` checkout.
 - WebArena variants require the standard self-hosted `WA_*` URL variables.
 
 ## AgentLab Configuration
 
-Import the adapter from a module path visible on `PYTHONPATH`:
+Import the adapter from a module path visible on `PYTHONPATH`. The `ComputerUseAgentArgs` class name is a legacy internal name for Zip's AgentLab adapter.
 
 ```python
 from agentlab.experiments.study import make_study
@@ -127,7 +127,7 @@ agent_args = ComputerUseAgentArgs(
 study = make_study(
     benchmark="miniwob",
     agent_args=[agent_args],
-    comment="computer-use MiniWoB smoke",
+    comment="Zip MiniWoB++ smoke",
 )
 study.run(n_jobs=1)
 ```
@@ -139,7 +139,7 @@ Start with single-task smoke tests before broad runs:
 - one form task
 - one scroll or hover task
 
-This repo still includes the older two-task MiniWoB smoke runner:
+This repo still includes the older two-task MiniWoB++ smoke runner:
 
 ```bash
 AGENTLAB_EXP_ROOT="$PWD/logs/agentlab/studies" \

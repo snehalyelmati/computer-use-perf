@@ -1,6 +1,6 @@
 # Documentation Source Map
 
-This document records where the main documentation claims should be verified. It is intended to keep README, docs, and engineering writeups grounded in code and commit history.
+This document records where the main documentation claims should be verified. It is intended to keep Zip's README, docs, and engineering writeups grounded in code and commit history.
 
 ## Current Runtime
 
@@ -79,7 +79,7 @@ Tools implemented but not in the default worker tool set include `find_elements`
 - Metrics and run directories: `src/agent/metrics.py`.
 - Page capture: `src/agent/capture/page_saver.py`.
 - Metrics analysis scripts: `scripts/analyze_metrics.py`, `scripts/analyze_last_run.py`.
-- Result generation: `scripts/generate_results.py`.
+- Archived external-challenge result generation: `scripts/generate_results.py`.
 - BrowserGym benchmark reporting: `benchmarks/agentlab/run_browsergym_benchmark.py`.
 
 Verified facts:
@@ -93,21 +93,22 @@ Verified facts:
 
 - Adapter: `benchmarks/agentlab/computer_use_agent.py`.
 - Generic runner and report generation: `benchmarks/agentlab/run_browsergym_benchmark.py`.
-- Legacy MiniWoB smoke runner: `benchmarks/agentlab/run_miniwob_smoke.py`.
+- Legacy MiniWoB++ smoke runner: `benchmarks/agentlab/run_miniwob_smoke.py`.
 - Regression tests: `tests/test_agentlab_adapter.py`, `tests/test_browsergym_benchmark_runner.py`.
 
 Verified facts:
 
 - BrowserGym owns task setup, browser lifecycle, rewards, termination, and validation.
 - The adapter requests `use_raw_page_output=True`, stores the raw Playwright page, passes BrowserGym reward/termination into the runtime as external validation, and returns `noop()` after the internal agent mutates the live page.
-- The generic runner supports MiniWoB, WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny.
-- MiniWoB `verify-five` is a five-task verification subset; MiniWoB `full` uses BrowserGym's default suite with `n_repeats=5` unless overridden.
+- The generic runner supports MiniWoB++ (BrowserGym key: `miniwob`), WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny.
+- `miniwob:verify-five` is a five-task verification subset; `miniwob:full` uses BrowserGym's default MiniWoB++ suite with `n_repeats=5` unless overridden.
 - Iteration profiles are `full`, `balanced`, and `cheap`; checked-in task-set manifests live under `benchmarks/agentlab/task_sets/`.
 - WebArena variants use AgentLab's `ray` backend when `--n-jobs > 1` so BrowserGym task dependencies are preserved.
 - Benchmark reports count missing `cum_reward` rows as zero reward and include those gaps in `warnings.parse_gaps`.
 - Report artifacts are `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`.
 - AgentLab `AgentInfo.stats` token/cost values are per-step deltas; cumulative totals live in `extra_info.cumulative_usage`.
-- Version-controlled BrowserGym result notes live under `docs/benchmark-results/`; the latest recorded one-repeat MiniWoB full-suite note is `docs/benchmark-results/miniwob-full-run-2026-05-26.md`.
+- Version-controlled BrowserGym result notes live under `docs/benchmark-results/`; the latest recorded one-repeat MiniWoB++ full-suite note is `docs/benchmark-results/miniwob-full-run-2026-05-26.md`.
+- Archived external-challenge results live at `docs/benchmark-results/external-challenge-results.md`.
 
 ## Historical Commit Sources
 
@@ -142,11 +143,11 @@ AgentLab and BrowserGym commits:
 
 - Task file support replacing direct goal CLI usage: `1ce84c4`.
 - AgentLab BrowserGym adapter and Python 3.12 compatibility: `3a41cf5`.
-- MiniWoB smoke benchmark runner and BrowserGym sync bridge: `75159be`.
-- MiniWoB benchmark defaults, option selection, and unified no-action done gating: `55d29be`.
-- MiniWoB visual handling, `click_at`, benchmark shutdown/logging hardening, and resource tracker suppression: `343a670`.
-- MiniWoB benchmark reliability improvements: `9efe402`.
-- MiniWoB interaction handling improvements: `11f2268`.
+- MiniWoB++ smoke benchmark runner and BrowserGym sync bridge: `75159be`.
+- MiniWoB++ benchmark defaults, option selection, and unified no-action done gating: `55d29be`.
+- MiniWoB++ visual handling, `click_at`, benchmark shutdown/logging hardening, and resource tracker suppression: `343a670`.
+- MiniWoB++ benchmark reliability improvements: `9efe402`.
+- MiniWoB++ interaction handling improvements: `11f2268`.
 - Text selection and resize validation improvements: `368ce18`.
 
 Benchmark-specific commits:
@@ -160,7 +161,7 @@ Benchmark-specific commits:
 ## Existing Docs To Keep In Sync
 
 - `docs/observability.md`
-- `docs/architecture-options.md`
-- `docs/challenge-map.md`
+- `docs/architecture-options.md` (historical design review)
+- `docs/challenge-map.md` (archived external challenge history)
 - `docs/qwen3-prompting-guide.md`
-- `results.md`
+- `docs/benchmark-results/external-challenge-results.md`

@@ -1,12 +1,58 @@
-# Archived Benchmark Results
+# Benchmark Results
 
-The project was developed against an external browser-agent challenge site. That site may no longer be reliably available, so these results should be read as historical development evidence rather than a currently reproducible public benchmark.
+Zip's primary reproducible benchmark path is BrowserGym through AgentLab. BrowserGym owns task setup, browser lifecycle, rewards, termination, and validation; Zip runs its normal context extraction, agent loop, semantic tools, metrics, and reporting inside the live BrowserGym page.
 
-The raw generated table is kept in `results.md`. It is produced by `scripts/generate_results.py`, which scans run logs, preserves history in `logs/results_history.json`, and regenerates the Markdown table.
+## Current Headline Result
 
-## What The Benchmark Was Useful For
+| Date | Benchmark | Episodes | Score | Errors | Model | Cost | Notes |
+| --- | --- | ---: | ---: | ---: | --- | ---: | --- |
+| 2026-05-26 | MiniWoB++ full suite, one repeat | 125 | 86.4% | 0 | `openrouter` / `z-ai/glm-4.7:nitro` | $7.15 | [summary](miniwob-full-run-2026-05-26.md), [failure analysis](miniwob-full-run-2026-05-26-failure-analysis.md) |
+| 2026-05-21 | MiniWoB++ full suite, one repeat | 125 | 58.4% | 0 | `openrouter` / `z-ai/glm-4.7:nitro` | $38.80 | [summary](miniwob-full-run-2026-05-21.md), [failure analysis](miniwob-full-run-2026-05-21-failure-analysis.md) |
 
-The benchmark forced the agent through a wide range of browser interaction patterns:
+The 2026-05-26 run is the current comparison point and the basis for future BrowserGym leaderboard submission work. Treat it as a recorded one-repeat run, not a final multi-seed leaderboard claim.
+
+## Reproducible BrowserGym Command
+
+BrowserGym refers to MiniWoB++ with the benchmark key `miniwob`.
+
+```bash
+uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
+  --benchmark miniwob \
+  --preset full \
+  --n-repeats 1 \
+  --max-steps 20 \
+  --env-max-steps 10 \
+  --max-elements 80 \
+  --n-jobs 1
+```
+
+The generic runner writes these artifacts inside each AgentLab study directory:
+
+- `benchmark_report.json`
+- `benchmark_report.md`
+- `per_task_results.csv`
+- `failed_tasks.md`
+- AgentLab's `result_df.csv`, `summary_df.csv`, `error_report.md`, and `study.pkl.gz`
+
+Because `logs/` is gitignored, version-controlled run notes in this directory are the durable index for recorded benchmark runs.
+
+## Interpreting BrowserGym Results
+
+Use the BrowserGym/AgentLab reports for standard comparisons:
+
+- BrowserGym reward and termination are the source of truth for success.
+- Missing `cum_reward` rows are counted as zero reward by the report generator.
+- Scores depend on model/provider behavior, runtime caps, and benchmark setup.
+- Custom task-set runs are useful for local regression work but should not be compared as full-suite results.
+- Full-suite leaderboard-style runs should keep `benchmark_report.json`, `per_task_results.csv`, `result_df.csv`, and any exported leaderboard JSON together.
+
+## Archived External Challenge History
+
+Before the BrowserGym path existed, Zip was iterated against an external browser-agent challenge site. That site may no longer be reliably available, so those results are archived as development history rather than standard benchmark evidence.
+
+The raw generated table is kept in [`external-challenge-results.md`](external-challenge-results.md). It is produced by `scripts/generate_results.py`, which scans run logs, preserves history in `logs/results_history.json`, and regenerates the Markdown table.
+
+That external benchmark was still useful because it forced the agent through a wide range of browser interaction patterns:
 
 - Click and form tasks.
 - Hidden DOM and visible-code tasks.
@@ -18,60 +64,4 @@ The benchmark forced the agent through a wide range of browser interaction patte
 - Service worker and WebSocket behavior.
 - Disabled-to-enabled transitions.
 
-This made it useful as a failure-mode generator even when individual site bugs required benchmark-specific investigation.
-
-## How Results Are Recorded
-
-Each run summary records:
-
-- Run ID.
-- Git commit.
-- Provider and model.
-- Per-role models when configured.
-- Duration and active duration.
-- Token usage.
-- Cost when available.
-- Step count and stop reason.
-
-`scripts/generate_results.py` also parses snapshot URLs to estimate the furthest challenge step reached and uses `logs/full_challenge_map.json` when available to label the challenge type where a run stopped.
-
-## Interpreting The Table
-
-When reading `results.md`, treat it as a development timeline:
-
-- Early runs reflect the original and transitional harness behavior.
-- Middle runs reflect the modular architecture and core reliability work.
-- Later runs focus more on provider routing, cost reporting, token compaction, and per-step overhead.
-
-The table is most useful for comparing regressions and improvements across commits, not for making broad model benchmark claims.
-
-## Important Caveats
-
-- The external benchmark may be unavailable.
-- Historical runs may include interrupted runs.
-- Some runs include benchmark-specific recovery logic.
-- Results depend on model/provider availability and pricing at the time of the run.
-- Some costs are estimated from local pricing maps when provider-side cost metadata is unavailable.
-
-## Benchmark-Specific Fixes
-
-The repository contains documented investigations for benchmark-site issues, including:
-
-- React state leak on back-to-back math puzzle steps.
-- Nested iframe frame ID mismatch.
-- Recursive iframe off-by-one behavior.
-- Final-step code reveal behavior.
-- Retina/HiDPI viewport classification issues.
-
-These are valuable debugging case studies, but they should not be presented as general-purpose browser-agent features.
-
-## Current Reproducibility Path
-
-The archived external benchmark results remain historical, but the repository now has a reproducible BrowserGym/AgentLab path. Start with the MiniWoB verification preset documented in `docs/agentlab-benchmarks.md`; it runs under BrowserGym validation and writes `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`.
-
-For broader coverage, run the MiniWoB `full` preset with an explicit repeat count. Keep full-suite runs separate from custom local regression subsets so their scores remain comparable over time.
-
-## Recorded BrowserGym Runs
-
-- `2026-05-21`: MiniWoB full suite, one repeat, `125` episodes, `58.4%` score, `$38.80` logged cost. See [run summary](miniwob-full-run-2026-05-21.md); all-cases review and failure backlog in [failure analysis](miniwob-full-run-2026-05-21-failure-analysis.md).
-- `2026-05-26`: MiniWoB full suite, one repeat, `125` episodes, `86.4%` score, `$7.15` logged cost. See [run summary](miniwob-full-run-2026-05-26.md); remaining-failures review in [failure analysis](miniwob-full-run-2026-05-26-failure-analysis.md).
+Read `external-challenge-results.md` as an engineering timeline: useful for understanding regressions and design pressure, not for making current model benchmark claims.

@@ -37,7 +37,7 @@ Architecture:
 - Uses PydanticAI for orchestration and structured outputs.
 - Uses OpenRouter (OpenAI-compatible), Cerebras, or Groq for LLM access.
 - Uses CDP for context extraction and Playwright for action execution.
-- Default pipeline: **Handler extraction** (optional JS introspection) → **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor, sees only goal + pruned snapshot). Unified mode skips the Orchestrator/Worker split after Oracle/Filter and uses a single tool-equipped agent.
+- Default pipeline: **Handler extraction** (optional JS introspection) → **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor using the delegated goal, compact recent state, useful text, and pruned snapshot). Unified mode skips the Orchestrator/Worker split after Oracle/Filter and uses a single tool-equipped agent.
 - Benchmark path: `benchmarks/agentlab/computer_use_agent.py` adapts the runtime to BrowserGym-owned pages; `benchmarks/agentlab/run_browsergym_benchmark.py` selects BrowserGym benchmarks and writes report artifacts.
 - Handler extraction runs a single `page.evaluate()` before snapshot capture; stamps elements with `data-agent-hid` for correlation, cleaned up after snapshot. Disable with `--no-handlers`.
 - Oracle advice + diff are fed into the filter; filter cache is invalidated when Oracle intervenes with `all_clear=false`.
@@ -47,7 +47,7 @@ Agent Responsibilities:
 - **Filter**: Receives full snapshot tree + diff + Oracle advice. Conservatively removes only obvious filler elements. Cached when page fingerprint is unchanged.
 - **Oracle**: Reviews the execution trace (step history with URLs, goals, outcomes, diff stats). Fires periodically (every N steps) and when stuck. Issues directives the orchestrator must follow.
 - **Orchestrator**: Plans the next sub-goal using stable element IDs from the pruned snapshot. Follows Oracle directives when present.
-- **Worker**: Executes the goal using semantic tools. Receives only the goal + pruned snapshot (no memory, no progress info).
+- **Worker**: Executes the delegated goal using semantic tools. Receives compact recent state, useful text, and the pruned snapshot.
 
 Verification:
 - When possible, write a local debug script (e.g. `debug_<feature>.py`) to verify changes against a minimal test page before running the full agent end-to-end.

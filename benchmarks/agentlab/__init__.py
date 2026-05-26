@@ -1,4 +1,4 @@
-"""AgentLab benchmark adapter for the computer-use agent."""
+"""AgentLab benchmark adapter for Zip."""
 
 from benchmarks.agentlab.computer_use_agent import (
     ComputerUseAgentArgs,

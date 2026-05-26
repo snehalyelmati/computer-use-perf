@@ -1,6 +1,6 @@
 # Benchmark Lessons And Results
 
-This project was developed against an external browser-agent challenge site. That site may no longer be reliably available, so the benchmark results are now best understood as archived development history.
+Zip was initially developed against an external browser-agent challenge site. That site may no longer be reliably available, so those results are now best understood as archived development history. Current standard benchmark work runs through BrowserGym and AgentLab.
 
 That is still useful. The benchmark acted as a failure-mode generator.
 
@@ -23,7 +23,7 @@ Each category forced a different part of the agent to improve.
 
 ## What The Results Table Shows
 
-`results.md` is generated from run logs. It records run ID, commit, provider, model, per-role model overrides, challenge progress, duration, tokens, cost, and stop reason.
+`docs/benchmark-results/external-challenge-results.md` is generated from run logs. It records run ID, commit, provider, model, per-role model overrides, challenge progress, duration, tokens, cost, and stop reason.
 
 The best way to read it is as a timeline:
 
@@ -56,6 +56,6 @@ These are good debugging stories, but they should be presented separately from t
 
 ## What I Would Add Next
 
-The useful follow-up has shifted from building a repo-local demo benchmark to broadening the BrowserGym/AgentLab path. MiniWoB verification gives the project a reproducible smoke path, and recorded one-repeat MiniWoB full-suite runs now provide a broader score-comparison path with BrowserGym-owned validation and local report artifacts.
+The useful follow-up has shifted from building a repo-local benchmark harness to broadening the BrowserGym/AgentLab path. MiniWoB++ verification gives Zip a reproducible smoke path, and recorded one-repeat MiniWoB++ full-suite runs now provide a broader score-comparison path with BrowserGym-owned validation and local report artifacts.
 
-The next step is to repeat full-suite MiniWoB runs to separate regressions from seed/model variance, work down the remaining MiniWoB failure families, and expand into WebArena-family runs. Full-suite leaderboard-style runs should remain distinct from custom regression subsets.
+The next step is to repeat full-suite MiniWoB++ runs to separate regressions from seed/model variance, work down the remaining MiniWoB++ failure families, and expand into WebArena-family runs. Full-suite leaderboard-style runs should remain distinct from custom regression subsets.

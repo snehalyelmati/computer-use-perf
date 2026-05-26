@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-A general-purpose browser agent. Python 3.12, managed with [uv](https://docs.astral.sh/uv/).
+Zip is a lightweight, modular browser-use agent. Python 3.12, managed with [uv](https://docs.astral.sh/uv/).
 
 ## Commands
 
@@ -72,10 +72,9 @@ Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlin
 
 ## Results Tracking
 
-- After a meaningful agent run, regenerate archived challenge results: `uv run python scripts/generate_results.py`
-- Review `results.md` diff before committing to track progress/regressions
 - For BrowserGym benchmarks, use `benchmarks/agentlab/run_browsergym_benchmark.py`; missing `cum_reward` rows are scored as zero and reported in `warnings.parse_gaps`
 - `AgentInfo.stats` token/cost fields are per-step deltas; cumulative native run totals live under `extra_info.cumulative_usage`.
+- Archived external-challenge runs are historical only. If maintaining them, regenerate with `uv run python scripts/generate_results.py` and review `docs/benchmark-results/external-challenge-results.md`.
 
 ## Architecture
 
@@ -83,7 +82,7 @@ Each run writes to its own `logs/<run_id>/` subdirectory. A `logs/latest` symlin
 - Core modules live in `src/agent/`
 - Uses PydanticAI for orchestration and OpenRouter/Cerebras/Groq provider access
 - Uses CDP for context extraction and Playwright for action execution
-- Default pipeline: **Handler extraction** (optional JS introspection) → **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor, sees only goal + pruned snapshot)
+- Default pipeline: **Handler extraction** (optional JS introspection) → **Filter** (conservative tree pruner) → **Oracle** (periodic + stuck health check) → **Orchestrator** (goal planner using element IDs) → **Worker** (browser executor using the delegated goal, compact recent state, useful text, and pruned snapshot)
 - Unified mode skips the Orchestrator/Worker split after Oracle/Filter and uses a single tool-equipped agent
 - AgentLab path: `benchmarks/agentlab/computer_use_agent.py` runs the runtime inside BrowserGym-owned pages; `benchmarks/agentlab/run_browsergym_benchmark.py` selects MiniWoB/WebArena benchmarks and writes reports
 - Handler extraction runs a single `page.evaluate()` before snapshot capture; stamps elements with `data-agent-hid` for correlation, cleaned up after snapshot

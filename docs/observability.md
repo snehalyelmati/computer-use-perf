@@ -1,4 +1,4 @@
-## Observability
+# Observability
 
 This agent emits both human-readable logs and machine-readable metrics.
 

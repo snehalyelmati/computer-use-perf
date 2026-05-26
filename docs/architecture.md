@@ -1,6 +1,6 @@
 # Current Architecture
 
-This document describes the current code path, not the historical harness. It is verified against `main.py`, `src/agent/core/agent.py`, `src/agent/context/snapshot.py`, `src/agent/tools/semantic.py`, and `src/agent/prompts/system.py`.
+This document describes Zip's current code path, not the historical harness. It is verified against `main.py`, `src/agent/core/agent.py`, `src/agent/context/snapshot.py`, `src/agent/tools/semantic.py`, and `src/agent/prompts/system.py`.
 
 ## Runtime Entry
 
@@ -14,15 +14,15 @@ It then calls `run_agent_sync()`, which creates a `BrowserAgent` and runs the as
 
 ## AgentLab Entry
 
-`benchmarks/agentlab/computer_use_agent.py` adds a benchmark entry path for AgentLab and BrowserGym. `ComputerUseAgentArgs` is the serializable AgentLab configuration object. It creates `ComputerUseAgentLabAgent`, sets `use_raw_page_output=True`, and uses BrowserGym's raw `obs["page"]` instead of launching a browser.
+`benchmarks/agentlab/computer_use_agent.py` adds Zip's benchmark entry path for AgentLab and BrowserGym. `ComputerUseAgentArgs` and `ComputerUseAgentLabAgent` are legacy internal class names for the Zip adapter. The adapter sets `use_raw_page_output=True` and uses BrowserGym's raw `obs["page"]` instead of launching a browser.
 
-`obs_preprocessor()` stores the raw Playwright page on the agent, converts any BrowserGym reward/termination fields into a `ValidationSignal`, and removes the page before AgentLab pickles step data. `get_action()` wraps the BrowserGym sync page with `src/agent/browser/external.py`, runs one `BrowserAgentStepRuntime` step with the latest validation signal, then returns `noop()` so BrowserGym can observe and validate the page that this agent already mutated.
+`obs_preprocessor()` stores the raw Playwright page on the agent, converts any BrowserGym reward/termination fields into a `ValidationSignal`, and removes the page before AgentLab pickles step data. `get_action()` wraps the BrowserGym sync page with `src/agent/browser/external.py`, runs one `BrowserAgentStepRuntime` step with the latest validation signal, then returns `noop()` so BrowserGym can observe and validate the page that Zip already mutated.
 
 ```mermaid
 sequenceDiagram
     participant Study as AgentLab Study
     participant Env as BrowserGym Env
-    participant Adapter as ComputerUseAgentLabAgent
+    participant Adapter as Zip Adapter
     participant Bridge as Sync Page Bridge
     participant Runtime as BrowserAgentStepRuntime
     participant Tools as Semantic Tools

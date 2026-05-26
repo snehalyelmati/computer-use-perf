@@ -1,10 +1,10 @@
-# MiniWoB Full Suite Run - 2026-05-26
+# MiniWoB++ Full Suite Run - 2026-05-26
 
-This records the one-repeat full MiniWoB run started at study timestamp `2026-05-26_15-41-13`.
+This records the one-repeat full MiniWoB++ run for Zip started at study timestamp `2026-05-26_15-41-13`. BrowserGym refers to this benchmark with the key `miniwob`.
 
 ## Storage Status
 
-The run artifacts are stored locally under:
+The run artifacts are stored locally under the original study path:
 
 `logs/agentlab/studies/2026-05-26_15-41-13_computer-use-agent-on-miniwob-full/`
 
@@ -21,6 +21,8 @@ That directory contains the expected AgentLab and runner outputs:
 
 Important caveat: `logs/` is gitignored, so the raw artifacts are not version-controlled. This file is the version-controlled index entry for the run. The native per-episode `logs/agentlab/<run_id>/` directories may be pruned independently; missing native logs in report warnings do not invalidate the study artifacts.
 
+The retained path includes the earlier `computer-use-agent` working name because it was created before the Zip rename.
+
 ## Command
 
 ```bash
@@ -34,7 +36,7 @@ uv run --extra agentlab python benchmarks/agentlab/run_browsergym_benchmark.py \
   --n-jobs 1
 ```
 
-The report records the resolved Python invocation as:
+The report also captured this local absolute Python invocation from the original checkout:
 
 ```bash
 /Users/snehalyelmati/Documents/computer-use-perf/.venv/bin/python3 benchmarks/agentlab/run_browsergym_benchmark.py --benchmark miniwob --preset full --n-repeats 1 --max-steps 20 --env-max-steps 10 --max-elements 80 --n-jobs 1
@@ -77,7 +79,7 @@ Cost and token totals were aggregated from the per-episode `summary_info.json` f
 - Average cost per episode: `$0.05716490`
 - Total tokens: `3,378,433`
 - BrowserGym episode steps: `187`
-- Internal computer-use steps: `300`
+- Internal Zip steps: `300`
 - Agent elapsed time: `2,027.89s` (`33.8 min`)
 
 ## Failed Tasks

@@ -1,6 +1,8 @@
-# MiniWoB Full Suite All-Cases Review - 2026-05-21
+# MiniWoB++ Full Suite All-Cases Review - 2026-05-21
 
-This report audits every episode from study `2026-05-21_22-05-01_computer-use-agent-on-miniwob-full`, not only the failed subset. It uses retained AgentLab artifacts as source of truth: `per_task_results.csv`, `result_df.csv`, `summary_info.json`, `goal_object.pkl.gz`, and each `step_*.pkl.gz`. Native `logs/agentlab/<run_id>/` files were checked only when still present.
+This report audits every episode from the one-repeat MiniWoB++ full-suite run for Zip. BrowserGym refers to this benchmark with the key `miniwob`.
+
+The retained study path is `2026-05-21_22-05-01_computer-use-agent-on-miniwob-full`; it includes the earlier `computer-use-agent` working name because the run predates the Zip rename. The report uses retained AgentLab artifacts as source of truth: `per_task_results.csv`, `result_df.csv`, `summary_info.json`, `goal_object.pkl.gz`, and each `step_*.pkl.gz`. Native `logs/agentlab/<run_id>/` files were checked only when still present.
 
 The audit was cross-checked through 25 five-case assignments run in five-agent waves, then consolidated with a local artifact/source pass for the long-running social-media and terminal/editor assignments. Scratch extraction files remain outside the repository under `/tmp/miniwob_failure_review/` and `/tmp/miniwob_subagent_audit/`.
 

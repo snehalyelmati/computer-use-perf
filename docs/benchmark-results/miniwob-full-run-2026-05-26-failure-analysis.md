@@ -1,6 +1,6 @@
-# MiniWoB Full Suite Failure Analysis - 2026-05-26
+# MiniWoB++ Full Suite Failure Analysis - 2026-05-26
 
-This note summarizes the remaining zero-reward failures from the `2026-05-26_15-41-13` one-repeat MiniWoB full-suite run.
+This note summarizes the remaining zero-reward failures from the `2026-05-26_15-41-13` one-repeat MiniWoB++ full-suite run. BrowserGym refers to this benchmark with the key `miniwob`.
 
 ## Summary
 
@@ -15,7 +15,7 @@ This note summarizes the remaining zero-reward failures from the `2026-05-26_15-
 | --- | --- | --- |
 | SVG / coordinate geometry | `circle-center`, `find-midpoint` | The agent identified plausible SVG coordinates, but coordinate-frame conversion or exact target placement produced zero reward. |
 | Menus and stateful widgets | `click-menu`, `click-pie`, `daily-calendar` | Multi-level menus and dynamically revealed controls still caused missed selections, repeated clicks, or env-step truncation. |
-| Drag, resize, and canvas | `drag-cube`, `drag-shapes`, `drag-shapes-2`, `resize-textarea` | Spatial pointer operations were attempted but did not reliably satisfy MiniWoB's target geometry or resize validation. |
+| Drag, resize, and canvas | `drag-cube`, `drag-shapes`, `drag-shapes-2`, `resize-textarea` | Spatial pointer operations were attempted but did not reliably satisfy MiniWoB++ target geometry or resize validation. |
 | Visual reasoning gaps | `count-sides`, `number-checkboxes`, `text-transform`, `tic-tac-toe` | Some tasks required interpreting visual layouts or game state that was not represented well enough in the worker context. |
 | Validation/action mismatch | `enter-date`, `search-engine` | The runtime believed the action path was complete, but BrowserGym returned zero reward after submission/navigation. |
 | Stuck or truncated loops | `email-inbox-nl-turk`, `hot-cold` | The internal runtime stopped for no-progress/tool-limit reasons while BrowserGym continued until env-step truncation. |
@@ -33,7 +33,7 @@ This note summarizes the remaining zero-reward failures from the `2026-05-26_15-
 | `miniwob.drag-shapes` | 30 | 1 | false | Dragged the wrong shape set or positions, then submitted for negative reward. |
 | `miniwob.drag-shapes-2` | 14 | 3 | false | Multiple drag and pointer-drag attempts did not place shapes correctly before submit. |
 | `miniwob.email-inbox-nl-turk` | 14 | 10 | true | Inbox navigation/reply flow stalled and BrowserGym truncated. |
-| `miniwob.enter-date` | 8 | 1 | false | Entered `07/07/2017` and submitted, but MiniWoB returned negative reward. |
+| `miniwob.enter-date` | 8 | 1 | false | Entered `07/07/2017` and submitted, but BrowserGym returned negative reward. |
 | `miniwob.find-midpoint` | 7 | 1 | false | Computed midpoint `(86.5, 61)` and submitted, but click landed outside the accepted target. |
 | `miniwob.hot-cold` | 21 | 10 | true | Internal runtime stopped for no progress and BrowserGym truncated. |
 | `miniwob.number-checkboxes` | 25 | 1 | false | Began drawing the target number with checkboxes but did not complete the full pattern. |
