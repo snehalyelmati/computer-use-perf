@@ -1,0 +1,9 @@
+{
+  "benchmark": "miniwob",
+  "description": "Social-media tasks with like, reply, retweet, or follow icon controls.",
+  "tasks": [
+    "miniwob.social-media",
+    "miniwob.social-media-all",
+    "miniwob.social-media-some"
+  ]
+}

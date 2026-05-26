@@ -1,6 +1,6 @@
-# Project Journey
+# Zip Project Journey
 
-This project did not start as the current modular browser agent. It started as a small custom harness and was repeatedly rewritten around concrete failures discovered while running browser tasks.
+Zip did not start as the current modular browser-use agent. It started as a small custom harness and was repeatedly rewritten around concrete failures discovered while running browser tasks.
 
 ## Phase 1: A Simple Harness
 
@@ -102,6 +102,12 @@ The benchmark was still useful because it forced a wide range of browser failure
 
 Some fixes in the code are benchmark-specific, such as stale puzzle state recovery, recursive iframe challenge recovery, and final-step finish navigation. These should be documented as benchmark discoveries, not as general-purpose browser-agent design.
 
+## Phase 7: Standard Benchmark Path
+
+The current benchmark path runs through BrowserGym and AgentLab. BrowserGym owns the browser environment, reward, termination, and validation while Zip runs its normal perception, planning, tools, logs, metrics, and completion policy inside the live page.
+
+This made MiniWoB++ the primary reproducible benchmark target and moved the older external challenge results into archived development history.
+
 ## What Worked
 
 - Stable element IDs made tool calls safer than raw labels or selectors.
@@ -123,4 +129,4 @@ Some fixes in the code are benchmark-specific, such as stale puzzle state recove
 
 ## Current State
 
-The current project is an experimental browser-agent runtime, not a polished product package. It can run against arbitrary URLs and tasks, records detailed run artifacts, and includes archived benchmark results from development. The next presentation step is to separate the reusable agent design from benchmark-specific recovery code and add a local demo target so the repo remains reproducible without the original benchmark site.
+Zip is now a lightweight modular browser-use runtime with a direct URL/task runner, detailed run artifacts, archived development history, and a reproducible BrowserGym/AgentLab benchmark path. Current standard benchmark work centers on MiniWoB++ verification and recorded one-repeat full-suite runs; the next engineering steps are to isolate older benchmark-specific recovery code, repeat full-suite runs to track variance, and broaden BrowserGym coverage into WebArena-family tasks.

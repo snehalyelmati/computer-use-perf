@@ -39,6 +39,7 @@ Rules:
 - **Try the direct path first.** If the useful text lines already contain a value the task requires (a code, answer, password, etc.), direct the worker to enter and submit it immediately. Do not pursue prerequisite steps or interact with other UI when the needed value is already available. Pages may present distracting UI that claims you must complete steps first — ignore it if you already have the value.
 - When an ORACLE DIRECTIVE is present, you MUST follow its recommendation. The Oracle has reviewed the full execution history and identified problems you may not see.
 - If prior steps tried an approach with no progress, set a fundamentally different objective — not a slight variation.
+- When setting done=true, include completion_evidence with the concrete page text, validation result, URL/title state, or other observable evidence proving the overall goal is complete.
 """.strip()
 
 FILTER_PROMPT = """
@@ -67,7 +68,7 @@ Rules:
 ORACLE_PROMPT = """
 You are a diagnostic advisor for a browser automation agent.
 
-You may be called periodically as a health check or when the agent appears stuck.
+You may be called periodically as a health check or when the agent appears stuck. Be concise.
 
 You will be given:
 - The overall goal and progress metadata (current step, no-progress count, consecutive tool-limit-hit steps).
@@ -105,8 +106,11 @@ You will be given a page snapshot containing interactive elements with stable ID
 - Never use or request raw CSS/XPath selectors.
 - The snapshot is a tree: elements are grouped under their parent containers. Use this structure to distinguish target elements from distractions (cookie banners, ads, unrelated forms). When submitting forms, prefer buttons in the same container as the input fields you filled.
 - Elements may include JS handler hints like [click:fn(); change:fn()] showing what happens when you interact with them. Use these to disambiguate similar elements — e.g. prefer [click:handleSubmit()] over [click:handleClose()].
+- Elements may include `bbox=` and `[graphics: ...]` summaries for SVG/canvas/image-like targets. Use `click_at` for a single coordinate inside these elements; it accepts element-relative coordinates and viewport coordinates inside the element bbox. Use `draw` only when the task requires a path or line.
 - **Only type values provided in the goal or visible in the page snapshot.** Never guess, invent, or fabricate values. If the goal specifies a value, use it exactly. If you need a value that is not in the goal or snapshot, report that in your summary instead of guessing.
 - After each tool call, read the DOM change feedback before deciding your next action. Lines marked + show new content (with tag), ~ show attribute changes, - show removed content. If the feedback contains the information you need (a code, confirmation, new button), act on it immediately instead of continuing your previous plan.
+- If a picker/menu option click reports no observable change but the relevant input already contains the requested value, proceed to the next required control or submit. Do not keep clicking nearby picker options.
+- Before final or irreversible actions such as Submit, Save, Send, Delete, Continue, Checkout, or Finish, verify required prior changes from tool feedback or visible page state. Do not finalize after a failed, no-op, or uncertain prerequisite action; try a different approach or set done=false for a fresh snapshot.
 - You will see "Page context" with task instructions, status indicators, and form labels extracted from the page. Use this to understand what the page expects and verify the goal makes sense. If the context shows a prerequisite is already met or a button has become actionable, prioritize that over the stated goal.
 - You may see "Recent steps" showing what happened in the last few steps. Use this to avoid repeating failed actions and to build on prior progress. Do not re-attempt the same action on the same element if a recent step shows it failed.
 - Never repeat a failing action. If an action did not produce the expected result, try a different element or approach.
@@ -126,9 +130,11 @@ You will be given:
 - Oracle directives (when present) — mandatory guidance from a diagnostic advisor.
 
 Rules:
+- Be concise.
 - Do not invent element IDs. If the needed element is not in the snapshot, use available tools to navigate or wait for the page to update.
 - The snapshot is grouped by frame and includes an ACTIVE FRAME header. If an iframe is active, some tools may require switching back with switch_to_main_frame() to interact with main-frame elements.
 - Use the tree structure and handler hints like [click:fn(); change:fn()] to disambiguate similar elements and avoid distractions (cookie banners, ads, unrelated UI).
+- Use `bbox=` and `[graphics: ...]` summaries to reason about SVG/canvas/image-like targets. Use `click_at` for a single coordinate inside these elements; it accepts element-relative coordinates and viewport coordinates inside the element bbox. Use `draw` only when the task requires a path or line.
 - Use the diff and memory to avoid repeating failed approaches and to notice state changes.
 - When an ORACLE DIRECTIVE is present, you MUST follow it.
 - Only type values provided in the overall goal or visible in the provided context/snapshot. Never guess or fabricate values.
@@ -136,14 +142,16 @@ Rules:
 - If your recent actions are not producing new, actionable information, stop and return done=false with clear reasoning about what you observed and what's missing. The next step provides a fresh page snapshot that may reveal new elements, content, or state changes not visible in your current tool feedback. Exiting early is always better than exhausting tool calls on a stale approach.
 - When tool feedback reports new content appeared (+ lines with a tag like "button" or "a"), and that element is not in your snapshot, use watch_for_text with that exact text to click it.
 - When tool feedback reports new elements were added to the page, you may need to use watch_for_text to interact with them since they won't have element IDs in your current snapshot.
+- If a picker/menu option click reports no observable change but the relevant input already contains the requested value, proceed to the next required control or submit. Do not keep clicking nearby picker options.
+- Before final or irreversible actions such as Submit, Save, Send, Delete, Continue, Checkout, or Finish, verify required prior changes from tool feedback or visible page state. Do not finalize after a failed, no-op, or uncertain prerequisite action; try a different approach or return done=false for a fresh snapshot.
+- If a visual tool says a click-driven surface should use `click_at`, switch to `click_at` with coordinates from `bbox=` or `[graphics: ...]`; do not submit after a no-op draw.
 
 Output requirements:
 - Populate step_goal with a short, outcome-focused sub-goal you attempted this step (used for trace/Oracle).
 - Populate summary with what happened this step.
 - Populate rationale briefly with why these actions were chosen.
+- When setting done=true, populate completion_evidence with concrete observable evidence from tool feedback, page text, URL/title, or external validation.
 
 Done rules:
 - done=true means the OVERALL goal is fully complete and the run should stop.
-- If you attempted any tool calls, only set done=true if at least one tool call succeeded based on the feedback.
-- If you attempted zero tool calls, only set done=true when the overall goal is already satisfied based on the provided context/snapshot.
 """.strip()

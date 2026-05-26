@@ -81,6 +81,7 @@ _OBSERVER_INJECT_JS = """
     removedElements: [],
     attrChanges: [],
     interactiveNodes: [],
+    formStart: [],
   };
   const TEXT_CAP = 20;
   const INTERACTIVE_CAP = 10;
@@ -89,16 +90,24 @@ _OBSERVER_INJECT_JS = """
   const TRACKED_ATTRS = new Set([
     'aria-expanded','aria-checked','aria-selected','aria-hidden',
     'aria-disabled','disabled','checked','selected','open','hidden',
-    'value','href','src'
+    'value','href','src','class','style'
   ]);
   const INTERACTIVE_TAGS_SET = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','OPTION','IFRAME']);
   const INTERACTIVE_ROLES_SET = new Set([
     'button','checkbox','combobox','link','menuitem','option',
     'radio','slider','spinbutton','switch','tab','textbox'
   ]);
+  const SVG_INTERACTIVE_TAGS_SET = new Set([
+    'CIRCLE','ELLIPSE','G','LINE','PATH','POLYGON','POLYLINE','RECT','TEXT','TSPAN'
+  ]);
+  const SVG_ATTRS = [
+    'class','id','fill','stroke','x','y','x1','y1','x2','y2','cx','cy','r','rx','ry',
+    'width','height','data-index'
+  ];
 
   function isInteractive(el) {
     if (INTERACTIVE_TAGS_SET.has(el.tagName)) return true;
+    if ((el.ownerSVGElement || el.tagName === 'SVG') && SVG_INTERACTIVE_TAGS_SET.has(el.tagName)) return true;
     const role = el.getAttribute('role');
     if (role && INTERACTIVE_ROLES_SET.has(role.toLowerCase())) return true;
     if (el.hasAttribute('contenteditable')) return true;
@@ -146,6 +155,33 @@ _OBSERVER_INJECT_JS = """
     }
     return '';
   }
+
+  function attrsOf(el) {
+    const attrs = {};
+    if (!el.getAttribute) return attrs;
+    for (const key of SVG_ATTRS) {
+      const value = el.getAttribute(key);
+      if (value !== null && value !== '') attrs[key] = value;
+    }
+    return attrs;
+  }
+
+  function formValues() {
+    const controls = Array.from(document.querySelectorAll('input, textarea, select'));
+    return controls.slice(0, 60).map((el, index) => {
+      const tag = (el.tagName || '').toLowerCase();
+      const key = el.id || el.name || el.getAttribute('aria-label') ||
+        el.getAttribute('placeholder') || `${tag}:${index}`;
+      return {
+        key,
+        tag,
+        value: el.value !== undefined ? String(el.value) : '',
+        checked: el.checked === undefined ? null : Boolean(el.checked),
+      };
+    });
+  }
+
+  data.formStart = formValues();
 
   const callback = (mutations) => {
     for (const m of mutations) {
@@ -216,6 +252,33 @@ _OBSERVER_COLLECT_JS = """
 (() => {
   if (!window.__mutObs) return null;
   const { observer, data, callback, startUrl } = window.__mutObs;
+  const SVG_ATTRS = [
+    'class','id','fill','stroke','x','y','x1','y1','x2','y2','cx','cy','r','rx','ry',
+    'width','height','data-index'
+  ];
+  function attrsOf(el) {
+    const attrs = {};
+    if (!el.getAttribute) return attrs;
+    for (const key of SVG_ATTRS) {
+      const value = el.getAttribute(key);
+      if (value !== null && value !== '') attrs[key] = value;
+    }
+    return attrs;
+  }
+  function formValues() {
+    const controls = Array.from(document.querySelectorAll('input, textarea, select'));
+    return controls.slice(0, 60).map((el, index) => {
+      const tag = (el.tagName || '').toLowerCase();
+      const key = el.id || el.name || el.getAttribute('aria-label') ||
+        el.getAttribute('placeholder') || `${tag}:${index}`;
+      return {
+        key,
+        tag,
+        value: el.value !== undefined ? String(el.value) : '',
+        checked: el.checked === undefined ? null : Boolean(el.checked),
+      };
+    });
+  }
   const pending = observer.takeRecords();
   if (pending.length > 0) callback(pending);
   observer.disconnect();
@@ -236,10 +299,41 @@ _OBSERVER_COLLECT_JS = """
       role: role,
       text: text,
       name: name,
+      attrs: attrsOf(el),
     });
   }
 
   delete window.__mutObs;
+
+  const formEnd = formValues();
+  const startByKey = new Map();
+  for (const item of data.formStart || []) {
+    startByKey.set(`${item.tag}|${item.key}`, item);
+  }
+  const formChanges = [];
+  for (const item of formEnd) {
+    if (formChanges.length >= 12) break;
+    const previous = startByKey.get(`${item.tag}|${item.key}`);
+    if (!previous) continue;
+    if (previous.value !== item.value) {
+      formChanges.push({
+        tag: item.tag,
+        key: item.key,
+        attr: 'value',
+        old: previous.value,
+        new: item.value,
+      });
+    }
+    if (previous.checked !== item.checked) {
+      formChanges.push({
+        tag: item.tag,
+        key: item.key,
+        attr: 'checked',
+        old: previous.checked,
+        new: item.checked,
+      });
+    }
+  }
 
   const seen = new Set();
   const uniqueAdded = [];
@@ -258,6 +352,7 @@ _OBSERVER_COLLECT_JS = """
     addedElements: data.addedElements,
     removedElements: data.removedElements,
     attrChanges: data.attrChanges,
+    formChanges: formChanges,
     newInteractive: newInteractive,
     currentUrl: location.href,
     startUrl: startUrl,
@@ -275,6 +370,14 @@ def _resolve_element(element_id: str, context: ToolContext) -> ElementSnapshot |
         if element is not None:
             logger.warning("Auto-corrected element id %r -> %r", element_id, corrected)
     return element
+
+
+def _unknown_element_message(element_id: str) -> str:
+    return (
+        f"Unknown element id: {element_id}. The page likely changed after a prior tool call; "
+        "stop this step and wait for a fresh snapshot before using another element id."
+    )
+
 
 async def _resolve_object_id(backend_node_id: int, session: CDPSession) -> str | None:
     try:
@@ -299,7 +402,7 @@ async def _call_on_node(
         object_id = await _resolve_object_id(backend_node_id, session)
         if not object_id:
             return None
-        return await session.send(
+        result = await session.send(
             "Runtime.callFunctionOn",
             {
                 "objectId": object_id,
@@ -308,6 +411,9 @@ async def _call_on_node(
                 "returnByValue": True,
             },
         )
+        if result.get("exceptionDetails"):
+            return None
+        return result
     except Exception:
         return None
 
@@ -324,6 +430,30 @@ async def _viewport_info(backend_node_id: int, session: CDPSession) -> dict[str,
             const hit = document.elementFromPoint(x, y);
             const onTop = !!(hit && (this.contains(hit) || hit.contains(this)));
             return {x, y, width: rect.width, height: rect.height, onTop};
+        }
+        """,
+    )
+
+
+async def _element_rect_info(backend_node_id: int, session: CDPSession) -> dict[str, Any] | None:
+    return await _call_on_node(
+        backend_node_id,
+        session,
+        """
+        function () {
+            const before = this.getBoundingClientRect();
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const rect = this.getBoundingClientRect();
+            return {
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+                beforeLeft: before.left,
+                beforeTop: before.top,
+                beforeWidth: before.width,
+                beforeHeight: before.height,
+            };
         }
         """,
     )
@@ -382,6 +512,50 @@ async def _insert_text(session: CDPSession, text: str) -> bool:
         return False
     return True
 
+
+async def _type_text_with_keyboard(page: Any, text: str) -> tuple[bool, str | None]:
+    keyboard = getattr(page, "keyboard", None)
+    type_method = getattr(keyboard, "type", None)
+    if not callable(type_method):
+        return False, "keyboard typing unavailable"
+    try:
+        result = type_method(text)
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as exc:
+        return False, str(exc)
+    return True, None
+
+
+async def _set_text_value(backend_node_id: int, session: CDPSession, text: str) -> bool:
+    """Set input-like values through native setters and dispatch form events."""
+    result = await _call_on_node(
+        backend_node_id,
+        session,
+        """
+        function (value) {
+            const tag = (this.tagName || '').toUpperCase();
+            if (!('value' in this) || !['INPUT', 'TEXTAREA'].includes(tag)) {
+                return false;
+            }
+            const proto = tag === 'TEXTAREA'
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype;
+            const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (descriptor && descriptor.set) {
+                descriptor.set.call(this, value);
+            } else {
+                this.value = value;
+            }
+            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('change', { bubbles: true }));
+            return this.value === value;
+        }
+        """,
+        [{"value": text}],
+    )
+    return bool(result and result.get("result", {}).get("value"))
+
 async def _dom_focus(backend_node_id: int, session: CDPSession) -> bool:
     """Focus an element via DOM, bypassing visual obscuration."""
     result = await _call_on_node(
@@ -399,6 +573,144 @@ async def _dom_focus(backend_node_id: int, session: CDPSession) -> bool:
     if not result:
         return False
     return bool(result.get("result", {}).get("value"))
+
+
+async def _dispatch_pointer_drag_local(
+    backend_node_id: int,
+    session: CDPSession,
+    *,
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    steps: int,
+    allow_outside: bool = False,
+) -> tuple[bool, dict[str, float] | None, str | None]:
+    info = await _element_rect_info(backend_node_id, session)
+    value = (info or {}).get("result", {}).get("value")
+    if not value:
+        return False, None, "cannot locate element"
+    width = float(value.get("width") or 0)
+    height = float(value.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return False, None, "element has no visible area"
+    left = float(value.get("left") or 0)
+    top = float(value.get("top") or 0)
+    sx = max(0.0, min(float(start_x), width))
+    sy = max(0.0, min(float(start_y), height))
+    if allow_outside:
+        ex = float(end_x)
+        ey = float(end_y)
+    else:
+        ex = max(0.0, min(float(end_x), width))
+        ey = max(0.0, min(float(end_y), height))
+    px0 = left + sx
+    py0 = top + sy
+    px1 = left + ex
+    py1 = top + ey
+    try:
+        await session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": px0, "y": py0, "button": "none"})
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": px0, "y": py0, "button": "left", "clickCount": 1},
+        )
+        count = max(1, min(int(steps), 50))
+        for idx in range(1, count + 1):
+            t = idx / count
+            await session.send(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseMoved",
+                    "x": px0 + (px1 - px0) * t,
+                    "y": py0 + (py1 - py0) * t,
+                    "button": "left",
+                    "buttons": 1,
+                },
+            )
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": px1, "y": py1, "button": "left", "clickCount": 1},
+        )
+    except Exception as exc:
+        return False, None, str(exc)
+    return True, {
+        "start_local_x": sx,
+        "start_local_y": sy,
+        "end_local_x": ex,
+        "end_local_y": ey,
+        "start_viewport_x": px0,
+        "start_viewport_y": py0,
+        "end_viewport_x": px1,
+        "end_viewport_y": py1,
+        "width": width,
+        "height": height,
+    }, None
+
+
+async def _dispatch_pointer_drag_between_nodes(
+    source_backend_node_id: int,
+    target_backend_node_id: int,
+    session: CDPSession,
+    *,
+    steps: int,
+) -> tuple[bool, dict[str, float] | None, str | None]:
+    target_object_id = await _resolve_object_id(target_backend_node_id, session)
+    if not target_object_id:
+        return False, None, "cannot resolve target"
+    pair_info = await _call_on_node(
+        source_backend_node_id,
+        session,
+        """
+        function (targetEl) {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const sourceRect = this.getBoundingClientRect();
+            const targetRect = targetEl.getBoundingClientRect();
+            return {
+                source: {
+                    left: sourceRect.left,
+                    top: sourceRect.top,
+                    width: sourceRect.width,
+                    height: sourceRect.height,
+                },
+                target: {
+                    left: targetRect.left,
+                    top: targetRect.top,
+                    width: targetRect.width,
+                    height: targetRect.height,
+                },
+            };
+        }
+        """,
+        [{"objectId": target_object_id}],
+    )
+    value = (pair_info or {}).get("result", {}).get("value") or {}
+    source = value.get("source")
+    target = value.get("target")
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        return False, None, "cannot locate source or target"
+    source_width = float(source.get("width") or 0)
+    source_height = float(source.get("height") or 0)
+    target_width = float(target.get("width") or 0)
+    target_height = float(target.get("height") or 0)
+    if source_width <= 0 or source_height <= 0 or target_width <= 0 or target_height <= 0:
+        return False, None, "source or target has no visible area"
+    source_left = float(source.get("left") or 0)
+    source_top = float(source.get("top") or 0)
+    target_left = float(target.get("left") or 0)
+    target_top = float(target.get("top") or 0)
+    target_center_x = target_left + target_width / 2
+    target_center_y = target_top + target_height / 2
+    return await _dispatch_pointer_drag_local(
+        source_backend_node_id,
+        session,
+        start_x=source_width / 2,
+        start_y=source_height / 2,
+        end_x=target_center_x - source_left,
+        end_y=target_center_y - source_top,
+        steps=steps,
+        allow_outside=True,
+    )
+
 
 def _frame_tree_paths(frame_tree: dict[str, Any]) -> dict[str, list[int]]:
     paths: dict[str, list[int]] = {}
@@ -635,6 +947,22 @@ async def _resolve_new_interactive(
             backend_node_id = desc.get("node", {}).get("backendNodeId")
             if not backend_node_id:
                 continue
+            rect_value: dict[str, Any] = {}
+            try:
+                rect = await session.send(
+                    "Runtime.callFunctionOn",
+                    {
+                        "objectId": object_id,
+                        "functionDeclaration": (
+                            "function () { const r = this.getBoundingClientRect(); "
+                            "return {x: r.left, y: r.top, w: r.width, h: r.height}; }"
+                        ),
+                        "returnByValue": True,
+                    },
+                )
+                rect_value = rect.get("result", {}).get("value") or {}
+            except Exception:
+                rect_value = {}
             stable_id = build_stable_id_from_backend(frame_id, int(backend_node_id))
             resolved.append({
                 "stable_id": stable_id,
@@ -643,6 +971,8 @@ async def _resolve_new_interactive(
                 "role": item.get("role", ""),
                 "text": item.get("text", ""),
                 "name": item.get("name", ""),
+                "attrs": item.get("attrs") if isinstance(item.get("attrs"), dict) else {},
+                "bbox": rect_value,
             })
             # Clean up marker attribute
             await session.send(
@@ -661,6 +991,35 @@ async def _resolve_new_interactive(
         mutations["resolvedInteractive"] = resolved
 
 
+def _bbox_from_resolved_item(item: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    bbox = item.get("bbox")
+    if not isinstance(bbox, dict) or not {"x", "y", "w", "h"} <= set(bbox):
+        return None
+    try:
+        return (
+            float(bbox["x"]),
+            float(bbox["y"]),
+            float(bbox["w"]),
+            float(bbox["h"]),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_click_driven_visual_surface(element: ElementSnapshot) -> bool:
+    tag = (element.node_name or "").upper()
+    handlers = {name.lower() for name in (element.handlers or {})}
+    visual_tag = tag in {"CANVAS", "SVG", "G", "PATH", "LINE", "RECT", "CIRCLE", "ELLIPSE", "POLYGON", "POLYLINE"}
+    drag_handlers = handlers & {"mousedown", "mousemove", "mouseup", "pointerdown", "pointermove", "pointerup", "dragstart"}
+    return visual_tag and "click" in handlers and not drag_handlers
+
+
+def _is_clickable_svg_leaf(element: ElementSnapshot) -> bool:
+    tag = (element.node_name or "").upper()
+    handlers = {name.lower() for name in (element.handlers or {})}
+    return tag in {"CIRCLE", "ELLIPSE", "LINE", "PATH", "POLYGON", "POLYLINE", "RECT", "TEXT", "TSPAN"} and "click" in handlers
+
+
 def _register_new_elements(
     resolved: list[dict], context: ToolContext, frame_id: str | None, frame_url: str | None
 ) -> None:
@@ -676,8 +1035,8 @@ def _register_new_elements(
             role=item.get("role") or None,
             name=item.get("name") or None,
             text=item.get("text") or None,
-            bounding_box=None,
-            attributes={},
+            bounding_box=_bbox_from_resolved_item(item),
+            attributes=item.get("attrs") if isinstance(item.get("attrs"), dict) else {},
             frame_id=frame_id,
             frame_url=frame_url,
             frame_name=None,
@@ -742,6 +1101,13 @@ def _fmt_attr_val(attr: str, raw_val: str | None, *, is_present: bool) -> str:
         return labels[0] if is_present else labels[1]
     return "set" if is_present else "removed"
 
+def _fmt_form_val(raw_val: Any) -> str:
+    if raw_val is None:
+        return "unset"
+    if raw_val == "":
+        return '""'
+    return str(raw_val)
+
 def _build_change_lines(mutations: dict) -> list[str]:
     """Build diff-style change lines from mutation data."""
     lines: list[str] = []
@@ -784,19 +1150,55 @@ def _build_change_lines(mutations: dict) -> list[str]:
         new = _fmt_attr_val(attr, raw_new, is_present=raw_new is not None)
         lines.append(f"  ~ {tag}[{attr}]: {old} -> {new}")
 
+    # Form property changes are not always reflected as DOM attributes.
+    for change in mutations.get("formChanges", []):
+        tag = change.get("tag", "?")
+        key = str(change.get("key") or "").strip()
+        attr = change.get("attr", "?")
+        old = _fmt_form_val(change.get("old"))
+        new = _fmt_form_val(change.get("new"))
+        key_hint = f" {key}" if key else ""
+        lines.append(f"  ~ {tag}{key_hint}[{attr}]: {old} -> {new}")
+
+    # Visual updates can add SVG/canvas children with no text.
+    for tag in mutations.get("addedElements", [])[:8]:
+        if tag:
+            lines.append(f"  + element <{tag}>")
+
     # New interactive elements with IDs  (+ interactive)
     for item in resolved_items:
         sid = item.get("stable_id", "?")
         tag = item.get("tag", "?")
+        attrs = item.get("attrs") if isinstance(item.get("attrs"), dict) else {}
+        attr_bits = [
+            f'{key}="{attrs[key]}"'
+            for key in ("data-index", "id", "class", "x", "y", "cx", "cy", "width", "height")
+            if attrs.get(key)
+        ]
+        attr_hint = f" ({' '.join(attr_bits)})" if attr_bits else ""
         label = item.get("role") or item.get("name") or item.get("text") or ""
+        item_bbox = _bbox_from_resolved_item(item)
+        bbox_hint = ""
+        if item_bbox is not None:
+            x, y, w, h = item_bbox
+            bbox_hint = (
+                f" bbox={int(round(x))},"
+                f"{int(round(y))},"
+                f"{int(round(w))},"
+                f"{int(round(h))}"
+            )
         if label:
-            lines.append(f'  + interactive {sid}: {tag} "{label}"')
+            lines.append(f'  + interactive {sid}: {tag} "{label}"{attr_hint}{bbox_hint}')
         else:
-            lines.append(f"  + interactive {sid}: {tag}")
+            lines.append(f"  + interactive {sid}: {tag}{attr_hint}{bbox_hint}")
 
     # Removed text  (-)
     for item in mutations.get("removedText", []):
         lines.append(f"  - {_fmt_text_item(item)}")
+
+    for tag in mutations.get("removedElements", [])[:8]:
+        if tag:
+            lines.append(f"  - element <{tag}>")
 
     return lines
 
@@ -865,24 +1267,135 @@ _CLICK_BY_TEXT_JS = """
 """
 
 
+async def _select_option_element(
+    element: ElementSnapshot,
+    session: CDPSession,
+    context: ToolContext,
+) -> ToolResult:
+    result = await _call_on_node(
+        int(element.backend_node_id or 0),
+        session,
+        """
+        function () {
+            const option = this;
+            const select = option.closest && option.closest('select');
+            if (!select) {
+                return { ok: false, message: 'Option has no parent select' };
+            }
+            option.scrollIntoView({block: 'center', inline: 'center'});
+            const options = Array.from(select.options || []);
+            const index = options.indexOf(option);
+            if (index < 0) {
+                return { ok: false, message: 'Option is not in parent select' };
+            }
+            select.selectedIndex = index;
+            option.selected = true;
+            if (option.value !== undefined) {
+                select.value = option.value;
+            }
+            select.dispatchEvent(new Event('input', { bubbles: true }));
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            return {
+                ok: true,
+                value: select.value,
+                text: (option.textContent || '').trim(),
+                selectedIndex: select.selectedIndex
+            };
+        }
+        """,
+    )
+    details = (result or {}).get("result", {}).get("value")
+    if not isinstance(details, dict) or not details.get("ok"):
+        await _collect_mutations(session, settle_ms=50)
+        message = "Select option failed"
+        if isinstance(details, dict) and details.get("message"):
+            message = str(details["message"])
+        return ToolResult(ok=False, message=message)
+
+    mutations = await _collect_mutations_with_ids(
+        session,
+        context,
+        context.timing.settle_ms,
+        frame_id=element.frame_id,
+        frame_url=element.frame_url,
+    )
+    selected_text = str(details.get("text") or "")
+    selected_value = str(details.get("value") or "")
+    selected_index = details.get("selectedIndex")
+    base = (
+        f"Selected option {element.stable_id}"
+        f' text="{selected_text}" value="{selected_value}" index={selected_index}'
+    )
+    return ToolResult(ok=True, message=_format_verification(mutations, base))
+
+
 async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     context.last_tool = "click_element"
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
     session = await _session_for_element(element, context)
     await _inject_observer(session)
+    if (element.node_name or "").upper() == "OPTION":
+        return await _select_option_element(element, session, context)
     result = await _call_on_node(
         element.backend_node_id,
         session,
         """
         function () {
             this.scrollIntoView({block: 'center', inline: 'center'});
-            this.click();
+            const tag = (this.tagName || '').toUpperCase();
+            const isSvg = !!this.ownerSVGElement || tag === 'SVG';
+            const href = tag === 'A' ? (this.getAttribute('href') || '') : '';
+            if (!isSvg && typeof this.click === 'function') {
+                if (tag === 'A' && (href === '#' || href.startsWith('#'))) {
+                    const rect = this.getBoundingClientRect();
+                    const clientX = rect.left + rect.width / 2;
+                    const clientY = rect.top + rect.height / 2;
+                    const opts = {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        button: 0,
+                        buttons: 1,
+                        clientX,
+                        clientY,
+                        screenX: window.screenX + clientX,
+                        screenY: window.screenY + clientY,
+                    };
+                    this.dispatchEvent(new MouseEvent('mouseover', opts));
+                    this.dispatchEvent(new MouseEvent('mousemove', opts));
+                    this.dispatchEvent(new MouseEvent('mousedown', opts));
+                    this.dispatchEvent(new MouseEvent('mouseup', {...opts, buttons: 0}));
+                    this.dispatchEvent(new MouseEvent('click', {...opts, buttons: 0}));
+                    return true;
+                }
+                this.click();
+                return true;
+            }
+            const rect = this.getBoundingClientRect();
+            const clientX = rect.left + rect.width / 2;
+            const clientY = rect.top + rect.height / 2;
+            const opts = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: 1,
+                clientX,
+                clientY,
+                screenX: window.screenX + clientX,
+                screenY: window.screenY + clientY,
+            };
+            this.dispatchEvent(new MouseEvent('mouseover', opts));
+            this.dispatchEvent(new MouseEvent('mousemove', opts));
+            this.dispatchEvent(new MouseEvent('mousedown', opts));
+            this.dispatchEvent(new MouseEvent('mouseup', {...opts, buttons: 0}));
+            this.dispatchEvent(new MouseEvent('click', {...opts, buttons: 0}));
             return true;
         }
         """,
@@ -917,12 +1430,137 @@ async def click_element(element_id: str, context: ToolContext) -> ToolResult:
     return ToolResult(ok=True, message=message)
 
 
+async def click_at(
+    element_id: str,
+    x: float,
+    y: float,
+    context: ToolContext,
+) -> ToolResult:
+    context.last_tool = "click_at"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+
+    if _is_clickable_svg_leaf(element):
+        result = await _call_on_node(
+            element.backend_node_id,
+            session,
+            """
+            function () {
+                this.scrollIntoView({block: 'center', inline: 'center'});
+                const rect = this.getBoundingClientRect();
+                const clientX = rect.left + rect.width / 2;
+                const clientY = rect.top + rect.height / 2;
+                const opts = {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    button: 0,
+                    buttons: 1,
+                    clientX,
+                    clientY,
+                    screenX: window.screenX + clientX,
+                    screenY: window.screenY + clientY,
+                };
+                this.dispatchEvent(new MouseEvent('mouseover', opts));
+                this.dispatchEvent(new MouseEvent('mousemove', opts));
+                this.dispatchEvent(new MouseEvent('mousedown', opts));
+                this.dispatchEvent(new MouseEvent('mouseup', {...opts, buttons: 0}));
+                this.dispatchEvent(new MouseEvent('click', {...opts, buttons: 0}));
+                return true;
+            }
+            """,
+        )
+        if not result:
+            await _collect_mutations(session, settle_ms=50)
+            return ToolResult(ok=False, message="Click-at failed: SVG element is no longer available")
+        mutations = await _collect_mutations_with_ids(
+            session, context, context.timing.settle_ms,
+            frame_id=element.frame_id, frame_url=element.frame_url,
+        )
+        base_msg = f"Clicked {element_id} SVG element"
+        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+    info = await _element_rect_info(element.backend_node_id, session)
+    value = (info or {}).get("result", {}).get("value")
+    if not value:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Click-at failed: cannot locate element")
+
+    width = float(value.get("width") or 0)
+    height = float(value.get("height") or 0)
+    if width <= 0 or height <= 0:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Click-at failed: element has no visible area")
+
+    left = float(value.get("left") or 0)
+    top = float(value.get("top") or 0)
+    before_left = float(value.get("beforeLeft", left) or 0)
+    before_top = float(value.get("beforeTop", top) or 0)
+    before_width = float(value.get("beforeWidth", width) or 0)
+    before_height = float(value.get("beforeHeight", height) or 0)
+    raw_x = float(x)
+    raw_y = float(y)
+    if 0 <= raw_x <= width and 0 <= raw_y <= height:
+        local_x = raw_x
+        local_y = raw_y
+        page_x = left + local_x
+        page_y = top + local_y
+        coord_mode = "relative"
+    elif (
+        before_width > 0
+        and before_height > 0
+        and before_left <= raw_x <= before_left + before_width
+        and before_top <= raw_y <= before_top + before_height
+    ):
+        local_x = raw_x - before_left
+        local_y = raw_y - before_top
+        page_x = left + local_x
+        page_y = top + local_y
+        coord_mode = "viewport"
+    else:
+        local_x = max(0.0, min(raw_x, width))
+        local_y = max(0.0, min(raw_y, height))
+        page_x = left + local_x
+        page_y = top + local_y
+        coord_mode = "relative"
+    try:
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": page_x, "y": page_y, "button": "none"},
+        )
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": page_x, "y": page_y, "button": "left", "clickCount": 1},
+        )
+        await session.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": page_x, "y": page_y, "button": "left", "clickCount": 1},
+        )
+    except Exception as exc:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message=f"Click-at failed: {exc}")
+
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    base_msg = f"Clicked {element_id} at ({local_x:.1f}, {local_y:.1f}) {coord_mode}"
+    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+
 async def hover_element(element_id: str, context: ToolContext, *, duration_ms: int = 2000) -> ToolResult:
     context.last_tool = "hover_element"
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
@@ -996,32 +1634,108 @@ async def hover_element(element_id: str, context: ToolContext, *, duration_ms: i
     return ToolResult(ok=True, message=message)
 
 
-async def type_text(element_id: str, text: str, context: ToolContext) -> ToolResult:
-    context.last_tool = "type_text"
+async def focus_element(element_id: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "focus_element"
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
     session = await _session_for_element(element, context)
     await _inject_observer(session)
-    if not await _dom_focus(element.backend_node_id, session):
+    result = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function () {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const before = document.activeElement;
+            if (typeof this.focus === 'function') this.focus();
+            const after = document.activeElement;
+            const label = (after && [
+                after.tagName || '',
+                after.id ? '#' + after.id : '',
+                after.getAttribute && after.getAttribute('name') ? `[name="${after.getAttribute('name')}"]` : ''
+            ].join('')) || '';
+            return {
+                active: after === this,
+                changed: before !== after,
+                activeLabel: label,
+            };
+        }
+        """,
+    )
+    if not result:
         await _collect_mutations(session, settle_ms=50)
-        return ToolResult(ok=False, message="Type failed: element not focusable")
-    if not await _insert_text(session, text):
-        await _collect_mutations(session, settle_ms=50)
-        return ToolResult(ok=False, message="Type failed")
+        return ToolResult(ok=False, message="Focus failed")
+    value = result.get("result", {}).get("value") or {}
     mutations = await _collect_mutations_with_ids(
         session, context, context.timing.settle_ms,
         frame_id=element.frame_id, frame_url=element.frame_url,
     )
+    active = bool(value.get("active"))
+    changed = bool(value.get("changed"))
+    label = value.get("activeLabel") or "unknown"
+    base_msg = f"Focused {element_id}. Focus changed: {str(changed).lower()}. Active element: {label}"
+    if not active:
+        base_msg = f"Focus failed: active element is {label}, not {element_id}"
+    return ToolResult(ok=active, message=_format_verification(mutations, base_msg))
+
+
+async def type_text(element_id: str, text: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "type_text"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    try:
+        previous_value = await _read_input_value(element.backend_node_id, session)
+    except Exception:
+        logger.debug("Failed to read live input value before typing", exc_info=True)
+        previous_value = (element.attributes or {}).get("value")
+    if not await _dom_focus(element.backend_node_id, session):
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message="Type failed: element not focusable")
+    typed_with_keyboard, keyboard_error = await _type_text_with_keyboard(context.page, text)
+    if not typed_with_keyboard and not await _insert_text(session, text):
+        await _collect_mutations(session, settle_ms=50)
+        reason = f": {keyboard_error}" if keyboard_error else ""
+        return ToolResult(ok=False, message=f"Type failed{reason}")
+    typing_settle_ms = max(context.timing.settle_ms, 600)
+    mutations = await _collect_mutations_with_ids(
+        session, context, typing_settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
     current_value = await _read_input_value(element.backend_node_id, session)
+    used_value_fallback = False
+    if current_value is not None and current_value != text:
+        if await _set_text_value(element.backend_node_id, session, text):
+            used_value_fallback = True
+            fallback_mutations = await _collect_mutations_with_ids(
+                session, context, typing_settle_ms,
+                frame_id=element.frame_id, frame_url=element.frame_url,
+            )
+            if fallback_mutations:
+                mutations = fallback_mutations
+            current_value = await _read_input_value(element.backend_node_id, session)
     base_msg = f"Typed into {element_id}"
     if current_value is not None:
         display = current_value[:250] + "..." if len(current_value) > 250 else current_value
         base_msg = f"Typed into {element_id}. Current value: \"{display}\""
+        if previous_value is not None:
+            prev_display = previous_value[:250] + "..." if len(previous_value) > 250 else previous_value
+            base_msg += f'. Previous value: "{prev_display}"'
+        if used_value_fallback:
+            base_msg += " (set value via form events after keyboard input did not stick)"
+    elif typed_with_keyboard:
+        base_msg += " using keyboard events"
     message = _format_verification(mutations, base_msg)
     return ToolResult(ok=True, message=message)
 
@@ -1097,7 +1811,495 @@ async def drag_and_drop(source_id: str, target_id: str, context: ToolContext) ->
         session, context, context.timing.settle_ms,
         frame_id=source.frame_id, frame_url=source.frame_url,
     )
+    if not _build_change_lines(mutations or {}):
+        await _inject_observer(session)
+        ok, coords, error = await _dispatch_pointer_drag_between_nodes(
+            source.backend_node_id,
+            target.backend_node_id,
+            session,
+            steps=18,
+        )
+        if not ok or coords is None:
+            return ToolResult(
+                ok=False,
+                message=(
+                    f"{base_msg}\nNo observable change followed DOM drag/drop; "
+                    f"pointer fallback failed: {error or 'unknown error'}"
+                ),
+            )
+        fallback_mutations = await _collect_mutations_with_ids(
+            session, context, context.timing.settle_ms,
+            frame_id=source.frame_id, frame_url=source.frame_url,
+        )
+        fallback_msg = (
+            f"{base_msg} using pointer fallback from viewport "
+            f"({coords['start_viewport_x']:.1f}, {coords['start_viewport_y']:.1f}) -> "
+            f"({coords['end_viewport_x']:.1f}, {coords['end_viewport_y']:.1f})"
+        )
+        return ToolResult(ok=True, message=_format_verification(fallback_mutations, fallback_msg))
     return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+
+async def pointer_drag(
+    element_id: str,
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    context: ToolContext,
+    *,
+    steps: int = 12,
+) -> ToolResult:
+    context.last_tool = "pointer_drag"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    ok, coords, error = await _dispatch_pointer_drag_local(
+        element.backend_node_id,
+        session,
+        start_x=start_x,
+        start_y=start_y,
+        end_x=end_x,
+        end_y=end_y,
+        steps=steps,
+        allow_outside=True,
+    )
+    if not ok or coords is None:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message=f"Pointer drag failed: {error or 'unknown error'}")
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    base_msg = (
+        f"Pointer dragged {element_id} from local "
+        f"({coords['start_local_x']:.1f}, {coords['start_local_y']:.1f}) "
+        f"to ({coords['end_local_x']:.1f}, {coords['end_local_y']:.1f}); viewport "
+        f"({coords['start_viewport_x']:.1f}, {coords['start_viewport_y']:.1f}) -> "
+        f"({coords['end_viewport_x']:.1f}, {coords['end_viewport_y']:.1f})"
+    )
+    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+
+async def set_slider_value(element_id: str, value: float, context: ToolContext) -> ToolResult:
+    context.last_tool = "set_slider_value"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    desired = float(value)
+    direct = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function (desired) {
+            const desiredNumber = Number(desired);
+            const desiredString = String(desired);
+            const closeEnough = (value) => {
+                if (value === undefined || value === null || value === '') return false;
+                const numberValue = Number(value);
+                if (Number.isFinite(numberValue) && Number.isFinite(desiredNumber)) {
+                    return Math.abs(numberValue - desiredNumber) < 1e-6;
+                }
+                return String(value) === desiredString;
+            };
+            const jq = window.jQuery || window.$;
+            const sliderRoot = (
+                this.closest && (
+                    this.closest('.ui-slider') ||
+                    this.closest('[role="slider"]')
+                )
+            ) || this;
+            const initializedJQuerySlider = (el) => {
+                if (!jq || !el) return false;
+                try {
+                    return typeof jq(el).slider === 'function' && (
+                        !!jq(el).data('ui-slider') ||
+                        !!jq(el).data('slider') ||
+                        el.classList.contains('ui-slider')
+                    );
+                } catch (_e) {
+                    return false;
+                }
+            };
+            const readState = (target) => {
+                let raw = '';
+                let min = null;
+                let max = null;
+                let method = '';
+                if (initializedJQuerySlider(sliderRoot)) {
+                    try {
+                        raw = jq(sliderRoot).slider('value');
+                        min = jq(sliderRoot).slider('option', 'min');
+                        max = jq(sliderRoot).slider('option', 'max');
+                        method = 'jquery-ui';
+                    } catch (_e) {}
+                }
+                if ((raw === '' || raw === undefined || raw === null) && 'value' in target) {
+                    raw = target.value;
+                    min = target.min || min;
+                    max = target.max || max;
+                    method = method || 'native-value';
+                }
+                if ((raw === '' || raw === undefined || raw === null) && target.getAttribute) {
+                    raw = target.getAttribute('aria-valuenow') || sliderRoot.getAttribute('aria-valuenow') || '';
+                    min = target.getAttribute('aria-valuemin') || sliderRoot.getAttribute('aria-valuemin') || min;
+                    max = target.getAttribute('aria-valuemax') || sliderRoot.getAttribute('aria-valuemax') || max;
+                    method = method || 'aria';
+                }
+                return {
+                    value: raw === undefined || raw === null ? '' : String(raw),
+                    min: min === undefined || min === null || min === '' ? null : Number(min),
+                    max: max === undefined || max === null || max === '' ? null : Number(max),
+                    method,
+                };
+            };
+            sliderRoot.scrollIntoView({block: 'center', inline: 'center'});
+            const before = readState(this);
+            let ok = false;
+            let method = '';
+            if (initializedJQuerySlider(sliderRoot)) {
+                try {
+                    jq(sliderRoot).slider('value', desiredNumber);
+                    jq(sliderRoot).trigger('slidechange');
+                    sliderRoot.dispatchEvent(new Event('input', { bubbles: true }));
+                    sliderRoot.dispatchEvent(new Event('change', { bubbles: true }));
+                    method = 'jquery-ui';
+                } catch (_e) {}
+            }
+            if (!method && 'value' in this) {
+                const tag = (this.tagName || '').toUpperCase();
+                const proto = tag === 'INPUT' ? window.HTMLInputElement.prototype : null;
+                const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+                if (descriptor && descriptor.set) descriptor.set.call(this, String(desired));
+                else this.value = String(desired);
+                this.dispatchEvent(new Event('input', { bubbles: true }));
+                this.dispatchEvent(new Event('change', { bubbles: true }));
+                method = 'native-value';
+            }
+            if (!method && (this.getAttribute('role') === 'slider' || sliderRoot.getAttribute('role') === 'slider')) {
+                const ariaTarget = sliderRoot.getAttribute('role') === 'slider' ? sliderRoot : this;
+                ariaTarget.setAttribute('aria-valuenow', String(desired));
+                ariaTarget.dispatchEvent(new Event('input', { bubbles: true }));
+                ariaTarget.dispatchEvent(new Event('change', { bubbles: true }));
+                method = 'aria';
+            }
+            const after = readState(this);
+            ok = closeEnough(after.value);
+            return {
+                ok,
+                before: before.value,
+                after: after.value,
+                min: after.min ?? before.min,
+                max: after.max ?? before.max,
+                method: method || after.method || before.method,
+                root: sliderRoot === this ? 'self' : 'ancestor',
+            };
+        }
+        """,
+        [{"value": desired}],
+    )
+    direct_value = (direct or {}).get("result", {}).get("value") or {}
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    if direct_value.get("ok") or str(direct_value.get("after")) == str(desired):
+        base_msg = (
+            f"Set slider {element_id} to {desired:g}. "
+            f"Previous value: \"{direct_value.get('before', '')}\". "
+            f"Current value: \"{direct_value.get('after', '')}\""
+        )
+        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+    attrs = element.attributes or {}
+    min_value = float(direct_value.get("min") or attrs.get("aria-valuemin") or attrs.get("min") or 0)
+    max_value = float(direct_value.get("max") or attrs.get("aria-valuemax") or attrs.get("max") or 100)
+    if max_value <= min_value:
+        max_value = min_value + 100
+    ratio = max(0.0, min((desired - min_value) / (max_value - min_value), 1.0))
+    info = await _element_rect_info(element.backend_node_id, session)
+    rect = (info or {}).get("result", {}).get("value") or {}
+    width = float(rect.get("width") or 0)
+    height = float(rect.get("height") or 0)
+    if width <= 0 or height <= 0:
+        return ToolResult(ok=False, message="Set slider failed: element has no visible area")
+    ok, coords, error = await _dispatch_pointer_drag_local(
+        element.backend_node_id,
+        session,
+        start_x=width / 2,
+        start_y=height / 2,
+        end_x=ratio * width,
+        end_y=height / 2,
+        steps=16,
+    )
+    if not ok:
+        return ToolResult(ok=False, message=f"Set slider failed: {error or 'pointer drag failed'}")
+    pointer_mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    if pointer_mutations:
+        mutations = pointer_mutations
+    reread = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function () {
+            return this.value !== undefined ? String(this.value) : (this.getAttribute('aria-valuenow') || '');
+        }
+        """,
+    )
+    current_after = (reread or {}).get("result", {}).get("value")
+    if current_after is None:
+        current_after = direct_value.get("after", "")
+    base_msg = (
+        f"Set slider {element_id} toward {desired:g} using pointer ratio {ratio:.3f}. "
+        f"Previous value: \"{direct_value.get('before', '')}\". "
+        f"Current value: \"{current_after}\""
+    )
+    if coords:
+        base_msg += f". Drag ended at local ({coords['end_local_x']:.1f}, {coords['end_local_y']:.1f})"
+    try:
+        verified = abs(float(current_after) - desired) < 1e-6
+    except (TypeError, ValueError):
+        verified = str(current_after) == str(desired)
+    if not verified:
+        return ToolResult(ok=False, message=_format_verification(mutations, f"Set slider failed verification. {base_msg}"))
+    return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+
+def _dimension_changed_in_direction(
+    before: float,
+    after: float,
+    delta: float,
+    *,
+    tolerance: float = 0.5,
+) -> bool:
+    if abs(float(delta)) <= tolerance:
+        return True
+    if float(delta) < 0:
+        return float(after) < float(before) - tolerance
+    return float(after) > float(before) + tolerance
+
+
+def _resize_change_verified(
+    *,
+    before_width: float,
+    before_height: float,
+    after_width: float,
+    after_height: float,
+    delta_width: float,
+    delta_height: float,
+) -> bool:
+    if abs(float(delta_width)) <= 0.5 and abs(float(delta_height)) <= 0.5:
+        return False
+    return _dimension_changed_in_direction(
+        before_width, after_width, delta_width
+    ) and _dimension_changed_in_direction(before_height, after_height, delta_height)
+
+
+def _resize_dimensions_message(
+    *,
+    before_width: float,
+    before_height: float,
+    after_width: float,
+    after_height: float,
+) -> str:
+    return (
+        f"dimensions {before_width:.1f}x{before_height:.1f} -> "
+        f"{after_width:.1f}x{after_height:.1f}"
+    )
+
+
+async def _read_element_rect(
+    backend_node_id: int,
+    session: CDPSession,
+) -> dict[str, float] | None:
+    info = await _element_rect_info(backend_node_id, session)
+    rect = (info or {}).get("result", {}).get("value") or {}
+    try:
+        width = float(rect.get("width") or 0)
+        height = float(rect.get("height") or 0)
+        left = float(rect.get("left") or 0)
+        top = float(rect.get("top") or 0)
+    except (TypeError, ValueError):
+        return None
+    return {"left": left, "top": top, "width": width, "height": height}
+
+
+def _is_unqualified_text_selection_control(element: ElementSnapshot, text: str | None) -> bool:
+    if (text or "").strip():
+        return False
+    tag = (element.node_name or "").upper()
+    attrs = element.attributes or {}
+    input_type = (attrs.get("type") or "").lower()
+    if tag == "BUTTON" or tag == "SELECT" or tag == "OPTION":
+        return True
+    return tag == "INPUT" and input_type in {"button", "checkbox", "color", "file", "radio", "reset", "submit"}
+
+
+async def resize_element(
+    element_id: str,
+    delta_width: float,
+    delta_height: float,
+    context: ToolContext,
+) -> ToolResult:
+    context.last_tool = "resize_element"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    rect = await _read_element_rect(element.backend_node_id, session)
+    width = float((rect or {}).get("width") or 0)
+    height = float((rect or {}).get("height") or 0)
+    if width <= 0 or height <= 0:
+        return ToolResult(ok=False, message="Resize failed: element has no visible area")
+    ok, coords, error = await _dispatch_pointer_drag_local(
+        element.backend_node_id,
+        session,
+        start_x=width - 2,
+        start_y=height - 2,
+        end_x=width + float(delta_width),
+        end_y=height + float(delta_height),
+        steps=12,
+        allow_outside=True,
+    )
+    if not ok:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message=f"Resize failed: {error or 'pointer drag failed'}")
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    after_rect = await _read_element_rect(element.backend_node_id, session)
+    after_width = float((after_rect or {}).get("width") or 0)
+    after_height = float((after_rect or {}).get("height") or 0)
+    dimensions_msg = _resize_dimensions_message(
+        before_width=width,
+        before_height=height,
+        after_width=after_width,
+        after_height=after_height,
+    )
+    base_msg = f"Resized {element_id} by ({delta_width:g}, {delta_height:g}); {dimensions_msg}"
+    if coords:
+        base_msg += f" using handle drag to local ({coords['end_local_x']:.1f}, {coords['end_local_y']:.1f})"
+    if _resize_change_verified(
+        before_width=width,
+        before_height=height,
+        after_width=after_width,
+        after_height=after_height,
+        delta_width=delta_width,
+        delta_height=delta_height,
+    ):
+        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+
+    await _inject_observer(session)
+    fallback = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function (deltaWidth, deltaHeight) {
+            const dw = Number(deltaWidth) || 0;
+            const dh = Number(deltaHeight) || 0;
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const wrapper = this.closest && this.closest('.ui-wrapper, .ui-resizable');
+            const base = wrapper && wrapper !== this ? wrapper : this;
+            const before = base.getBoundingClientRect();
+            const targetWidth = Math.max(1, before.width + dw);
+            const targetHeight = Math.max(1, before.height + dh);
+            const px = (value) => `${Math.max(1, Math.round(value))}px`;
+            const targets = wrapper && wrapper !== this ? [wrapper, this] : [this];
+            for (const target of targets) {
+                if (dw !== 0) target.style.width = px(targetWidth);
+                if (dh !== 0) target.style.height = px(targetHeight);
+            }
+            const jq = window.jQuery || window.$;
+            if (jq) {
+                try {
+                    if (dw !== 0) jq(this).width(targetWidth);
+                    if (dh !== 0) jq(this).height(targetHeight);
+                    jq(this).trigger('resize').trigger('resizestop');
+                    if (wrapper && wrapper !== this) {
+                        if (dw !== 0) jq(wrapper).width(targetWidth);
+                        if (dh !== 0) jq(wrapper).height(targetHeight);
+                        jq(wrapper).trigger('resize').trigger('resizestop');
+                    }
+                } catch (_e) {}
+            }
+            this.dispatchEvent(new Event('input', {bubbles: true}));
+            this.dispatchEvent(new Event('change', {bubbles: true}));
+            this.dispatchEvent(new Event('resize', {bubbles: true}));
+            window.dispatchEvent(new Event('resize'));
+            const after = base.getBoundingClientRect();
+            return {
+                beforeWidth: before.width,
+                beforeHeight: before.height,
+                afterWidth: after.width,
+                afterHeight: after.height,
+                targetWidth,
+                targetHeight,
+                wrapperTag: wrapper && wrapper !== this ? (wrapper.tagName || '').toLowerCase() : '',
+            };
+        }
+        """,
+        [{"value": float(delta_width)}, {"value": float(delta_height)}],
+    )
+    fallback_value = (fallback or {}).get("result", {}).get("value") or {}
+    fallback_mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    fallback_after_width = float(fallback_value.get("afterWidth") or after_width)
+    fallback_after_height = float(fallback_value.get("afterHeight") or after_height)
+    fallback_msg = (
+        f"Resize fallback set inline dimensions for {element_id}; "
+        + _resize_dimensions_message(
+            before_width=width,
+            before_height=height,
+            after_width=fallback_after_width,
+            after_height=fallback_after_height,
+        )
+    )
+    if fallback_value.get("wrapperTag"):
+        fallback_msg += f" via {fallback_value['wrapperTag']} wrapper"
+    if _resize_change_verified(
+        before_width=width,
+        before_height=height,
+        after_width=fallback_after_width,
+        after_height=fallback_after_height,
+        delta_width=delta_width,
+        delta_height=delta_height,
+    ):
+        return ToolResult(ok=True, message=_format_verification(fallback_mutations, fallback_msg))
+
+    failed_msg = (
+        "Resize failed verification: requested dimensions did not change in the requested direction. "
+        f"Pointer attempt: {dimensions_msg}. "
+        + _resize_dimensions_message(
+            before_width=width,
+            before_height=height,
+            after_width=fallback_after_width,
+            after_height=fallback_after_height,
+        )
+    )
+    return ToolResult(ok=False, message=_format_verification(fallback_mutations or mutations, failed_msg))
 
 
 async def draw(
@@ -1109,7 +2311,7 @@ async def draw(
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element or not element.backend_node_id:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
@@ -1153,7 +2355,18 @@ async def draw(
             session, context, context.timing.draw_settle_ms,
             frame_id=element.frame_id, frame_url=element.frame_url,
         )
-        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+        if _build_change_lines(mutations or {}):
+            return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+        if _is_click_driven_visual_surface(element):
+            return ToolResult(
+                ok=False,
+                message=(
+                    f"{base_msg}\nNo observable drawing change followed. "
+                    "This visual target exposes a click handler; use click_at(element_id, x, y) "
+                    "for a single target point instead of draw."
+                ),
+            )
+        base_msg = f"{base_msg} using pointer fallback after synthetic events made no observable change"
 
     # CDP coordinate fallback — for apps that ignore synthetic DOM events
     # but respond to real input events (e.g. some canvas libraries).
@@ -1223,28 +2436,44 @@ _WATCH_MAX_TIMEOUT_MS = 10_000
 _WATCH_FOR_TEXT_JS = """
 ([text, timeoutMs]) => new Promise(resolve => {
     const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','META','LINK','HEAD']);
+    const CLICKABLE = 'button,a,input,select,textarea,option,summary,[role="button"],[role="option"],[onclick],[tabindex],svg text,svg rect,svg circle,svg path,svg line';
+    function norm(value) {
+        return (value || '').replace(/\\s+/g, ' ').trim();
+    }
+    const wanted = norm(text);
+    function clickableTarget(el) {
+        let cur = el;
+        while (cur && cur !== document.body) {
+            if (cur.matches && cur.matches(CLICKABLE)) return cur;
+            cur = cur.parentElement;
+        }
+        return null;
+    }
     function find() {
         const all = document.querySelectorAll('*');
         for (const el of all) {
             if (SKIP.has(el.tagName)) continue;
-            if (el.children.length === 0) {
-                const t = (el.textContent || '').trim();
-                if (t.includes(text)) return el;
-            }
+            const t = norm(el.textContent);
+            if (!t.includes(wanted)) continue;
+            const target = clickableTarget(el);
+            if (target) return target;
         }
         return null;
     }
     const immediate = find();
     if (immediate) {
         immediate.click();
-        return resolve('found');
+        return resolve({status: 'found', tag: immediate.tagName || '', text: norm(immediate.textContent)});
     }
     const observer = new MutationObserver(() => {
         const el = find();
         if (el) {
             observer.disconnect();
             clearTimeout(timer);
-            setTimeout(() => { el.click(); resolve('found'); }, 50);
+            setTimeout(() => {
+                el.click();
+                resolve({status: 'found', tag: el.tagName || '', text: norm(el.textContent)});
+            }, 50);
         }
     });
     observer.observe(document.body, {
@@ -1253,7 +2482,7 @@ _WATCH_FOR_TEXT_JS = """
     });
     const timer = setTimeout(() => {
         observer.disconnect();
-        resolve('timeout');
+        resolve({status: 'timeout'});
     }, timeoutMs);
 })
 """
@@ -1288,13 +2517,25 @@ async def watch_for_text(
         await _collect_mutations(session, settle_ms=50)
         return ToolResult(ok=False, message=f"Watch failed: {exc}")
 
-    if result == "found":
+    if isinstance(result, dict) and result.get("status") == "found":
         mutations = await _collect_mutations_with_ids(
             session, context, context.timing.settle_ms,
             frame_id=context.active_frame_id,
         )
-        base_msg = f"Watched and clicked '{text}'"
-        return ToolResult(ok=True, message=_format_verification(mutations, base_msg))
+        clicked_tag = str(result.get("tag") or "element").lower()
+        clicked_text = str(result.get("text") or text)
+        base_msg = f"Watched and clicked text containing '{text}' on {clicked_tag}"
+        message = _format_verification(mutations, base_msg)
+        if not _build_change_lines(mutations or {}):
+            return ToolResult(
+                ok=True,
+                message=(
+                    f"Found matching text '{clicked_text}' and clicked it, but no observable "
+                    "page change followed. Do not repeat this watch; if the relevant field already has the "
+                    "desired value, proceed, otherwise stop this step and wait for a fresh snapshot or use a stable element ID."
+                ),
+            )
+        return ToolResult(ok=True, message=message)
 
     mutations = await _collect_mutations(session, settle_ms=50)
     timeout_msg = f"Watch timeout: '{text}' not found within {clamped}ms"
@@ -1316,7 +2557,7 @@ async def inspect_element(element_id: str, context: ToolContext) -> ToolResult:
     context.last_element_id = element_id
     element = _resolve_element(element_id, context)
     if not element:
-        return ToolResult(ok=False, message=f"Unknown element id: {element_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
     frame_error = _active_frame_error(element, context)
     if frame_error:
         return frame_error
@@ -1346,6 +2587,255 @@ async def inspect_element(element_id: str, context: ToolContext) -> ToolResult:
     parts.append(f"text: {text_value}" if text_value else "text: (empty)")
     parts.append(f"attributes: {attr_str}")
     return ToolResult(ok=True, message="\n".join(parts))
+
+
+async def select_text(
+    element_id: str,
+    context: ToolContext,
+    *,
+    text: str | None = None,
+    occurrence: int = 1,
+) -> ToolResult:
+    context.last_tool = "select_text"
+    context.last_element_id = element_id
+    element = _resolve_element(element_id, context)
+    if not element or not element.backend_node_id:
+        return ToolResult(ok=False, message=_unknown_element_message(element_id))
+    frame_error = _active_frame_error(element, context)
+    if frame_error:
+        return frame_error
+    if _is_unqualified_text_selection_control(element, text):
+        return ToolResult(
+            ok=False,
+            message=(
+                "Select text refused: target is a control, not a text container. "
+                "Use a visible text/paragraph element, or provide exact text that exists inside this element."
+            ),
+        )
+    session = await _session_for_element(element, context)
+    await _inject_observer(session)
+    result = await _call_on_node(
+        element.backend_node_id,
+        session,
+        """
+        function (targetText, occurrence) {
+            this.scrollIntoView({block: 'center', inline: 'center'});
+            const selection = window.getSelection();
+            if (!selection) return {ok: false, selected: '', reason: 'selection unavailable'};
+            selection.removeAllRanges();
+            const wanted = (targetText || '').trim();
+            if (!wanted) {
+                const range = document.createRange();
+                range.selectNodeContents(this);
+                selection.addRange(range);
+                return {ok: true, selected: selection.toString()};
+            }
+            const targetOccurrence = Math.max(1, Number(occurrence) || 1);
+            const walker = document.createTreeWalker(this, NodeFilter.SHOW_TEXT);
+            let node;
+            let seen = 0;
+            while ((node = walker.nextNode())) {
+                const value = node.nodeValue || '';
+                const idx = value.indexOf(wanted);
+                if (idx < 0) continue;
+                seen += 1;
+                if (seen !== targetOccurrence) continue;
+                const range = document.createRange();
+                const start = idx;
+                const end = idx + wanted.length;
+                range.setStart(node, start);
+                range.setEnd(node, end);
+                selection.addRange(range);
+                return {ok: true, selected: selection.toString()};
+            }
+            return {ok: false, selected: '', reason: 'text not found'};
+        }
+        """,
+        [{"value": text or ""}, {"value": int(occurrence)}],
+    )
+    value = (result or {}).get("result", {}).get("value") or {}
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=element.frame_id, frame_url=element.frame_url,
+    )
+    selected = str(value.get("selected") or "")
+    if not value.get("ok"):
+        return ToolResult(ok=False, message=f"Select text failed: {value.get('reason') or 'unknown error'}")
+    display = selected[:250] + "..." if len(selected) > 250 else selected
+    return ToolResult(ok=True, message=_format_verification(mutations, f'Selected text: "{display}"'))
+
+
+async def apply_format(command: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "apply_format"
+    context.last_element_id = None
+    normalized = command.strip().lower()
+    allowed = {
+        "bold": "bold",
+        "italic": "italic",
+        "underline": "underline",
+        "strike": "strikeThrough",
+        "strikethrough": "strikeThrough",
+        "ordered_list": "insertOrderedList",
+        "unordered_list": "insertUnorderedList",
+    }
+    browser_command = allowed.get(normalized)
+    if not browser_command:
+        return ToolResult(ok=False, message=f"Unsupported format command: {command}")
+    session = await _session_for_active_frame(context)
+    await _inject_observer(session)
+    try:
+        evaluated = await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "(() => { const before = String(window.getSelection?.() || ''); "
+                    f"const ok = document.execCommand({json.dumps(browser_command)}, false, null); "
+                    "const after = String(window.getSelection?.() || ''); "
+                    "return {ok, before, after}; })()"
+                ),
+                "returnByValue": True,
+            },
+        )
+    except Exception as exc:
+        await _collect_mutations(session, settle_ms=50)
+        return ToolResult(ok=False, message=f"Apply format failed: {exc}")
+    value = evaluated.get("result", {}).get("value") or {}
+    mutations = await _collect_mutations_with_ids(
+        session, context, context.timing.settle_ms,
+        frame_id=context.active_frame_id,
+    )
+    ok = bool(value.get("ok"))
+    selected = str(value.get("after") or value.get("before") or "")
+    return ToolResult(
+        ok=ok,
+        message=_format_verification(mutations, f"Applied format {browser_command}. Selection: \"{selected[:120]}\""),
+    )
+
+
+async def transfer_text(source_id: str, target_id: str, context: ToolContext) -> ToolResult:
+    context.last_tool = "transfer_text"
+    context.last_element_id = target_id
+    source = _resolve_element(source_id, context)
+    target = _resolve_element(target_id, context)
+    if not source or not source.backend_node_id:
+        return ToolResult(ok=False, message=f"Unknown source id: {source_id}")
+    if not target or not target.backend_node_id:
+        return ToolResult(ok=False, message=f"Unknown target id: {target_id}")
+    if source.frame_id != target.frame_id:
+        return ToolResult(ok=False, message="Transfer failed: source and target are in different frames")
+    if context.active_frame_id and source.frame_id != context.active_frame_id:
+        return ToolResult(ok=False, message="Transfer failed: source is not in the active frame")
+    session = await _session_for_element(source, context)
+    await _inject_observer(session)
+    source_result = await _call_on_node(
+        source.backend_node_id,
+        session,
+        """
+        function () {
+            const type = (this.getAttribute && this.getAttribute('type') || '').toLowerCase();
+            if (type === 'password') return {ok: false, text: '', reason: 'password source omitted'};
+            if ('value' in this) return {ok: true, text: String(this.value || '')};
+            return {ok: true, text: String(this.innerText || this.textContent || '')};
+        }
+        """,
+    )
+    source_value = (source_result or {}).get("result", {}).get("value") or {}
+    if not source_value.get("ok"):
+        return ToolResult(ok=False, message=f"Transfer failed: {source_value.get('reason') or 'source text unavailable'}")
+    text_value = str(source_value.get("text") or "")
+    if not await _set_text_value(target.backend_node_id, session, text_value):
+        if not await _dom_focus(target.backend_node_id, session) or not await _insert_text(session, text_value):
+            await _collect_mutations(session, settle_ms=50)
+            return ToolResult(ok=False, message="Transfer failed: target did not accept text")
+    mutations = await _collect_mutations_with_ids(
+        session, context, max(context.timing.settle_ms, 300),
+        frame_id=target.frame_id, frame_url=target.frame_url,
+    )
+    current_value = await _read_input_value(target.backend_node_id, session)
+    target_type = (target.attributes or {}).get("type", "").lower()
+    display = "[password value omitted]" if target_type == "password" else (current_value if current_value is not None else text_value)[:250]
+    return ToolResult(
+        ok=True,
+        message=_format_verification(
+            mutations,
+            f'Transferred text from {source_id} to {target_id}. Current value: "{display}"',
+        ),
+    )
+
+
+async def read_live_text(context: ToolContext, element_id: str | None = None) -> ToolResult:
+    context.last_tool = "read_live_text"
+    context.last_element_id = element_id
+    session = await _session_for_active_frame(context)
+    if element_id:
+        element = _resolve_element(element_id, context)
+        if not element or not element.backend_node_id:
+            return ToolResult(ok=False, message=_unknown_element_message(element_id))
+        frame_error = _active_frame_error(element, context)
+        if frame_error:
+            return frame_error
+        session = await _session_for_element(element, context)
+        result = await _call_on_node(
+            element.backend_node_id,
+            session,
+            """
+            function () {
+                const type = (this.getAttribute && this.getAttribute('type') || '').toLowerCase();
+                if (type === 'password') return [{label: 'target', tag: this.tagName || '', text: '[password value omitted]'}];
+                const text = 'value' in this ? String(this.value || '') : String(this.innerText || this.textContent || '');
+                return [{label: 'target', tag: this.tagName || '', text}];
+            }
+            """,
+        )
+        value = (result or {}).get("result", {}).get("value") or []
+    else:
+        evaluated = await session.send(
+            "Runtime.evaluate",
+            {
+                "expression": """
+                (() => {
+                  const selectors = [
+                    'textarea', 'input', '[contenteditable]', '[role="textbox"]',
+                    '[role="log"]', '[aria-live]', 'pre', 'code', 'output', 'section', 'main'
+                  ];
+                  const seen = new Set();
+                  const out = [];
+                  function add(label, el) {
+                    if (!el || seen.has(el)) return;
+                    seen.add(el);
+                    const tag = el.tagName || '';
+                    const type = (el.getAttribute && el.getAttribute('type') || '').toLowerCase();
+                    if (type === 'password') return;
+                    const text = ('value' in el ? String(el.value || '') : String(el.innerText || el.textContent || '')).trim();
+                    if (!text) return;
+                    out.push({label, tag, text: text.slice(0, 2000)});
+                  }
+                  add('active', document.activeElement);
+                  for (const selector of selectors) {
+                    for (const el of document.querySelectorAll(selector)) {
+                      if (out.length >= 8) break;
+                      add(selector, el);
+                    }
+                    if (out.length >= 8) break;
+                  }
+                  if (out.length === 0) add('body', document.body);
+                  return out;
+                })()
+                """,
+                "returnByValue": True,
+            },
+        )
+        value = evaluated.get("result", {}).get("value") or []
+    lines = []
+    for item in value[:8]:
+        text_value = " ".join(str(item.get("text") or "").split())
+        if not text_value:
+            continue
+        if len(text_value) > 500:
+            text_value = text_value[:500].rstrip() + "..."
+        lines.append(f"{item.get('label') or 'text'} <{str(item.get('tag') or '').lower()}>: {text_value}")
+    message = "\n".join(lines) if lines else "No live text found."
+    return ToolResult(ok=True, message=message)
 
 
 async def search_page_attributes(query: str, context: ToolContext) -> ToolResult:
@@ -1462,7 +2952,7 @@ async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
     context.last_element_id = iframe_id
     element = _resolve_element(iframe_id, context)
     if not element:
-        return ToolResult(ok=False, message=f"Unknown element id: {iframe_id}")
+        return ToolResult(ok=False, message=_unknown_element_message(iframe_id))
 
     tag = (element.node_name or "").upper() or "UNKNOWN"
     if tag != "IFRAME":
@@ -1472,6 +2962,10 @@ async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
         return ToolResult(ok=False, message="Iframe has no frame id (frame not ready)")
 
     prev_active = context.active_frame_id
+    if prev_active == element.frame_id:
+        frame_label = element.frame_name or element.frame_url or ""
+        suffix = f" ({frame_label})" if frame_label else ""
+        return ToolResult(ok=True, message=f"Already in iframe {iframe_id}{suffix}")
     try:
         session = await _session_for_element(element, context)
     except Exception:
@@ -1513,6 +3007,8 @@ async def switch_to_iframe(iframe_id: str, context: ToolContext) -> ToolResult:
 async def switch_to_main_frame(context: ToolContext) -> ToolResult:
     context.last_tool = "switch_to_main_frame"
     context.last_element_id = None
+    if context.active_frame_id is None:
+        return ToolResult(ok=True, message="Already in main frame")
     context.active_frame_id = None
     return ToolResult(ok=True, message="Switched to main frame")
 
@@ -1575,6 +3071,26 @@ async def press_key_combination(keys: list[str], context: ToolContext) -> ToolRe
     context.last_element_id = None
     session = await _session_for_active_frame(context)
     await _inject_observer(session)
+    async def _active_value() -> dict[str, Any]:
+        try:
+            evaluated = await session.send(
+                "Runtime.evaluate",
+                {
+                    "expression": (
+                        "(() => { const el = document.activeElement; if (!el) return {}; "
+                        "const type = (el.getAttribute && el.getAttribute('type') || '').toLowerCase(); "
+                        "const value = type === 'password' ? '[password value omitted]' : "
+                        "('value' in el ? String(el.value || '') : String(el.innerText || el.textContent || '')); "
+                        "return {tag: el.tagName || '', id: el.id || '', value}; })()"
+                    ),
+                    "returnByValue": True,
+                },
+            )
+            value = evaluated.get("result", {}).get("value")
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+    before_active = await _active_value()
     try:
         await context.page.keyboard.press("+".join(keys))
     except Exception as exc:  # pragma: no cover - runtime safety
@@ -1584,6 +3100,16 @@ async def press_key_combination(keys: list[str], context: ToolContext) -> ToolRe
         session, context, context.timing.settle_ms,
         frame_id=context.active_frame_id,
     )
+    after_active = await _active_value()
     base_msg = f"Pressed {'+'.join(keys)}"
+    if before_active or after_active:
+        base_msg += (
+            f". Active before: {before_active.get('tag', '')}#{before_active.get('id', '')}; "
+            f"after: {after_active.get('tag', '')}#{after_active.get('id', '')}"
+        )
+        before_value = str(before_active.get("value") or "")
+        after_value = str(after_active.get("value") or "")
+        if before_value or after_value:
+            base_msg += f'. Previous value: "{before_value[:120]}". Current value: "{after_value[:120]}"'
     message = _format_verification(mutations, base_msg)
     return ToolResult(ok=True, message=message)

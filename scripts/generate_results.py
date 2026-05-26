@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate results.md from all run logs.
+"""Generate the archived external-challenge results table from run logs.
 
 Maintains a persistent history in logs/results_history.json so that results
 survive log pruning.  Each invocation scans logs/ for new run directories,
-merges them into the history file, then regenerates results.md from the
-full history.
+merges them into the history file, then regenerates the archived Markdown
+table from the full history.
 
 Usage:
     uv run scripts/generate_results.py
@@ -18,7 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
-OUTPUT_PATH = Path(__file__).resolve().parent.parent / "results.md"
+OUTPUT_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "docs"
+    / "benchmark-results"
+    / "external-challenge-results.md"
+)
 HISTORY_PATH = LOGS_DIR / "results_history.json"
 CHALLENGE_MAP_PATH = LOGS_DIR / "full_challenge_map.json"
 
@@ -202,7 +207,14 @@ def generate() -> str:
 
     # Build markdown
     lines: list[str] = []
-    lines.append("# Agent Run Results\n")
+    lines.append("# Archived External Challenge Run Results\n")
+    lines.append(
+        "These runs came from the external browser-agent challenge site used "
+        "during early Zip development. That site may no longer be reliably "
+        "available, so this table is retained as development history rather "
+        "than a current public benchmark claim. Use the BrowserGym/MiniWoB++ "
+        "reports in this directory for standard benchmark comparisons.\n"
+    )
     lines.append(
         f"*Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*\n"
     )

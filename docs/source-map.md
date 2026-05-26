@@ -1,6 +1,6 @@
 # Documentation Source Map
 
-This document records where the main documentation claims should be verified. It is intended to keep README, docs, and engineering writeups grounded in code and commit history.
+This document records where the main documentation claims should be verified. It is intended to keep Zip's README, docs, and engineering writeups grounded in code and commit history.
 
 ## Current Runtime
 
@@ -28,6 +28,7 @@ Verified facts:
 - Stable IDs are generated with SHA-256-derived `el_...` IDs.
 - Handler extraction supports inline handlers and framework internals for React, Vue, and Angular.
 - Elements with detected handlers can be upgraded to interactive snapshot entries.
+- Snapshot entries can include context hints for nearby labels/tables/text and widget hints for values, drag handlers, and geometry.
 
 ## Agents And Structured Outputs
 
@@ -51,10 +52,19 @@ Verified facts:
 Verified default worker tools:
 
 - `click_element`
+- `click_at`
+- `focus_element`
 - `hover_element`
 - `type_text`
+- `transfer_text`
 - `drag_and_drop`
+- `pointer_drag`
+- `set_slider_value`
+- `resize_element`
 - `draw`
+- `select_text`
+- `apply_format`
+- `read_live_text`
 - `scroll`
 - `wait`
 - `watch_for_text`
@@ -62,14 +72,15 @@ Verified default worker tools:
 - `switch_to_main_frame`
 - `press_key_combination`
 
-Tools implemented but not in the default worker tool set include `inspect_element`, `search_page_attributes`, `navigate_to`, `take_screenshot`, and `execute_js`.
+Tools implemented but not in the default worker tool set include `find_elements`, `inspect_element`, `search_page_attributes`, `navigate_to`, `take_screenshot`, and `execute_js`.
 
 ## Observability
 
 - Metrics and run directories: `src/agent/metrics.py`.
 - Page capture: `src/agent/capture/page_saver.py`.
-- Metrics analysis scripts: `scripts/analyze_metrics.py`, `scripts/analyze_last_run.py`, `scripts/visualize_api_calls.py`.
-- Result generation: `scripts/generate_results.py`.
+- Metrics analysis scripts: `scripts/analyze_metrics.py`, `scripts/analyze_last_run.py`.
+- Archived external-challenge result generation: `scripts/generate_results.py`.
+- BrowserGym benchmark reporting: `benchmarks/agentlab/run_browsergym_benchmark.py`.
 
 Verified facts:
 
@@ -77,6 +88,27 @@ Verified facts:
 - Metrics are JSONL events written to `metrics.jsonl`.
 - Run summaries include provider, models, duration, retry wait, step count, stop reason, tokens, and cost.
 - Page HTML capture is optional via `--save-pages`.
+
+## AgentLab Benchmarks
+
+- Adapter: `benchmarks/agentlab/computer_use_agent.py`.
+- Generic runner and report generation: `benchmarks/agentlab/run_browsergym_benchmark.py`.
+- Legacy MiniWoB++ smoke runner: `benchmarks/agentlab/run_miniwob_smoke.py`.
+- Regression tests: `tests/test_agentlab_adapter.py`, `tests/test_browsergym_benchmark_runner.py`.
+
+Verified facts:
+
+- BrowserGym owns task setup, browser lifecycle, rewards, termination, and validation.
+- The adapter requests `use_raw_page_output=True`, stores the raw Playwright page, passes BrowserGym reward/termination into the runtime as external validation, and returns `noop()` after the internal agent mutates the live page.
+- The generic runner supports MiniWoB++ (BrowserGym key: `miniwob`), WebArena, WebArena Lite, WebArena Verified, and WebArena Tiny.
+- `miniwob:verify-five` is a five-task verification subset; `miniwob:full` uses BrowserGym's default MiniWoB++ suite with `n_repeats=5` unless overridden.
+- Iteration profiles are `full`, `balanced`, and `cheap`; checked-in task-set manifests live under `benchmarks/agentlab/task_sets/`.
+- WebArena variants use AgentLab's `ray` backend when `--n-jobs > 1` so BrowserGym task dependencies are preserved.
+- Benchmark reports count missing `cum_reward` rows as zero reward and include those gaps in `warnings.parse_gaps`.
+- Report artifacts are `benchmark_report.json`, `benchmark_report.md`, `per_task_results.csv`, and `failed_tasks.md`.
+- AgentLab `AgentInfo.stats` token/cost values are per-step deltas; cumulative totals live in `extra_info.cumulative_usage`.
+- Version-controlled BrowserGym result notes live under `docs/benchmark-results/`; the latest recorded one-repeat MiniWoB++ full-suite note is `docs/benchmark-results/miniwob-full-run-2026-05-26.md`.
+- Archived external-challenge results live at `docs/benchmark-results/external-challenge-results.md`.
 
 ## Historical Commit Sources
 
@@ -107,6 +139,17 @@ Modular architecture commits:
 - Dynamic element IDs from mutation feedback: `367d8f9`.
 - Tool-return history compaction: `802664d`.
 
+AgentLab and BrowserGym commits:
+
+- Task file support replacing direct goal CLI usage: `1ce84c4`.
+- AgentLab BrowserGym adapter and Python 3.12 compatibility: `3a41cf5`.
+- MiniWoB++ smoke benchmark runner and BrowserGym sync bridge: `75159be`.
+- MiniWoB++ benchmark defaults, option selection, and unified no-action done gating: `55d29be`.
+- MiniWoB++ visual handling, `click_at`, benchmark shutdown/logging hardening, and resource tracker suppression: `343a670`.
+- MiniWoB++ benchmark reliability improvements: `9efe402`.
+- MiniWoB++ interaction handling improvements: `11f2268`.
+- Text selection and resize validation improvements: `368ce18`.
+
 Benchmark-specific commits:
 
 - Challenge map documentation and scripts: `e2cd5ae`.
@@ -118,7 +161,7 @@ Benchmark-specific commits:
 ## Existing Docs To Keep In Sync
 
 - `docs/observability.md`
-- `docs/architecture-options.md`
-- `docs/challenge-map.md`
+- `docs/architecture-options.md` (historical design review)
+- `docs/challenge-map.md` (archived external challenge history)
 - `docs/qwen3-prompting-guide.md`
-- `results.md`
+- `docs/benchmark-results/external-challenge-results.md`

@@ -33,7 +33,7 @@ The early failures were not exotic. They were basic browser-agent problems:
 - Clicks and drags failed when overlays or custom event handlers were involved.
 - Some tasks needed hover, wait, drag, draw, or keyboard actions, not only click and type.
 
-These problems pushed the harness beyond a toy implementation.
+These problems pushed the harness toward a real runtime with explicit state, tools, and observability.
 
 ## Hardening The Harness
 

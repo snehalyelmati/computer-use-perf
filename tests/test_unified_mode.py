@@ -61,10 +61,10 @@ def _snapshot(*, url: str) -> PageSnapshot:
 
 
 @pytest.mark.asyncio
-async def test_unified_stops_on_done_without_tool_calls(
+async def test_unified_done_gate_overrides_done_without_tool_calls(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    snapshots = [_snapshot(url="https://example.com")]
+    snapshots = [_snapshot(url="https://example.com"), _snapshot(url="https://example.com")]
 
     async def fake_launch_browser(_config: BrowserConfig) -> _StubSession:
         return _StubSession(page=_StubPage(url="https://example.com"), cdp_session=object(), frame_sessions={})
@@ -140,8 +140,9 @@ async def test_unified_stops_on_done_without_tool_calls(
     )
     await agent.run()
 
-    assert captured_summary.get("steps") == 1
-    assert captured_summary.get("stop_reason") == "done"
+    assert captured_summary.get("steps") == 2
+    assert captured_summary.get("stop_reason") == "blocked_done_without_evidence"
+    assert "[blocked_done_without_evidence]" in str(captured_summary.get("last_summary"))
 
 
 @pytest.mark.asyncio
@@ -229,5 +230,4 @@ async def test_unified_done_gate_overrides_done_when_all_tool_calls_fail(
     await agent.run()
 
     assert captured_summary.get("steps") == 2
-    assert captured_summary.get("stop_reason") == "max_steps"
-
+    assert captured_summary.get("stop_reason") == "blocked_done_without_evidence"

@@ -5,6 +5,8 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv
@@ -15,6 +17,9 @@ wheels/
 # Runtime logs
 logs/
 *.log
+
+# Local benchmark assets
+.benchmarks/
 
 # Local debug artifacts
 debug_extraction_data.json

@@ -1,0 +1,7 @@
+{
+  "benchmark": "miniwob",
+  "description": "Terminal-style task requiring durable live text readback.",
+  "tasks": [
+    "miniwob.terminal"
+  ]
+}

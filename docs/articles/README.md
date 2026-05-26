@@ -17,4 +17,4 @@ Use the reference docs for implementation details:
 - `docs/journey.md`
 - `docs/architecture.md`
 - `docs/failure-modes.md`
-- `docs/benchmark-results.md`
+- `docs/benchmark-results/README.md`

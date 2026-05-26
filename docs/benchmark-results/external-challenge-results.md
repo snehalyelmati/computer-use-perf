@@ -1,13 +1,34 @@
-# Agent Run Results
+# Archived External Challenge Run Results
 
-*Generated: 2026-02-27 21:36 UTC*
+These runs came from the external browser-agent challenge site used during early Zip development. That site may no longer be reliably available, so this table is retained as development history rather than a current public benchmark claim. Use the BrowserGym/MiniWoB++ reports in this directory for standard benchmark comparisons.
 
-**Total runs:** 35
+*Generated: 2026-03-11 19:08 UTC*
+
+**Total runs:** 54
 
 ## Runs
 
 | Date | Run ID | Commit | Provider | Model | Worker | Filter | Oracle | Steps Reached | Stuck On | Duration | Tokens | Cost | Stop Reason |
 |------|--------|--------|----------|-------|--------|--------|--------|---------------|----------|----------|--------|------|-------------|
+| 2026-03-11 19:08 | `e1c1a9be` | 8f9d591 | groq | kimi-k2-instruct-0905 | — | — | — | 29/30 | shadow_dom | 8:31 | 1.6M | $1.6727 | done |
+| 2026-03-11 15:55 | `7dc07a35` | 8f9d591 | openrouter | kimi-k2-0905:exacto | — | — | gemini-3.1-flash-lite-preview | 29/30 | websocket | 9:07 | 2.0M | $1.4316 | done |
+| 2026-03-11 15:44 | `915e3602` | 8f9d591 | openrouter | kimi-k2-0905:exacto | — | — | gemini-3.1-flash-lite-preview | 2/30 | visible_code | 0:41 | 56K | $0.0416 | interrupted |
+| 2026-03-11 15:34 | `6ca0785f` | 7661045 | openrouter | kimi-k2-0905:exacto | — | — | gemini-3.1-flash-lite-preview | 8/30 | hover | 1:08 | 271K | $0.1979 | interrupted |
+| 2026-03-11 15:23 | `fca2062d` | 7661045 | openrouter | kimi-k2-0905:exacto | — | — | gemini-3.1-flash-lite-preview | 11/30 | audio | 2:51 | 505K | $0.3677 | interrupted |
+| 2026-03-11 15:16 | `60fe1239` | 7661045 | openrouter | kimi-k2-0905:exacto | — | — | gemini-3.1-flash-lite-preview | 29/30 | websocket | 8:22 | 1.7M | $1.2343 | done |
+| 2026-03-11 14:51 | `29b01401` | 802664d | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 29/30 | websocket | 10:34 | 1.8M | $1.2708 | done |
+| 2026-03-11 14:40 | `133535a5` | 802664d | openrouter | kimi-k2-0905:exacto | — | — | grok-4.1-fast | 4/30 | visible_code | 1:02 | 120K | $0.0855 | interrupted |
+| 2026-03-11 14:12 | `3ea140d0` | 367d8f9 | openrouter | kimi-k2-0905:exacto | — | — | grok-4.1-fast | 29/30 | service_worker | 12:02 | 1.5M | $0.0347 | done |
+| 2026-03-11 13:50 | `97ffb8ec` | 367d8f9 | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 6/30 | keyboard_sequence | 1:43 | 215K | $0.0230 | interrupted |
+| 2026-03-11 12:13 | `5285316e` | 367d8f9 | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 4/30 | hidden_dom | 0:38 | 85K | $0.0000 | interrupted |
+| 2026-03-05 06:31 | `ae3a0293` | 8f331da | groq | kimi-k2-instruct-0905 | — | — | — | 21/30 | service_worker | 7:54 | 1.4M | $1.4492 | interrupted |
+| 2026-03-05 06:23 | `1679713b` | 8f331da | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 0/30 | — | 0:09 | 0 | — | interrupted |
+| 2026-03-04 07:04 | `9651ac18` | 8f331da | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 0/30 | — | -1:57 | 0 | — | interrupted |
+| 2026-03-04 07:01 | `fa4d9a7a` | 8f331da | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 0/30 | — | 0:01 | 0 | — | interrupted |
+| 2026-03-04 07:00 | `c3bee4cb` | 8f331da | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 0/30 | — | 0:00 | 1K | $0.0017 | interrupted |
+| 2026-03-02 16:45 | `0754942d` | 8f331da | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 7/30 | click_reveal | 1:01 | 193K | $0.1395 | interrupted |
+| 2026-03-02 16:44 | `7f41e1de` | 8f331da | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 1/30 | delayed_reveal | 0:25 | 24K | $0.0214 | interrupted |
+| 2026-03-02 14:37 | `e995494e` | 8f331da | openrouter | kimi-k2-0905:exacto | — | — | gemini-3-flash-preview | 9/30 | click_reveal | 2:13 | 369K | $0.2669 | done |
 | 2026-02-27 21:22 | `6813b0d6` | 3ba7238 | openrouter | kimi-k2-0905:exacto | — | — | — | 30/30 | completed | 9:26 | 2.0M | $1.3547 | interrupted |
 | 2026-02-27 21:12 | `c22a7138` | 3ba7238 | openrouter | kimi-k2-0905:exacto | — | — | — | 5/30 | drag_and_drop | 0:57 | 232K | $0.1614 | interrupted |
 | 2026-02-27 21:10 | `848016d3` | 3ba7238 | openrouter | gemini-2.5-flash-lite-preview-09-2025:nitro | — | — | — | 1/30 | click_reveal | 0:50 | 8K | $0.0008 | interrupted |

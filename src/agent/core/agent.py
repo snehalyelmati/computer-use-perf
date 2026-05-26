@@ -24,6 +24,12 @@ from pydantic_ai.models.cerebras import CerebrasModel
 from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 
+from src.agent.core.completion import (
+    CompletionDecision,
+    CompletionInputs,
+    ValidationSignal,
+    decide_completion,
+)
 from src.agent.core.resilient_model import ResilientModel
 from src.agent.core.pruning import (
     extract_instruction_phrases,
@@ -80,6 +86,7 @@ logger = logging.getLogger(__name__)
 
 _LOG_INDENT = "  "
 _STEP_SEPARATOR = "─" * 64
+_AGENT_LOG_HANDLER_ATTR = "_computer_use_agent_log_handler"
 
 
 class _ShortNameFilter(logging.Filter):
@@ -364,22 +371,56 @@ class AgentState:
     step_trace: list[dict[str, Any]] = field(default_factory=list)
     last_step_was_puzzle: bool = False
     consecutive_tool_limit_steps: int = 0
+    recovery_attempted: bool = False
+    recovery_reason: str | None = None
+    last_blocked_reason: str | None = None
+    last_validation_signal: ValidationSignal | None = None
+    last_completion_decision: CompletionDecision | None = None
 
 
 @dataclass
 class ToolCallTracker:
-    """Track tool calls within a step for logging purposes."""
+    """Track tool calls within a step for logging and loop guards."""
+
     first_tool_logged: bool = False
     success_count: int = 0
     failure_count: int = 0
     calls: list[tuple[str, str | None]] = field(default_factory=list)
+    results: list[dict[str, Any]] = field(default_factory=list)
+    blocked_repeats: int = 0
+    state_version: int = 0
 
-    def record(self, ok: bool, *, tool_name: str = "", element_id: str | None = None) -> None:
+    def record(
+        self,
+        ok: bool,
+        *,
+        tool_name: str = "",
+        element_id: str | None = None,
+        signature: tuple[Any, ...] | None = None,
+        message: str = "",
+        facts: dict[str, Any] | None = None,
+    ) -> None:
         if ok:
             self.success_count += 1
         else:
             self.failure_count += 1
         self.calls.append((tool_name, element_id))
+        result_facts = dict(facts or {})
+        changed = _facts_changed(result_facts)
+        if changed:
+            self.state_version += 1
+        self.results.append(
+            {
+                "tool": tool_name,
+                "element_id": element_id,
+                "signature": list(signature or (tool_name, element_id)),
+                "ok": ok,
+                "message": message[:500],
+                "facts": result_facts,
+                "changed": changed,
+                "state_version": self.state_version,
+            }
+        )
 
     def calls_summary(self) -> str:
         """Compact summary of tool calls, collapsing consecutive duplicates."""
@@ -406,6 +447,50 @@ class ToolCallTracker:
             parts.append(f"{label}x{count}" if count > 1 else label)
         return ", ".join(parts)
 
+    def repeated_no_change_message(
+        self, tool_name: str, signature: tuple[Any, ...]
+    ) -> str | None:
+        block_message = (
+            f"Blocked repeated {tool_name}: the same action was already attempted "
+            "twice in this step with no useful page, value, focus, or URL change. "
+            "Stop repeating it and summarize what is missing or try a materially "
+            "different action."
+        )
+        current_state_version = self.state_version
+        matching = [
+            result
+            for result in self.results
+            if tuple(result.get("signature", ())) == tuple(signature)
+            and int(result.get("state_version") or 0) == current_state_version
+        ]
+        if matching and dict(matching[-1].get("facts") or {}).get("blocked_repeat"):
+            self.blocked_repeats += 1
+            return block_message
+        real_attempts = [
+            result
+            for result in matching
+            if not dict(result.get("facts") or {}).get("blocked_repeat")
+        ]
+        if len(real_attempts) < 2:
+            return None
+        recent = real_attempts[-2:]
+        if any(_facts_changed(dict(item.get("facts") or {})) for item in recent):
+            return None
+        if str(recent[0].get("message") or "") != str(recent[1].get("message") or ""):
+            return None
+        self.blocked_repeats += 1
+        return block_message
+
+    def has_observable_change(self) -> bool:
+        return any(_facts_changed(dict(result.get("facts") or {})) for result in self.results)
+
+    def last_tool_family(self) -> str | None:
+        for result in reversed(self.results):
+            tool = str(result.get("tool") or "")
+            if tool:
+                return _tool_family(tool)
+        return None
+
 
 @dataclass(frozen=True)
 class WorkerDeps:
@@ -418,10 +503,19 @@ class WorkerDeps:
 
 DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
     "click_element",
+    "click_at",
+    "focus_element",
     "hover_element",
     "type_text",
+    "transfer_text",
     "drag_and_drop",
+    "pointer_drag",
+    "set_slider_value",
+    "resize_element",
     "draw",
+    "select_text",
+    "apply_format",
+    "read_live_text",
     "scroll",
     "wait",
     "watch_for_text",
@@ -429,6 +523,166 @@ DEFAULT_WORKER_TOOLS: frozenset[str] = frozenset({
     "switch_to_main_frame",
     "press_key_combination",
 })
+
+
+def _tool_family(tool_name: str | None) -> str | None:
+    if not tool_name:
+        return None
+    if tool_name in {"click_element", "click_at"}:
+        return "click"
+    if tool_name in {"type_text", "press_key_combination", "transfer_text"}:
+        return "keyboard"
+    if tool_name in {"drag_and_drop", "draw", "scroll", "pointer_drag", "resize_element"}:
+        return "pointer"
+    if tool_name in {"set_slider_value"}:
+        return "widget"
+    if tool_name in {"focus_element", "select_text", "apply_format"}:
+        return "focus"
+    if tool_name.startswith("switch_to_"):
+        return "frame"
+    return tool_name
+
+
+_CURRENT_VALUE_RE = re.compile(r'Current value: "([^"]*)"')
+_PREVIOUS_VALUE_RE = re.compile(r'Previous value: "([^"]*)"')
+_SCROLL_DELTA_RE = re.compile(r"Scroll position changed by \((-?\d+), (-?\d+)\)px")
+_NAV_RE = re.compile(r"^\s*navigated to: (.+)$", re.MULTILINE)
+
+
+def _facts_changed(facts: dict[str, Any]) -> bool:
+    return bool(
+        facts.get("dom_changed")
+        or facts.get("value_changed")
+        or facts.get("focus_changed")
+        or facts.get("url_changed")
+        or facts.get("scroll_changed")
+        or facts.get("state_changed")
+    )
+
+
+def _message_has_dom_change(message: str) -> bool:
+    if "DOM changes:" not in message:
+        return False
+    return "No DOM changes." not in message and bool(
+        re.search(r"^\s*(?:[+~-]|navigated to:)", message, re.MULTILINE)
+    )
+
+
+def _extract_tool_facts(
+    tool_name: str,
+    result: semantic.ToolResult | ToolExecutionResult,
+    *,
+    element_id: str | None = None,
+    element_label: str | None = None,
+    before_url: str | None = None,
+    after_url: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    message = getattr(result, "message", "") or ""
+    facts: dict[str, Any] = {
+        "tool_family": _tool_family(tool_name),
+        "dom_changed": _message_has_dom_change(message),
+        "no_dom_change": "No DOM changes." in message or "no observable" in message.lower(),
+    }
+    if element_id:
+        facts["element_id"] = element_id
+    if element_label:
+        facts["element_label"] = element_label
+    if before_url is not None:
+        facts["url_before"] = before_url
+    if after_url is not None:
+        facts["url_after"] = after_url
+        facts["url_changed"] = before_url is not None and before_url != after_url
+    if nav_match := _NAV_RE.search(message):
+        facts["url_after"] = nav_match.group(1).strip()
+        facts["url_changed"] = True
+    if current_match := _CURRENT_VALUE_RE.search(message):
+        facts["value_after"] = current_match.group(1)
+    if previous_match := _PREVIOUS_VALUE_RE.search(message):
+        facts["value_before"] = previous_match.group(1)
+    if "value_before" in facts and "value_after" in facts:
+        facts["value_changed"] = facts["value_before"] != facts["value_after"]
+    elif "Current value:" in message:
+        facts["value_changed"] = facts["dom_changed"]
+    if scroll_match := _SCROLL_DELTA_RE.search(message):
+        dx = int(scroll_match.group(1))
+        dy = int(scroll_match.group(2))
+        facts["scroll_delta"] = (dx, dy)
+        facts["scroll_changed"] = dx != 0 or dy != 0
+    if "Active frame set to" in message or "Switched to main frame" in message:
+        facts["focus_changed"] = "already" not in message.lower()
+    if focus_match := re.search(r"Focus changed:\s*(true|false)", message, re.IGNORECASE):
+        facts["focus_changed"] = focus_match.group(1).lower() == "true"
+    if extra:
+        facts.update(extra)
+    facts["state_changed"] = _facts_changed(facts)
+    return facts
+
+
+def _tool_signature(tool_name: str, *parts: Any) -> tuple[Any, ...]:
+    normalized: list[Any] = [tool_name]
+    for part in parts:
+        if isinstance(part, float):
+            normalized.append(round(part, 2))
+        elif isinstance(part, list):
+            normalized.append(tuple(part))
+        elif isinstance(part, tuple):
+            normalized.append(tuple(part))
+        elif isinstance(part, str):
+            normalized.append(" ".join(part.split()))
+        else:
+            normalized.append(part)
+    return tuple(normalized)
+
+
+def _repeat_guard_result(
+    tracker: ToolCallTracker | None,
+    tool_name: str,
+    signature: tuple[Any, ...],
+    *,
+    element_id: str | None = None,
+) -> ToolExecutionResult | None:
+    if tracker is None:
+        return None
+    message = tracker.repeated_no_change_message(tool_name, signature)
+    if not message:
+        return None
+    facts = {
+        "blocked_repeat": True,
+        "state_changed": False,
+        "tool_family": _tool_family(tool_name),
+    }
+    tracker.record(
+        False,
+        tool_name=tool_name,
+        element_id=element_id,
+        signature=signature,
+        message=message,
+        facts=facts,
+    )
+    return ToolExecutionResult(ok=False, message=message, facts=facts)
+
+
+def _record_tool_attempt(
+    tracker: ToolCallTracker | None,
+    ok: bool,
+    *,
+    tool_name: str,
+    element_id: str | None = None,
+    signature: tuple[Any, ...] | None = None,
+    message: str = "",
+    facts: dict[str, Any] | None = None,
+) -> None:
+    if tracker is None:
+        return
+    tracker.record(
+        ok,
+        tool_name=tool_name,
+        element_id=element_id,
+        signature=signature,
+        message=message,
+        facts=facts,
+    )
 
 
 def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> None:
@@ -449,13 +703,29 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
     short_name_filter = _ShortNameFilter()
 
     # ── agent.log: user-configured level ──
-    log_path = str(Path(log_dir) / "agent.log")
+    log_path = str((Path(log_dir) / "agent.log").resolve())
+    debug_log_path = str((Path(log_dir) / "agent_debug.log").resolve())
+    active_log_paths = {log_path, debug_log_path}
+
+    for handler in list(root.handlers):
+        if not getattr(handler, _AGENT_LOG_HANDLER_ATTR, False):
+            continue
+        handler_path = getattr(handler, "baseFilename", None)
+        if isinstance(handler, logging.FileHandler) and handler_path in active_log_paths:
+            continue
+        root.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
     has_file = any(
         isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == log_path
         for handler in root.handlers
     )
     if not has_file:
         file_handler = logging.FileHandler(log_path)
+        setattr(file_handler, _AGENT_LOG_HANDLER_ATTR, True)
         file_handler.setFormatter(plain_formatter)
         file_handler.setLevel(configured_level)
         file_handler.addFilter(short_name_filter)
@@ -468,13 +738,13 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
                     handler.addFilter(short_name_filter)
 
     # ── agent_debug.log: always DEBUG ──
-    debug_log_path = str(Path(log_dir) / "agent_debug.log")
     has_debug_file = any(
         isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == debug_log_path
         for handler in root.handlers
     )
     if not has_debug_file:
         debug_file_handler = logging.FileHandler(debug_log_path)
+        setattr(debug_file_handler, _AGENT_LOG_HANDLER_ATTR, True)
         debug_file_handler.setFormatter(debug_formatter)
         debug_file_handler.setLevel(logging.DEBUG)
         debug_file_handler.addFilter(short_name_filter)
@@ -487,6 +757,7 @@ def _setup_logging(log_dir: str, *, level: str = "INFO", color: bool = True) -> 
     )
     if not has_stream:
         stream_handler = logging.StreamHandler()
+        setattr(stream_handler, _AGENT_LOG_HANDLER_ATTR, True)
         stream_handler.setFormatter(color_formatter)
         stream_handler.setLevel(configured_level)
         stream_handler.addFilter(short_name_filter)
@@ -513,6 +784,8 @@ def _teardown_logging() -> None:
     """Remove and close handlers added by _setup_logging."""
     root = logging.getLogger()
     for handler in list(root.handlers):
+        if not getattr(handler, _AGENT_LOG_HANDLER_ATTR, False):
+            continue
         try:
             handler.close()
             root.removeHandler(handler)
@@ -556,10 +829,6 @@ def _model_settings(config: LLMConfig) -> dict[str, Any]:
     }
     if config.provider == "openrouter":
         settings["openrouter_usage"] = {"include": True}
-        settings["openrouter_provider"] = {
-            "order": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-ai-studio", "google-vertex", "together", "xai"],
-            "only": ["cerebras", "sambanova", "groq", "baseten", "fireworks", "google-ai-studio", "google-vertex", "together", "xai"],
-        }
         if config.reasoning_effort and config.reasoning_effort != "none":
             settings["openrouter_reasoning"] = {"effort": config.reasoning_effort}
     return settings
@@ -621,6 +890,153 @@ def _format_step_trace(trace: list[dict[str, Any]], *, window: int = 0) -> str:
             f"  Diff: {entry.get('diff_summary', '')} | url_changed={url_changed}"
         )
     return header + "\n".join(lines)
+
+
+def _format_compact_runtime_context(
+    trace: list[dict[str, Any]],
+    *,
+    latest_validation: ValidationSignal | None = None,
+    recovery_attempted: bool = False,
+    recovery_reason: str | None = None,
+    blocked_reason: str | None = None,
+    window: int = 3,
+) -> str:
+    lines: list[str] = []
+    distinct_state = next(
+        (
+            entry
+            for entry in reversed(trace)
+            if entry.get("diff_summary") or entry.get("url")
+        ),
+        None,
+    )
+    if distinct_state:
+        lines.append(
+            f"Last page state: {distinct_state.get('url', '')} | {distinct_state.get('diff_summary', '')}"
+        )
+
+    unique_attempts: list[str] = []
+    seen: set[str] = set()
+    for entry in reversed(trace):
+        key = "|".join(
+            [
+                str(entry.get("goal") or ""),
+                str(entry.get("tool_calls") or ""),
+                str(entry.get("summary") or ""),
+            ]
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        attempt = (
+            f"Step {entry.get('step')}: goal={entry.get('goal', '')}; "
+            f"tools={entry.get('tool_calls') or 'none'}; result={entry.get('summary', '')}"
+        )
+        unique_attempts.append(attempt)
+        if len(unique_attempts) >= max(1, window):
+            break
+    if unique_attempts:
+        lines.append("Last unique attempts:")
+        lines.extend(f"- {attempt}" for attempt in reversed(unique_attempts))
+
+    if latest_validation:
+        reward = (
+            "n/a" if latest_validation.reward is None else f"{latest_validation.reward:.3g}"
+        )
+        lines.append(
+            "Latest validation: "
+            f"{latest_validation.source} status={latest_validation.status} "
+            f"terminal={latest_validation.terminal} reward={reward}"
+        )
+    if recovery_attempted or recovery_reason:
+        state = "attempted" if recovery_attempted else "available"
+        lines.append(f"Recovery state: {state}; reason={recovery_reason or 'none'}")
+    if blocked_reason:
+        lines.append(f"Blocked reason: {blocked_reason}")
+    return "\n".join(lines) if lines else "No prior compact state."
+
+
+def _completion_inputs_from_step(
+    state: AgentState,
+    *,
+    validation: ValidationSignal | None,
+    model_done: bool,
+    completion_evidence: str | None,
+    worker_goal: str | None,
+    tool_context: semantic.ToolContext,
+    tool_tracker: ToolCallTracker,
+    prev_url: str,
+    tool_limit_hit: bool,
+) -> CompletionInputs:
+    after_url = getattr(tool_context.page, "url", "") or ""
+    current_tool_family = tool_tracker.last_tool_family()
+    previous_tool_family = _tool_family(state.last_tool)
+    previous_trace_goal = (
+        str(state.step_trace[-1].get("goal") or "")
+        if state.step_trace
+        else ""
+    )
+    return CompletionInputs(
+        validation=validation,
+        model_done=bool(model_done),
+        completion_evidence=completion_evidence,
+        successful_tools=tool_tracker.success_count,
+        failed_tools=tool_tracker.failure_count,
+        same_worker_goal=bool(
+            tool_tracker.calls and worker_goal and worker_goal == previous_trace_goal
+        ),
+        same_tool_family=bool(
+            tool_tracker.calls
+            and current_tool_family
+            and previous_tool_family
+            and current_tool_family == previous_tool_family
+        ),
+        dom_changed=tool_tracker.has_observable_change(),
+        value_changed=any(
+            bool((result.get("facts") or {}).get("value_changed"))
+            for result in tool_tracker.results
+        ),
+        url_changed=prev_url != after_url,
+        tool_limit_hit=tool_limit_hit,
+        consecutive_tool_limit_steps=state.consecutive_tool_limit_steps,
+        recovery_attempted=state.recovery_attempted,
+        no_progress_steps=state.no_progress_steps,
+        tool_results=tuple(tool_tracker.results[-6:]),
+    )
+
+
+def _apply_completion_decision(
+    state: AgentState,
+    decision: CompletionDecision,
+    *,
+    step_output: StepOutput | UnifiedStepOutput,
+    observable_change: bool = False,
+) -> StepOutput | UnifiedStepOutput:
+    state.last_completion_decision = decision
+    if decision.action == "recover_once":
+        state.recovery_attempted = True
+        state.recovery_reason = decision.reason
+        update = {
+            "done": False,
+            "summary": f"[recovery required] {step_output.summary} ({decision.reason})",
+        }
+        return step_output.model_copy(update=update)
+    if decision.action == "continue":
+        if observable_change:
+            state.recovery_attempted = False
+            state.recovery_reason = None
+        return step_output
+    if decision.action == "stop_success":
+        state.recovery_attempted = False
+        state.recovery_reason = None
+        return step_output.model_copy(update={"done": True})
+    state.last_blocked_reason = decision.stop_reason or decision.action
+    return step_output.model_copy(
+        update={
+            "done": True,
+            "summary": f"[{state.last_blocked_reason}] {step_output.summary} ({decision.reason})",
+        }
+    )
 
 
 # ── React state leak workaround for back-to-back math puzzle steps ──
@@ -1170,6 +1586,21 @@ def _snapshot_diff(
     return "\n".join(lines), detail_ids, newly_enabled
 
 
+def _diff_has_observable_change(diff_text: str) -> bool:
+    first = (diff_text or "").split("\n", 1)[0]
+    return bool(
+        diff_text
+        and not first.startswith("First snapshot")
+        and (
+            first != "new_elements=0 changed_labels=0 removed_elements=0"
+            or any(
+                line.startswith(("text_changes=", "+text ", "-text "))
+                for line in diff_text.splitlines()[1:]
+            )
+        )
+    )
+
+
 def build_orchestrator_agent(model: Model, *, model_settings: dict[str, Any]) -> Agent[None, OrchestratorDecision]:
     return Agent(
         model,
@@ -1187,7 +1618,7 @@ def build_snapshot_filter_agent(
         output_type=SnapshotFilterOutput,
         system_prompt=FILTER_PROMPT,
         model_settings=model_settings,
-        retries=1,
+        retries=2,
     )
 
 
@@ -1205,10 +1636,25 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
     @agent.tool(name="click_element")
     async def click_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
         """Click on an element to activate it, follow a link, or toggle a control. Automatically scrolls the element into view — no need to scroll first. Use element_id from the page snapshot."""
+        signature = _tool_signature("click_element", element_id)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "click_element", signature, element_id=element_id
+        ):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.click_element(element_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "click_element",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            before_url=before_url,
+            after_url=after_url,
+        )
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
@@ -1237,17 +1683,155 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             duration_ms=duration_ms,
             element_id=element_id,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="click_element", element_id=element_id)
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="click_element",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
+
+    @agent.tool(name="click_at")
+    async def click_at(ctx: RunContext[WorkerDeps], element_id: str, x: float, y: float) -> ToolExecutionResult:
+        """Click a specific point inside a visual target. Use for SVG, canvas, map, image, or geometry tasks where the snapshot gives coordinates. Coordinates are CSS pixels relative to the element's top-left corner; viewport coordinates inside the element bbox are also accepted. Use element_id from the page snapshot."""
+        signature = _tool_signature("click_at", element_id, x, y)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "click_at", signature, element_id=element_id
+        ):
+            return blocked
+        start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        result = await semantic.click_at(element_id, x, y, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "click_at",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"x": round(float(x), 2), "y": round(float(y), 2)},
+        )
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "click_at",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=f"x={x:.1f} y={y:.1f}" if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Clicked {element_id}") if result.ok else None,
+            )
+        )
+        logger.debug(
+            "tool=click_at step=%s ok=%s element_id=%s x=%s y=%s duration_ms=%s full_message=%s",
+            ctx.deps.step,
+            result.ok,
+            element_id,
+            x,
+            y,
+            duration_ms,
+            result.message,
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="click_at",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            element_id=element_id,
+            x=x,
+            y=y,
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="click_at",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
+
+    @agent.tool(name="focus_element")
+    async def focus_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
+        """Focus an element without clicking it. Use when the task requires focus state or keyboard input target changes. Use element_id from the page snapshot."""
+        signature = _tool_signature("focus_element", element_id)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "focus_element", signature, element_id=element_id
+        ):
+            return blocked
+        start = time.perf_counter()
+        result = await semantic.focus_element(element_id, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "focus_element",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+        )
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "focus_element",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=None if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Focused {element_id}") if result.ok else None,
+            )
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="focus_element",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            element_id=element_id,
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="focus_element",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="hover_element")
     async def hover_element(ctx: RunContext[WorkerDeps], element_id: str, duration_ms: int = 2000) -> ToolExecutionResult:
         """Hover over an element for a duration to trigger hover-dependent behavior. Automatically scrolls the element into view — no need to scroll first. Use for revealing tooltips, dropdown menus, or hidden content triggered by mouse hover. Default hold time is 2 seconds; increase duration_ms for content that requires longer hover (up to 5 000 ms). Use element_id from the page snapshot."""
+        signature = _tool_signature("hover_element", element_id, duration_ms)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "hover_element", signature, element_id=element_id
+        ):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.hover_element(element_id, ctx.deps.tool_context, duration_ms=duration_ms)
         elapsed_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "hover_element",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"duration_ms": duration_ms},
+        )
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
@@ -1277,9 +1861,16 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             duration_ms=elapsed_ms,
             element_id=element_id,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="hover_element", element_id=element_id)
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="hover_element",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="find_elements")
     async def find_elements(ctx: RunContext[WorkerDeps], query: str, limit: int = 8) -> ToolExecutionResult:
@@ -1320,17 +1911,44 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             query_len=len(query or ""),
             limit=limit,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(True, tool_name="find_elements")
-        return ToolExecutionResult(ok=True, message=message)
+        facts = {
+            "tool_family": "find_elements",
+            "matches": len(matches),
+            "state_changed": False,
+        }
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            True,
+            tool_name="find_elements",
+            signature=_tool_signature("find_elements", query, limit),
+            message=message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=True, message=message, facts=facts)
 
     @agent.tool(name="type_text")
     async def type_text(ctx: RunContext[WorkerDeps], element_id: str, text: str) -> ToolExecutionResult:
         """Type text into an input or editable field — clears any existing content first and focuses automatically (no separate click needed). Automatically scrolls the element into view — no need to scroll first. Use for any element that accepts keyboard input, including fields with placeholder hints like 'click to type' or 'enter value'. Use element_id from the page snapshot."""
+        signature = _tool_signature("type_text", element_id, text)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "type_text", signature, element_id=element_id
+        ):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.type_text(element_id, text, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "type_text",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"text_len": len(text)},
+        )
         text_preview = text[:20] + "..." if len(text) > 20 else text
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
@@ -1362,18 +1980,96 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             element_id=element_id,
             text_len=len(text),
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="type_text", element_id=element_id)
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="type_text",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
+
+    @agent.tool(name="transfer_text")
+    async def transfer_text(ctx: RunContext[WorkerDeps], source_id: str, target_id: str) -> ToolExecutionResult:
+        """Copy visible text or value from one element into another without relying on the OS clipboard. Use element IDs from the page snapshot."""
+        signature = _tool_signature("transfer_text", source_id, target_id)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "transfer_text", signature, element_id=target_id
+        ):
+            return blocked
+        start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        result = await semantic.transfer_text(source_id, target_id, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        target_label = _get_element_label(ctx.deps.tool_context.element_index, target_id)
+        facts = _extract_tool_facts(
+            "transfer_text",
+            result,
+            element_id=target_id,
+            element_label=target_label,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"source_id": source_id, "target_id": target_id},
+        )
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "transfer_text",
+                result.ok,
+                duration_ms,
+                element_id=target_id,
+                element_label=target_label,
+                extra=f"{source_id} -> {target_id}" if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Transferred text from {source_id} to {target_id}") if result.ok else None,
+            )
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="transfer_text",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            source_id=source_id,
+            target_id=target_id,
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="transfer_text",
+            element_id=target_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="drag_and_drop")
     async def drag_and_drop(ctx: RunContext[WorkerDeps], source_id: str, target_id: str) -> ToolExecutionResult:
         """Drag one element onto another. Automatically scrolls elements into view — no need to scroll first. Use for reordering lists, moving cards, adjusting sliders, etc. Use element IDs from the page snapshot."""
+        signature = _tool_signature("drag_and_drop", source_id, target_id)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "drag_and_drop", signature, element_id=source_id
+        ):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.drag_and_drop(source_id, target_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         source_label = _get_element_label(ctx.deps.tool_context.element_index, source_id)
         target_label = _get_element_label(ctx.deps.tool_context.element_index, target_id)
+        facts = _extract_tool_facts(
+            "drag_and_drop",
+            result,
+            element_id=source_id,
+            element_label=source_label,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"source_id": source_id, "target_id": target_id, "target_label": target_label},
+        )
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
@@ -1402,17 +2098,232 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             source_id=source_id,
             target_id=target_id,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="drag_and_drop", element_id=source_id)
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="drag_and_drop",
+            element_id=source_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
+
+    @agent.tool(name="pointer_drag")
+    async def pointer_drag(
+        ctx: RunContext[WorkerDeps],
+        element_id: str,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        steps: int = 12,
+    ) -> ToolExecutionResult:
+        """Drag the pointer from an element-local start point to an element-local or outside endpoint. Use for sliders, resize handles, canvas/SVG drag targets, or widgets that need real pointer movement. Use element_id from the page snapshot."""
+        clamped_steps = max(1, min(int(steps), 50))
+        signature = _tool_signature("pointer_drag", element_id, start_x, start_y, end_x, end_y, clamped_steps)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "pointer_drag", signature, element_id=element_id
+        ):
+            return blocked
+        start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        result = await semantic.pointer_drag(
+            element_id,
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            ctx.deps.tool_context,
+            steps=clamped_steps,
+        )
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "pointer_drag",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            before_url=before_url,
+            after_url=after_url,
+            extra={
+                "start_x": round(float(start_x), 2),
+                "start_y": round(float(start_y), 2),
+                "end_x": round(float(end_x), 2),
+                "end_y": round(float(end_y), 2),
+                "steps": clamped_steps,
+            },
+        )
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "pointer_drag",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=f"({start_x:.1f},{start_y:.1f})->({end_x:.1f},{end_y:.1f})" if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Pointer dragged {element_id}") if result.ok else None,
+            )
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="pointer_drag",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            element_id=element_id,
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="pointer_drag",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
+
+    @agent.tool(name="set_slider_value")
+    async def set_slider_value(ctx: RunContext[WorkerDeps], element_id: str, value: float) -> ToolExecutionResult:
+        """Set a slider/range/spin-style widget to a numeric value. Uses native value semantics first and pointer fallback when needed. Use element_id from the page snapshot."""
+        signature = _tool_signature("set_slider_value", element_id, value)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "set_slider_value", signature, element_id=element_id
+        ):
+            return blocked
+        start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        result = await semantic.set_slider_value(element_id, value, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "set_slider_value",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"value": value},
+        )
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "set_slider_value",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=f"value={value:g}" if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Set slider {element_id}") if result.ok else None,
+            )
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="set_slider_value",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            element_id=element_id,
+            value=value,
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="set_slider_value",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
+
+    @agent.tool(name="resize_element")
+    async def resize_element(
+        ctx: RunContext[WorkerDeps], element_id: str, delta_width: float, delta_height: float
+    ) -> ToolExecutionResult:
+        """Resize an element by the given pixel delta and verify the requested dimension changed before final actions. Use element_id from the page snapshot."""
+        signature = _tool_signature("resize_element", element_id, delta_width, delta_height)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "resize_element", signature, element_id=element_id
+        ):
+            return blocked
+        start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        result = await semantic.resize_element(element_id, delta_width, delta_height, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "resize_element",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"delta_width": delta_width, "delta_height": delta_height},
+        )
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "resize_element",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=f"dw={delta_width:g} dh={delta_height:g}" if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Resized {element_id}") if result.ok else None,
+            )
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="resize_element",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            element_id=element_id,
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="resize_element",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="draw")
     async def draw(ctx: RunContext[WorkerDeps], element_id: str, path: list[list[float]]) -> ToolExecutionResult:
-        """Draw a freeform path on a canvas or drawing surface by moving the mouse through a series of coordinate points with the button held. Automatically scrolls the element into view — no need to scroll first. Points are [x, y] pairs relative to the element's top-left corner. Use element_id from the page snapshot."""
+        """Draw a complete freeform path on a canvas or drawing surface with one continuous mouse drag. Use multiple points for curves/circles because repeated drags may replace the prior path; points are [x, y] pairs relative to the element's top-left corner. Use element_id from the page snapshot."""
+        path_signature = (
+            len(path),
+            tuple(round(float(v), 2) for point in path[:2] + path[-2:] for v in point[:2]),
+        )
+        signature = _tool_signature("draw", element_id, path_signature)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "draw", signature, element_id=element_id
+        ):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.draw(element_id, path, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "draw",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"points_count": len(path)},
+        )
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
@@ -1443,16 +2354,35 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             element_id=element_id,
             points_count=len(path),
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="draw", element_id=element_id)
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="draw",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="wait")
     async def wait(ctx: RunContext[WorkerDeps], milliseconds: int) -> ToolExecutionResult:
         """Pause execution. Use when the page needs time to load, animate, or settle. Capped at 10 000 ms."""
+        signature = _tool_signature("wait", milliseconds)
+        if blocked := _repeat_guard_result(ctx.deps.tool_tracker, "wait", signature):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.wait(milliseconds, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        facts = _extract_tool_facts(
+            "wait",
+            result,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"requested_ms": milliseconds},
+        )
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
@@ -1478,9 +2408,15 @@ def register_browser_tools(agent: Agent[WorkerDeps, Any]) -> None:
             duration_ms=duration_ms,
             requested_ms=milliseconds,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="wait")
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="wait",
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="watch_for_text")
     async def watch_for_text(
@@ -1492,11 +2428,23 @@ Use ONLY for transient elements that appear after a delay — buttons, toasts, o
 When tool feedback reports new text appeared (e.g. "New text appeared: ..."), watch for the dynamic content itself, not surrounding labels or prefixes. For example, if a page says "your value will appear here: " and feedback later shows a button with new text, watch for the button text, not the label.
 Do NOT fabricate expected text — only watch for text you have actually seen in tool feedback or page instructions.
 NOT for finding text already visible in the snapshot — use click_element for those. Max timeout 10 000 ms."""
+        signature = _tool_signature("watch_for_text", text, timeout_ms)
+        if blocked := _repeat_guard_result(ctx.deps.tool_tracker, "watch_for_text", signature):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.watch_for_text(
             text, ctx.deps.tool_context, timeout_ms=timeout_ms
         )
         duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        facts = _extract_tool_facts(
+            "watch_for_text",
+            result,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"text": text, "timeout_ms": timeout_ms},
+        )
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         text_preview = text[:30] + "..." if len(text) > 30 else text
         logger.info(
@@ -1525,9 +2473,15 @@ NOT for finding text already visible in the snapshot — use click_element for t
             text=text,
             timeout_ms=timeout_ms,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="watch_for_text")
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="watch_for_text",
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="inspect_element")
     async def inspect_element(ctx: RunContext[WorkerDeps], element_id: str) -> ToolExecutionResult:
@@ -1563,9 +2517,170 @@ NOT for finding text already visible in the snapshot — use click_element for t
             duration_ms=duration_ms,
             element_id=element_id,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="inspect_element", element_id=element_id)
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        facts = _extract_tool_facts(
+            "inspect_element",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            extra={"state_changed": False},
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="inspect_element",
+            element_id=element_id,
+            signature=_tool_signature("inspect_element", element_id),
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
+
+    @agent.tool(name="select_text")
+    async def select_text(
+        ctx: RunContext[WorkerDeps],
+        element_id: str,
+        text: str | None = None,
+        occurrence: int = 1,
+    ) -> ToolExecutionResult:
+        """Select text inside a visible text container. Use before apply_format for highlight/rich-editor tasks. Use element_id from the page snapshot."""
+        signature = _tool_signature("select_text", element_id, text or "", occurrence)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "select_text", signature, element_id=element_id
+        ):
+            return blocked
+        start = time.perf_counter()
+        result = await semantic.select_text(
+            element_id,
+            ctx.deps.tool_context,
+            text=text,
+            occurrence=occurrence,
+        )
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id)
+        facts = _extract_tool_facts(
+            "select_text",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            extra={"selected_text": bool(text), "occurrence": occurrence},
+        )
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "select_text",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=f'text="{text[:30]}"' if result.ok and text else (None if result.ok else result.message),
+                feedback=_compact_feedback(result.message, "Selected text") if result.ok else None,
+            )
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="select_text",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            element_id=element_id,
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="select_text",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
+
+    @agent.tool(name="apply_format")
+    async def apply_format(ctx: RunContext[WorkerDeps], command: str) -> ToolExecutionResult:
+        """Apply a rich-text command to the current selection. Supported commands: bold, italic, underline, strike, ordered_list, unordered_list."""
+        signature = _tool_signature("apply_format", command)
+        if blocked := _repeat_guard_result(ctx.deps.tool_tracker, "apply_format", signature):
+            return blocked
+        start = time.perf_counter()
+        result = await semantic.apply_format(command, ctx.deps.tool_context)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        facts = _extract_tool_facts("apply_format", result, extra={"command": command})
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "apply_format",
+                result.ok,
+                duration_ms,
+                extra=command if result.ok else result.message,
+                feedback=_compact_feedback(result.message, f"Applied format {command}") if result.ok else None,
+            )
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="apply_format",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            command=command,
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="apply_format",
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
+
+    @agent.tool(name="read_live_text")
+    async def read_live_text(ctx: RunContext[WorkerDeps], element_id: str | None = None) -> ToolExecutionResult:
+        """Read live text/value from a target element or terminal-like text regions. Use for terminal/readback widgets or when visible text is not in the snapshot. Use element_id from the page snapshot when available."""
+        signature = _tool_signature("read_live_text", element_id or "")
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "read_live_text", signature, element_id=element_id
+        ):
+            return blocked
+        start = time.perf_counter()
+        result = await semantic.read_live_text(ctx.deps.tool_context, element_id=element_id)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        element_label = _get_element_label(ctx.deps.tool_context.element_index, element_id) if element_id else None
+        facts = _extract_tool_facts(
+            "read_live_text",
+            result,
+            element_id=element_id,
+            element_label=element_label,
+            extra={"state_changed": False, "text_len": len(result.message)},
+        )
+        _log_tool_header_if_needed(ctx.deps.tool_tracker)
+        logger.info(
+            _format_tool_log(
+                "read_live_text",
+                result.ok,
+                duration_ms,
+                element_id=element_id,
+                element_label=element_label,
+                extra=None if result.ok else result.message,
+            )
+        )
+        ctx.deps.metrics.emit(
+            "tool_call",
+            step=ctx.deps.step,
+            tool="read_live_text",
+            ok=result.ok,
+            duration_ms=duration_ms,
+            element_id=element_id,
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="read_live_text",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="search_page_attributes")
     async def search_page_attributes(ctx: RunContext[WorkerDeps], query: str) -> ToolExecutionResult:
@@ -1599,9 +2714,20 @@ NOT for finding text already visible in the snapshot — use click_element for t
             duration_ms=duration_ms,
             query=query,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="search_page_attributes")
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        facts = _extract_tool_facts(
+            "search_page_attributes",
+            result,
+            extra={"state_changed": False, "query": query},
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="search_page_attributes",
+            signature=_tool_signature("search_page_attributes", query),
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="scroll")
     async def scroll(
@@ -1611,7 +2737,13 @@ NOT for finding text already visible in the snapshot — use click_element for t
         element_id: str | None = None,
     ) -> ToolExecutionResult:
         """Scroll the viewport by a pixel offset, optionally anchored to a target element. Use element_id from the page snapshot."""
+        signature = _tool_signature("scroll", element_id, delta_x, delta_y)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "scroll", signature, element_id=element_id
+        ):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.scroll(
             delta_x,
             delta_y,
@@ -1619,6 +2751,15 @@ NOT for finding text already visible in the snapshot — use click_element for t
             element_id=element_id,
         )
         duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        facts = _extract_tool_facts(
+            "scroll",
+            result,
+            element_id=element_id,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"delta_x": delta_x, "delta_y": delta_y},
+        )
         direction_parts = []
         if delta_x != 0:
             direction_parts.append(f"dx={delta_x}")
@@ -1656,17 +2797,35 @@ NOT for finding text already visible in the snapshot — use click_element for t
             delta_y=delta_y,
             element_id=element_id,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="scroll", element_id=element_id)
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="scroll",
+            element_id=element_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="switch_to_iframe")
     async def switch_to_iframe(ctx: RunContext[WorkerDeps], iframe_id: str) -> ToolExecutionResult:
         """Set the ACTIVE FRAME to an iframe. Use when you need wait/watch_for_text/execute_js/press_key_combination to target that iframe or when a frame error tells you to switch. Use element_id from the page snapshot."""
+        signature = _tool_signature("switch_to_iframe", iframe_id)
+        if blocked := _repeat_guard_result(
+            ctx.deps.tool_tracker, "switch_to_iframe", signature, element_id=iframe_id
+        ):
+            return blocked
         start = time.perf_counter()
         result = await semantic.switch_to_iframe(iframe_id, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
         element_label = _get_element_label(ctx.deps.tool_context.element_index, iframe_id)
+        facts = _extract_tool_facts(
+            "switch_to_iframe",
+            result,
+            element_id=iframe_id,
+            element_label=element_label,
+        )
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
@@ -1694,16 +2853,27 @@ NOT for finding text already visible in the snapshot — use click_element for t
             duration_ms=duration_ms,
             iframe_id=iframe_id,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="switch_to_iframe", element_id=iframe_id)
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="switch_to_iframe",
+            element_id=iframe_id,
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="switch_to_main_frame")
     async def switch_to_main_frame(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
         """Leave the current iframe and return to the top-level page."""
+        signature = _tool_signature("switch_to_main_frame")
+        if blocked := _repeat_guard_result(ctx.deps.tool_tracker, "switch_to_main_frame", signature):
+            return blocked
         start = time.perf_counter()
         result = await semantic.switch_to_main_frame(ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        facts = _extract_tool_facts("switch_to_main_frame", result)
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
@@ -1727,16 +2897,34 @@ NOT for finding text already visible in the snapshot — use click_element for t
             ok=result.ok,
             duration_ms=duration_ms,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="switch_to_main_frame")
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="switch_to_main_frame",
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="navigate_to")
     async def navigate_to(ctx: RunContext[WorkerDeps], url: str) -> ToolExecutionResult:
         """Navigate to a URL. Use for opening new pages, not for following links already on the page."""
+        signature = _tool_signature("navigate_to", url)
+        if blocked := _repeat_guard_result(ctx.deps.tool_tracker, "navigate_to", signature):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.navigate_to(url, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
+        facts = _extract_tool_facts(
+            "navigate_to",
+            result,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"requested_url": url},
+        )
         url_preview = url[:50] + "..." if len(url) > 50 else url
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
@@ -1764,9 +2952,15 @@ NOT for finding text already visible in the snapshot — use click_element for t
             duration_ms=duration_ms,
             url=url,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="navigate_to")
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="navigate_to",
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="take_screenshot")
     async def take_screenshot(ctx: RunContext[WorkerDeps]) -> ToolExecutionResult:
@@ -1797,9 +2991,16 @@ NOT for finding text already visible in the snapshot — use click_element for t
             ok=result.ok,
             duration_ms=duration_ms,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="take_screenshot")
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        facts = {"tool_family": "take_screenshot", "state_changed": False}
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="take_screenshot",
+            signature=_tool_signature("take_screenshot"),
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="execute_js")
     async def execute_js(ctx: RunContext[WorkerDeps], code: str) -> ToolExecutionResult:
@@ -1833,17 +3034,41 @@ NOT for finding text already visible in the snapshot — use click_element for t
             duration_ms=duration_ms,
             code_len=len(code),
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="execute_js")
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        facts = _extract_tool_facts(
+            "execute_js",
+            result,
+            extra={"code_len": len(code)},
+        )
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="execute_js",
+            signature=_tool_signature("execute_js", code),
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
     @agent.tool(name="press_key_combination")
     async def press_key_combination(ctx: RunContext[WorkerDeps], keys: list[str]) -> ToolExecutionResult:
         """Press a keyboard shortcut. Examples: ["Enter"] to submit, ["Control", "C"] to copy, ["Escape"] to dismiss."""
+        normalized_keys = [str(key).strip() for key in keys]
+        signature = _tool_signature("press_key_combination", normalized_keys)
+        if blocked := _repeat_guard_result(ctx.deps.tool_tracker, "press_key_combination", signature):
+            return blocked
         start = time.perf_counter()
+        before_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         result = await semantic.press_key_combination(keys, ctx.deps.tool_context)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        after_url = getattr(ctx.deps.tool_context.page, "url", "") or ""
         keys_str = "+".join(keys)
+        facts = _extract_tool_facts(
+            "press_key_combination",
+            result,
+            before_url=before_url,
+            after_url=after_url,
+            extra={"keys": normalized_keys},
+        )
         _log_tool_header_if_needed(ctx.deps.tool_tracker)
         logger.info(
             _format_tool_log(
@@ -1870,9 +3095,15 @@ NOT for finding text already visible in the snapshot — use click_element for t
             duration_ms=duration_ms,
             keys=keys,
         )
-        if ctx.deps.tool_tracker:
-            ctx.deps.tool_tracker.record(result.ok, tool_name="press_key_combination")
-        return ToolExecutionResult(ok=result.ok, message=result.message)
+        _record_tool_attempt(
+            ctx.deps.tool_tracker,
+            result.ok,
+            tool_name="press_key_combination",
+            signature=signature,
+            message=result.message,
+            facts=facts,
+        )
+        return ToolExecutionResult(ok=result.ok, message=result.message, facts=facts)
 
 async def _normalize_strict(
     ctx: RunContext[WorkerDeps], tool_defs: list[ToolDefinition]
@@ -2637,10 +3868,17 @@ class BrowserAgent:
                         class_sanitize_fallback_tokens=self.agent_config.class_sanitize_fallback_tokens,
                         attr_value_max_len=self.agent_config.snapshot_attr_value_max_len,
                     )
-                    memory_text = _format_memory(self.state.memory, limit=self.agent_config.memory_steps)
+                    memory_text = _format_compact_runtime_context(
+                        self.state.step_trace,
+                        latest_validation=self.state.last_validation_signal,
+                        recovery_attempted=self.state.recovery_attempted,
+                        recovery_reason=self.state.recovery_reason,
+                        blocked_reason=self.state.last_blocked_reason,
+                        window=max(1, self.agent_config.worker_context_steps),
+                    )
                     unified_prompt = (
                         f"Overall goal: {self.agent_config.goal}\n\n"
-                        f"Memory (recent):\n{memory_text}\n\n"
+                        f"Compact runtime state:\n{memory_text}\n\n"
                         f"Filtered useful lines:\n{useful_block}\n\n"
                         f"Diff since prior snapshot:\n{diff_text}\n\n"
                         f"Page snapshot:\n{snapshot_text_unified}\n"
@@ -2743,12 +3981,25 @@ class BrowserAgent:
                         )
                         step_output = unified_result.output
 
-                    # Done-gate: override done=True when tool calls were attempted and none succeeded
-                    if step_output.done and tool_tracker.success_count == 0 and tool_tracker.failure_count > 0:
-                        logger.info("    done-gate: overriding done=True (no successful tool calls)")
-                        step_output = step_output.model_copy(
-                            update={"done": False, "summary": f"[no successful tools] {step_output.summary}"}
-                        )
+                    tool_limit_hit = step_output.summary.startswith("Tool call limit reached")
+                    completion_inputs = _completion_inputs_from_step(
+                        self.state,
+                        validation=self.state.last_validation_signal,
+                        model_done=bool(step_output.done),
+                        completion_evidence=step_output.completion_evidence,
+                        worker_goal=step_output.step_goal,
+                        tool_context=tool_context,
+                        tool_tracker=tool_tracker,
+                        prev_url=prev_url,
+                        tool_limit_hit=tool_limit_hit,
+                    )
+                    completion_decision = decide_completion(completion_inputs)
+                    step_output = _apply_completion_decision(
+                        self.state,
+                        completion_decision,
+                        step_output=step_output,
+                        observable_change=completion_inputs.observable_evidence,
+                    )
 
                     self.state.active_frame_id = tool_context.active_frame_id
                     tool_status = f"{tool_tracker.success_count} ok, {tool_tracker.failure_count} failed"
@@ -2773,7 +4024,11 @@ class BrowserAgent:
                         "diff_summary": diff_text.split("\n")[0] if diff_text else "",
                         "url_changed": prev_url != (getattr(session.page, "url", "") or ""),
                         "tool_calls": tool_tracker.calls_summary(),
+                        "tool_results": tool_tracker.results[-6:],
+                        "blocked_repeats": tool_tracker.blocked_repeats,
                         "tool_limit_hit": tool_limit_hit,
+                        "completion_decision": completion_decision.action,
+                        "blocked_reason": self.state.last_blocked_reason,
                     })
                     logger.debug("step_trace step=%s entries=%s", self.state.step, self.state.step_trace)
 
@@ -2798,13 +4053,13 @@ class BrowserAgent:
                         step=self.state.step,
                         done=bool(step_output.done),
                         duration_ms=int((time.perf_counter() - step_started) * 1000),
-                        **({"stop_reason": "done"} if step_output.done else {}),
+                        **({"stop_reason": completion_decision.stop_reason or "done"} if step_output.done else {}),
                     )
                     step_duration_ms = int((time.perf_counter() - step_started) * 1000)
                     logger.info(f"Step {self.state.step} end {step_duration_ms}ms")
                     prev_snapshot = snapshot
                     if step_output.done:
-                        stop_reason = "done"
+                        stop_reason = completion_decision.stop_reason or "done"
                         break
                     continue
 
@@ -2911,6 +4166,7 @@ class BrowserAgent:
                     logger.info(f"Step {self.state.step} end (skipped — orchestrator error)")
                     prev_snapshot = snapshot
                     continue
+                previous_worker_goal = self.state.last_worker_goal
                 self.state.last_worker_goal = decision.worker_goal
                 logger.info(
                     f"  orchestrator: {orchestrator_duration_ms}ms worker={decision.worker} done={decision.done}"
@@ -2929,8 +4185,42 @@ class BrowserAgent:
                     getattr(decision, "allowed_tools", None),
                 )
                 if decision.done:
-                    stop_reason = "done"
-                    logger.info(f"  orchestrator done: {decision.rationale or 'task complete'}")
+                    completion_inputs = CompletionInputs(
+                        validation=self.state.last_validation_signal,
+                        model_done=True,
+                        completion_evidence=decision.completion_evidence,
+                        successful_tools=0,
+                        same_worker_goal=bool(
+                            decision.worker_goal and decision.worker_goal == previous_worker_goal
+                        ),
+                        dom_changed=_diff_has_observable_change(diff_text),
+                        recovery_attempted=self.state.recovery_attempted,
+                        no_progress_steps=self.state.no_progress_steps,
+                        consecutive_tool_limit_steps=self.state.consecutive_tool_limit_steps,
+                    )
+                    completion_decision = decide_completion(completion_inputs)
+                    self.state.last_completion_decision = completion_decision
+                    if completion_decision.action == "recover_once":
+                        summary = (
+                            f"[recovery required] {decision.rationale or 'Orchestrator marked task complete.'} "
+                            f"({completion_decision.reason})"
+                        )
+                        self.state.recovery_attempted = True
+                        self.state.recovery_reason = completion_decision.reason
+                        self.state.memory.append(f"[step {self.state.step}, 0 ok, 0 failed] {summary}")
+                        self.state.last_summary = self.state.memory[-1]
+                        metrics.emit(
+                            "step_end",
+                            step=self.state.step,
+                            done=False,
+                            duration_ms=int((time.perf_counter() - step_started) * 1000),
+                        )
+                        prev_snapshot = snapshot
+                        continue
+                    if completion_decision.action in {"blocked", "stop_failure"}:
+                        self.state.last_blocked_reason = completion_decision.stop_reason
+                    stop_reason = completion_decision.stop_reason or "done"
+                    logger.info(f"  orchestrator done: {decision.rationale or completion_decision.reason or 'task complete'}")
                     metrics.emit(
                         "step_end",
                         step=self.state.step,
@@ -2968,8 +4258,17 @@ class BrowserAgent:
                 # Build worker cross-step context
                 worker_context = ""
                 if self.state.memory and self.agent_config.worker_context_steps > 0:
-                    recent = self.state.memory[-self.agent_config.worker_context_steps:]
-                    worker_context = "\n\nRecent steps:\n" + "\n".join(f"- {m}" for m in recent)
+                    worker_context = (
+                        "\n\nCompact runtime state:\n"
+                        + _format_compact_runtime_context(
+                            self.state.step_trace,
+                            latest_validation=self.state.last_validation_signal,
+                            recovery_attempted=self.state.recovery_attempted,
+                            recovery_reason=self.state.recovery_reason,
+                            blocked_reason=self.state.last_blocked_reason,
+                            window=max(1, self.agent_config.worker_context_steps),
+                        )
+                    )
                 worker_prompt = (
                     STEP_PROMPT.format(goal=decision.worker_goal)
                     + worker_context
@@ -3052,12 +4351,25 @@ class BrowserAgent:
                     )
                     step_output = worker_result.output
 
-                # Done-gate: override done=True when no tool calls succeeded
-                if step_output.done and tool_tracker.success_count == 0:
-                    logger.info("    done-gate: overriding done=True (no successful tool calls)")
-                    step_output = step_output.model_copy(
-                        update={"done": False, "summary": f"[no successful tools] {step_output.summary}"}
-                    )
+                tool_limit_hit = step_output.summary.startswith("Tool call limit reached")
+                completion_inputs = _completion_inputs_from_step(
+                    self.state,
+                    validation=self.state.last_validation_signal,
+                    model_done=False,
+                    completion_evidence=None,
+                    worker_goal=decision.worker_goal,
+                    tool_context=tool_context,
+                    tool_tracker=tool_tracker,
+                    prev_url=prev_url,
+                    tool_limit_hit=tool_limit_hit,
+                )
+                completion_decision = decide_completion(completion_inputs)
+                step_output = _apply_completion_decision(
+                    self.state,
+                    completion_decision,
+                    step_output=step_output,
+                    observable_change=completion_inputs.observable_evidence,
+                )
                 self.state.active_frame_id = tool_context.active_frame_id
                 tool_status = f"{tool_tracker.success_count} ok, {tool_tracker.failure_count} failed"
                 memory_entry = f"[step {self.state.step}, {tool_status}] {step_output.summary}"
@@ -3071,7 +4383,6 @@ class BrowserAgent:
                 logger.debug("memory step=%s entries=%s", self.state.step, self.state.memory)
 
                 # ── Populate step trace ──
-                tool_limit_hit = step_output.summary.startswith("Tool call limit reached")
                 self.state.step_trace.append({
                     "step": self.state.step,
                     "url": getattr(session.page, "url", "") or "",
@@ -3080,7 +4391,11 @@ class BrowserAgent:
                     "diff_summary": diff_text.split("\n")[0] if diff_text else "",
                     "url_changed": prev_url != (getattr(session.page, "url", "") or ""),
                     "tool_calls": tool_tracker.calls_summary(),
+                    "tool_results": tool_tracker.results[-6:],
+                    "blocked_repeats": tool_tracker.blocked_repeats,
                     "tool_limit_hit": tool_limit_hit,
+                    "completion_decision": completion_decision.action,
+                    "blocked_reason": self.state.last_blocked_reason,
                 })
                 logger.debug("step_trace step=%s entries=%s", self.state.step, self.state.step_trace)
 
@@ -3096,10 +4411,15 @@ class BrowserAgent:
                 metrics.emit(
                     "step_end",
                     step=self.state.step,
-                    done=False,
+                    done=completion_decision.terminal,
                     worker_done=bool(step_output.done),
+                    **({"stop_reason": completion_decision.stop_reason} if completion_decision.terminal else {}),
                     duration_ms=int((time.perf_counter() - step_started) * 1000),
                 )
+                if completion_decision.terminal:
+                    stop_reason = completion_decision.stop_reason
+                    prev_snapshot = snapshot
+                    break
                 if step_output.done:
                     logger.info("    worker done: delegated goal complete; continuing until orchestrator done=true")
                 step_duration_ms = int((time.perf_counter() - step_started) * 1000)

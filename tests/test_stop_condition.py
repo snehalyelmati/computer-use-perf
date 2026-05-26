@@ -97,7 +97,7 @@ async def test_run_does_not_stop_on_worker_done(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(
         agent_mod,
         "build_browser_worker_agent",
-        lambda _model, *, model_settings: orig_build_worker(worker_model, model_settings=model_settings),
+        lambda _model, *, model_settings, **_kwargs: orig_build_worker(worker_model, model_settings=model_settings),
     )
     monkeypatch.setattr(
         agent_mod,

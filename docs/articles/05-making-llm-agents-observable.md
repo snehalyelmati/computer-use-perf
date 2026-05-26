@@ -50,7 +50,7 @@ It is not a perfect replay of dynamic browser state, but it is much better than 
 
 ## Result History
 
-`scripts/generate_results.py` creates `results.md` from run logs and persists history so old runs survive log pruning.
+`scripts/generate_results.py` creates `docs/benchmark-results/external-challenge-results.md` from archived external-challenge run logs and persists history so old runs survive log pruning.
 
 That table is not just presentation. It helps track regressions across commits, providers, models, costs, and stop reasons.
 

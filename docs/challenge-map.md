@@ -1,4 +1,6 @@
-# Browser Navigation Challenge — Complete Map
+# Archived External Challenge Map
+
+This document records the external browser-agent challenge site used during early Zip development. The site may no longer be reliably available, and this map should be treated as archived development history rather than current benchmark documentation. Use the BrowserGym/MiniWoB++ docs and reports for current benchmark work.
 
 ## Overview
 

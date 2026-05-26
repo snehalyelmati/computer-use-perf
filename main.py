@@ -1,4 +1,4 @@
-"""Entrypoint for the general-purpose browser agent."""
+"""Entrypoint for Zip, a lightweight browser-use agent."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _load_task(path: str) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="General-purpose browser agent")
+    parser = argparse.ArgumentParser(description="Zip browser-use agent")
     parser.add_argument("--url", dest="target_url", required=True, help="Target URL")
     parser.add_argument("--task", required=True, help="Path to a markdown file describing the task")
     parser.add_argument(

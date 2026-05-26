@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 import sys
 from typing import Any, cast
 
@@ -10,9 +11,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.agent.context.snapshot import ElementIndex
-from src.agent.core.agent import build_browser_worker_agent, build_orchestrator_agent, WorkerDeps
+from src.agent.config import LLMConfig
+from src.agent.core.agent import (
+    WorkerDeps,
+    build_browser_worker_agent,
+    build_orchestrator_agent,
+    _model_settings,
+    _setup_logging,
+    _teardown_logging,
+)
 from src.agent.metrics import MetricsRecorder
-from src.agent.models.actions import OrchestratorDecision, StepOutput
+from src.agent.models.actions import OrchestratorDecision, SnapshotFilterOutput, StepOutput
 from src.agent.tools.semantic import ToolContext
 
 
@@ -60,10 +69,19 @@ async def test_browser_worker_registers_semantic_tools() -> None:
     tool_names = {t.name for t in params.function_tools}
     assert {
         "click_element",
+        "click_at",
+        "focus_element",
         "find_elements",
         "type_text",
+        "transfer_text",
         "drag_and_drop",
+        "pointer_drag",
+        "set_slider_value",
+        "resize_element",
         "inspect_element",
+        "select_text",
+        "apply_format",
+        "read_live_text",
         "search_page_attributes",
         "scroll",
         "wait",
@@ -74,3 +92,38 @@ async def test_browser_worker_registers_semantic_tools() -> None:
         "execute_js",
         "press_key_combination",
     }.issubset(tool_names)
+
+
+def test_openrouter_settings_do_not_restrict_provider_by_default() -> None:
+    settings = _model_settings(LLMConfig(provider="openrouter"))
+
+    assert "openrouter_provider" not in settings
+
+
+def test_snapshot_filter_output_coerces_common_string_fields() -> None:
+    output = SnapshotFilterOutput(
+        useful_text_lines="1. Select 10/26/2016\n- Submit the form",
+        priority_element_ids="Keep el_a1b2c3d4e5f6, el_111122223333-2, and ignore el_bad",
+    )
+
+    assert output.useful_text_lines == ["Select 10/26/2016", "Submit the form"]
+    assert output.priority_element_ids == ["el_a1b2c3d4e5f6", "el_111122223333-2"]
+
+
+def test_setup_logging_replaces_stale_agent_file_handlers(tmp_path: Path) -> None:
+    logger = logging.getLogger("tests.logging")
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _teardown_logging()
+
+    try:
+        _setup_logging(str(first), level="INFO", color=False)
+        logger.info("first-only")
+        _setup_logging(str(second), level="INFO", color=False)
+        logger.info("second-only")
+    finally:
+        _teardown_logging()
+
+    assert "first-only" in (first / "agent.log").read_text()
+    assert "second-only" not in (first / "agent.log").read_text()
+    assert "second-only" in (second / "agent.log").read_text()

@@ -1,14 +1,14 @@
 # Agent Architecture Options
 
-This document compares the current architecture with five alternative designs for this browser agent. Each section covers how the architecture works mechanically, how it maps to this codebase, what the prompts and data models look like, failure modes, research backing, and trade-offs.
+This is a historical design review from Zip's architecture work. It compares the split Orchestrator/Worker architecture with five alternatives and is useful for understanding design trade-offs, but `docs/architecture.md` is the authoritative description of the current runtime.
 
 ---
 
-## Option A: Current Architecture (Orchestrator + Worker)
+## Option A: Split Orchestrator + Worker Architecture
 
 **Pattern**: Two-agent planner-executor with auxiliary Oracle and Filter agents.
 
-The current design uses four LLM-powered agents in a serial pipeline within each step. The **Orchestrator** is a pure planning agent with zero tools — it receives the full context (goal, memory, diff, oracle hint, pruned snapshot) and produces a `worker_goal` string. The **Worker** is a tool-equipped executor that receives only the `worker_goal`, 3 recent memory entries, useful text lines, and the pruned snapshot, then makes up to 10 sequential tool calls against the browser.
+The split design uses four LLM-powered agents in a serial pipeline within each step. The **Orchestrator** is a pure planning agent with zero tools — it receives the full context (goal, memory, diff, oracle hint, pruned snapshot) and produces a `worker_goal` string. The **Worker** is a tool-equipped executor that receives the delegated goal plus compact recent state, useful text lines, and the pruned snapshot, then makes bounded sequential tool calls against the browser.
 
 ### How It Works
 
@@ -34,7 +34,7 @@ Each step follows a strict sequence:
    ```
    The Orchestrator prompt (`ORCHESTRATOR_PROMPT`) instructs it to "describe the desired outcome, not the method" and to "always reference stable element IDs." These two rules are somewhat in tension — it must be outcome-focused but also specific enough to include element IDs.
 
-7. **Worker**: Receives `STEP_PROMPT.format(goal=worker_goal)` + 3 recent memory entries + useful text lines + pruned snapshot (re-sorted by `query=worker_goal[:600]`). Makes up to 10 sequential tool calls (11 browser tools available: click, hover, type, drag, draw, scroll, wait, watch_for_text, switch_to_iframe, switch_to_main_frame, press_key_combination). Each tool call goes through `semantic.py`, which injects a MutationObserver before the action and returns DOM change feedback. Returns `StepOutput`:
+7. **Worker**: Receives `STEP_PROMPT.format(goal=worker_goal)` + compact recent state + useful text lines + pruned snapshot (re-sorted by `query=worker_goal[:600]`). Makes bounded sequential tool calls from the semantic browser tool set documented in `README.md` and `docs/architecture.md`. Each tool call goes through `semantic.py`, which injects a MutationObserver before the action and returns DOM change feedback. Returns `StepOutput`:
    ```python
    class StepOutput(BaseModel):
        done: bool  # True = sub-goal complete (does NOT stop the run)
@@ -47,18 +47,18 @@ Each step follows a strict sequence:
 
 ### The Handoff Bottleneck
 
-The entire Orchestrator-to-Worker communication is a single `worker_goal` string. The Worker does **not** receive:
-- The diff (what changed since last step)
-- The Oracle hint (diagnostic advice)
+The core Orchestrator-to-Worker communication is a single `worker_goal` string. The Worker does **not** receive the full planning context:
+- Full diff context (what changed since last step)
+- Full Oracle hint (diagnostic advice)
 - The Orchestrator's rationale
-- Full memory (only 3 of 10 entries)
-- The avoid list (only reflected indirectly via pruned snapshot)
+- Full memory
+- The avoid list except as reflected indirectly via the pruned snapshot
 
 This means the Orchestrator must encode all strategic context into a goal string like: "Click the submit button el_abc123 to complete the registration form." Any nuance about what to avoid, what changed, or why this goal was chosen is lost.
 
 ### Failure Modes
 
-- **Orchestrator premature done**: The Orchestrator can declare `done=true` on any step with no validation. If it hallucinates that the goal is complete (e.g., sees a "Success" text that belongs to an ad), the run terminates prematurely.
+- **Orchestrator premature done**: The Orchestrator can propose `done=true` on any step. Completion policy and BrowserGym validation reduce this risk, but weak validation can still stop a run too early.
 - **Goal too large for tool budget**: The Orchestrator sets goals like "Fill in the entire registration form" but the Worker has ~8 effective tool calls (10 request limit includes the initial prompt and final structured output). Complex forms exhaust the budget.
 - **Oracle advice not reaching Worker**: The Oracle says "avoid el_xyz, try el_abc instead" but this advice only reaches the Orchestrator as text. The Orchestrator must translate it into the `worker_goal` string. If the Orchestrator doesn't encode it, the Worker is blind to it.
 - **Filter over-pruning**: The Filter removes elements the Orchestrator/Worker might need. Since pruning is irreversible within a step, over-pruning makes the task impossible for that step.
@@ -294,7 +294,7 @@ flowchart TD
     FILT_CHK -->|Miss| FILTER[[Filter Agent]]
     FILTER --> PRUNE[Build Pruned Snapshot]
 
-    PRUNE --> UNIFIED[[Unified Agent\ngoal + memory + diff + oracle_hint\n+ useful_lines + pruned snapshot\n+ 11 browser tools]]
+    PRUNE --> UNIFIED[[Unified Agent\ngoal + compact state + diff + oracle_hint\n+ useful_lines + pruned snapshot\n+ semantic browser tools]]
     UNIFIED --> PLAN["Agent reasons about\nwhat to do next"]
     PLAN --> ACT[Execute tool calls\nmax 10 requests]
     ACT --> RESULT{StepResult}
