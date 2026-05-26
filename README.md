@@ -41,37 +41,21 @@ This project explores those problems as systems problems: context extraction, ac
 
 The current default runtime is a modular loop. `main.py` builds runtime configuration and calls `BrowserAgent.run()` in `src/agent/core/agent.py`.
 
-```mermaid
-flowchart TD
-    Start([Run]) --> Browser[Launch Playwright Chromium]
-    Browser --> Page[Open target URL]
-    Page --> Step[Step Loop]
+Runtime loop:
 
-    Step --> Settle[Wait for page settlement]
-    Settle --> Handlers[Optional JS handler extraction]
-    Handlers --> Scroll[Optional scroll-container marking]
-    Scroll --> Snapshot[CDP snapshot capture]
-    Snapshot --> Diff[Diff + fingerprints]
-    Diff --> Oracle{Oracle trigger?}
+1. Launch the browser and open the target URL.
+2. Capture page context from handler hints, scroll containers, snapshots, and diffs.
+3. Ask the Oracle for guidance when the agent is due for review or appears stuck.
+4. Filter the snapshot to keep the next prompt compact and high-signal.
+5. Plan and execute the next step through split Orchestrator -> Worker mode or unified mode.
+6. Record feedback, memory, and metrics, then repeat until the task is done.
 
-    Oracle -->|periodic, stuck, or tool-limit loop| OracleAgent[Oracle advisor]
-    Oracle -->|no| Filter
-    OracleAgent --> Filter[Snapshot filter]
-
-    Filter --> Prune[Build pruned snapshot]
-    Prune --> Mode{Unified mode?}
-
-    Mode -->|no| Orchestrator[Orchestrator chooses worker goal]
-    Orchestrator --> Worker[Worker executes semantic tools]
-
-    Mode -->|yes| Unified[Unified agent plans and executes]
-
-    Worker --> Feedback[Mutation feedback + memory + metrics]
-    Unified --> Feedback
-    Feedback --> Done{Done or stop condition?}
-    Done -->|no| Step
-    Done -->|yes| Summary[Write run summary]
-```
+| Stage | What happens |
+| --- | --- |
+| Context | Wait for page settlement, extract handler hints, mark scroll containers, capture a CDP snapshot, and compute diffs. |
+| Guidance | The Oracle reviews progress periodically or when stuck, then the Filter keeps the snapshot compact and high-signal. |
+| Action | Split mode uses Orchestrator -> Worker; unified mode uses one tool-equipped agent. |
+| Feedback | Tool results, mutations, memory, metrics, and summaries feed the next step and final run report. |
 
 Key components:
 
